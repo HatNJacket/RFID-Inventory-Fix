@@ -3,11 +3,13 @@
 A per-package RFID assignment app for Shopify. Scan a package barcode, the app
 looks up the Shopify variant (with your `stock.bin` → `my_fields.bin_location`
 fallback), then scan an RFID tag to bind that physical package to the variant.
-Every warehouse terminal shares one Azure PostgreSQL database.
+Every warehouse terminal shares one Azure SQL database.
 
 - **Frontend:** plain HTML/CSS/JS scan station (works with keyboard/HID scanners)
 - **Backend:** FastAPI
-- **DB:** Azure Database for PostgreSQL (SQLite works locally for quick tests)
+- **DB:** Azure SQL Database via pymssql (SQLite works locally for quick tests).
+  pymssql needs no system ODBC driver — important because Azure's Linux Python
+  images stopped shipping the Microsoft ODBC driver.
 - **Shopify:** GraphQL Admin API, client-credentials token flow
 - **Host:** Azure App Service (Linux), deployed from GitHub
 
@@ -36,13 +38,14 @@ shopify-rfid/
 
 ## Run locally
 
-```bash
-python -m venv .venv
-. .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+No virtual environment on this machine — packages install into global Python,
+and the launcher is `py` (not `python`):
 
-cp .env.example .env            # then fill in your Shopify values
-uvicorn app.main:app --reload
+```powershell
+py -m pip install -r requirements.txt
+
+copy .env.example .env          # then fill in your Shopify values
+py -m uvicorn app.main:app --reload
 ```
 
 Open http://127.0.0.1:8000
@@ -58,8 +61,8 @@ DATABASE_URL=sqlite:///./local.db
 
 Check Shopify credentials from the command line any time:
 
-```bash
-python test_shopify.py
+```powershell
+py test_shopify.py
 ```
 
 ---
@@ -67,16 +70,21 @@ python test_shopify.py
 ## Deploy to Azure
 
 You need two Azure resources: an **App Service** (the web app) and an **Azure
-Database for PostgreSQL Flexible Server**. High-level order:
+SQL Database**. High-level order:
 
-### 1. Create the PostgreSQL Flexible Server
-- Note the admin username, password, server name, and database name.
-- Under **Networking**, allow your App Service to reach it (enable "Allow public
-  access from Azure services" for the simplest start, or configure a private
-  endpoint/VNet for production).
-- Your connection string looks like:
-  `postgresql://USER:PASSWORD@SERVER.postgres.database.azure.com:5432/DBNAME`
-  (the app auto-upgrades `postgresql://` to the psycopg3 driver form).
+### 1. Create the Azure SQL database (on the existing `telcansql` server)
+- Portal → SQL databases → **Create** → pick the existing server `telcansql`,
+  name the new database (e.g. `rfid`). Use the cheapest tier that fits
+  (Basic, or the serverless free offer). A separate database keeps the RFID app
+  fully isolated from TELCAN even though they share the server.
+- Under the **server's** Networking settings, make sure
+  "Allow Azure services and resources to access this server" is enabled so the
+  App Service can reach it.
+- Your connection string for `DATABASE_URL`:
+  `mssql://USERNAME:PASSWORD@telcansql.database.windows.net:1433/rfid`
+  using the server's SQL admin login (the app routes `mssql://` to the pymssql
+  driver automatically). If login fails with a user error, try the older
+  `USERNAME@telcansql` form as the username.
 
 ### 2. Create the App Service (Linux, Python 3.12)
 
@@ -126,13 +134,81 @@ next phase — don't expose the write endpoints publicly before adding that.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET  | `/` | Scan station UI |
+| GET  | `/` | Scan station UI (add `?printer=1` on the printer laptop) |
 | GET  | `/health` | Status + env checks |
-| GET  | `/api/products/by-barcode/{barcode}` | Shopify variant lookup |
+| GET  | `/api/products/by-barcode/{barcode}` | Variant lookup (TELCAN first, Shopify fallback) |
+| GET  | `/api/products/tags?sku=&barcode=` | All RFID tags on file for a product |
 | POST | `/api/rfid-assignments` | Bind a tag to a variant |
 | GET  | `/api/rfid-assignments?q=` | List/search assignments |
 | GET  | `/api/rfid-assignments/{rfid_id}` | One assignment |
 | DELETE | `/api/rfid-assignments/{rfid_id}` | Unassign a tag |
+| POST | `/api/print-jobs` | Queue N labels for a product (one EPC each) |
+| GET  | `/api/print-jobs?status=&ids=` | List/watch print jobs |
+| POST | `/api/print-jobs/claim` | Agent: take pending jobs (X-Agent-Key) |
+| POST | `/api/print-jobs/{id}/complete` | Agent: printed OK → auto-assignment |
+| POST | `/api/print-jobs/{id}/fail` | Agent: report a printer error |
+| POST | `/api/print-jobs/{id}/cancel` | Cancel a still-pending job |
+
+---
+
+## Barcode lookup sources
+
+`BARCODE_LOOKUP` env var controls where scans are answered from:
+
+- `auto` (default) — the TELCAN catalog mirror (`Shopify_Variants` /
+  `Shopify_Products` / `Shopify_Inventory.Bin_Name`) first; falls back to the
+  Shopify API for barcodes TELCAN hasn't synced yet.
+- `db` — TELCAN only. `api` — Shopify API only (the original behavior).
+
+The product card shows which source answered. TELCAN results carry surrogate
+ids (`telcan:<Variant_ID>`), so tag lists are anchored on SKU/barcode — fields
+both sources agree on.
+
+---
+
+## RFID label printing (Zebra)
+
+Flow: scan a barcode → set a quantity → **Print & encode RFID labels**. The
+server queues one job per label, each with a freshly generated 96-bit EPC.
+`print_agent.py` — run only on the laptop connected to the Zebra — claims
+jobs, prints the barcode label and encodes the EPC into the sticker in one
+pass, and reports back; the server then records the tag↔product assignment
+automatically. Printed labels never need a manual tag scan.
+
+**Printer capability matters.** Only Zebra "R" models (ZD621R, ZT411R, …)
+have an RFID encoder. The warehouse ZD220t (ZD22042-T01G00EZ) is a plain
+thermal-transfer barcode printer — it prints on RFID sticker media but cannot
+write the chip, so run the agent with `--no-rfid`: labels print barcode-only,
+no assignment is auto-created, and after applying the sticker you link its
+factory-encoded tag with the normal two-scan flow (scan barcode, scan tag).
+Drop the flag if an R-series printer arrives later — nothing else changes.
+
+On the printer laptop (ZD220t is USB, so use the Windows driver name shown in
+Settings → Printers; needs `py -m pip install pywin32`):
+
+```powershell
+# ZD220t over USB, barcode-only
+py print_agent.py --app https://YOUR-APP.azurewebsites.net --printer-name "ZDesigner ZD220-203dpi ZPL" --no-rfid
+
+# a network R-series printer, full print + encode
+py print_agent.py --app https://YOUR-APP.azurewebsites.net --printer-host 192.168.1.50
+
+# test without a printer — shows the ZPL it would send
+py print_agent.py --app http://127.0.0.1:8000 --dry-run --once
+```
+
+Who sees the Print button:
+
+- Default: only pages opened as `/?printer=1` (bookmark that on the printer
+  laptop).
+- Set `ALLOW_REMOTE_PRINT=true` in App Service settings to show it on every
+  device (iPad included) — jobs queue centrally and the agent prints them, so
+  no other change is needed.
+
+Optionally set `PRINT_AGENT_KEY` (App Service) + `--agent-key` (agent) so only
+your agent can claim jobs. The label layout is the `LABEL_ZPL` template at the
+top of `print_agent.py` — plain ZPL, adjust to your sticker size (preview at
+labelary.com).
 
 ---
 

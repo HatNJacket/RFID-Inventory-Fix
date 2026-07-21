@@ -4,7 +4,7 @@ gunicorn
 requests
 python-dotenv
 sqlalchemy
-psycopg[binary]
+pymssql
 jinja2
 python-multipart
 pydantic

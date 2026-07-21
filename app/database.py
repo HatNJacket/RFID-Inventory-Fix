@@ -1,8 +1,10 @@
 """Database engine and session management.
 
-PostgreSQL on Azure in production. The engine is created lazily so the app
-can still start and serve Shopify lookups even before DATABASE_URL is set
-(useful during Phase 1 local development before you provision PostgreSQL).
+Azure SQL (SQL Server) in production, via pymssql -- chosen over pyodbc
+because it needs no system ODBC driver, which Azure's Linux Python images
+no longer ship. The engine is created lazily so the app can still start and
+serve Shopify lookups even before DATABASE_URL is set (useful during local
+development before the Azure database exists).
 """
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
@@ -19,10 +21,10 @@ _SessionLocal = None
 
 
 def _normalize_url(url: str) -> str:
-    """Azure hands out 'postgresql://'; SQLAlchemy + psycopg3 wants
-    'postgresql+psycopg://'. Normalize so either form works."""
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    """Accept a plain 'mssql://' URL and route it to the pymssql driver.
+    'mssql+pymssql://' and 'sqlite:///' pass through untouched."""
+    if url.startswith("mssql://"):
+        return url.replace("mssql://", "mssql+pymssql://", 1)
     return url
 
 

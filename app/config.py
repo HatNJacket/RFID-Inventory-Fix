@@ -18,9 +18,28 @@ SHOPIFY_STORE = os.getenv("SHOPIFY_STORE")
 SHOPIFY_CLIENT_ID = os.getenv("SHOPIFY_CLIENT_ID")
 SHOPIFY_CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
 
-# Present in production, absent locally until you add PostgreSQL. The app
-# still runs Shopify lookups without it; only assignment storage needs it.
+# Present in production (Azure SQL), absent locally until you want the full
+# loop. The app still runs Shopify lookups without it; only assignment
+# storage needs it. Locally, sqlite:///./local.db works for testing.
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Where barcode lookups go first:
+#   "auto" (default) — TELCAN catalog tables first, Shopify API fallback
+#   "db"             — TELCAN only
+#   "api"            — Shopify API only (the original behavior)
+BARCODE_LOOKUP = os.getenv("BARCODE_LOOKUP", "auto").strip().lower()
+
+# Label printing. Jobs are always queued server-side; this flag controls who
+# sees the Print button. False (default): only pages opened with ?printer=1
+# (bookmark that URL on the printer laptop). True: every device, including
+# the iPad, gets the button — flip it on later, no code changes needed.
+ALLOW_REMOTE_PRINT = os.getenv("ALLOW_REMOTE_PRINT", "false").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+
+# Optional shared secret for the print agent. When set, the agent must send
+# it as an X-Agent-Key header on claim/complete/fail calls.
+PRINT_AGENT_KEY = os.getenv("PRINT_AGENT_KEY")
 
 API_VERSION = "2026-07"
 GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json"

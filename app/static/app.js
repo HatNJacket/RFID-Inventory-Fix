@@ -18,11 +18,25 @@ const el = {
   pSku: document.getElementById("p-sku"),
   pBarcode: document.getElementById("p-barcode"),
   pBin: document.getElementById("p-bin"),
+  pSource: document.getElementById("p-source"),
+  pTagCount: document.getElementById("p-tagcount"),
+  tagsPanel: document.getElementById("tags-panel"),
+  tagsList: document.getElementById("tags-list"),
+  printPanel: document.getElementById("print-panel"),
+  printQty: document.getElementById("print-qty"),
+  printBtn: document.getElementById("print-btn"),
+  printStatus: document.getElementById("print-status"),
   result: document.getElementById("result"),
   reset: document.getElementById("reset"),
   recentList: document.getElementById("recent-list"),
   search: document.getElementById("search"),
 };
+
+// Printing UI shows on the printer station (?printer=1 in the URL) or for
+// everyone when the server flag ALLOW_REMOTE_PRINT is on.
+const printingEnabled =
+  document.body.dataset.remotePrint === "on" ||
+  new URLSearchParams(location.search).has("printer");
 
 // Current product awaiting an RFID tag. Null when we're on step 1.
 let pendingProduct = null;
@@ -46,6 +60,10 @@ function resetStation() {
   el.barcode.value = "";
   el.rfid.value = "";
   el.productCard.hidden = true;
+  el.tagsPanel.hidden = true;
+  el.tagsPanel.open = false;
+  el.printPanel.hidden = true;
+  el.printStatus.textContent = "";
   setResult("", null);
   activate("barcode");
 }
@@ -86,7 +104,108 @@ function showProduct(p) {
   el.pSku.textContent = p.sku || "—";
   el.pBarcode.textContent = p.barcode || "—";
   el.pBin.textContent = p.bin_location || "—";
+  el.pSource.textContent =
+    p.source === "telcan" ? "TELCAN" : p.source === "shopify" ? "Shopify" : "—";
   el.productCard.hidden = false;
+  el.printPanel.hidden = !printingEnabled;
+  loadTags(p);
+}
+
+// --- Tags on file for the scanned product ----------------------------------
+async function loadTags(p) {
+  el.pTagCount.textContent = "…";
+  el.tagsList.innerHTML = "";
+  el.tagsPanel.hidden = true;
+  const params = new URLSearchParams();
+  if (p.sku) params.set("sku", p.sku);
+  if (p.barcode) params.set("barcode", p.barcode);
+  if (![...params].length) {
+    el.pTagCount.textContent = "—";
+    return;
+  }
+  try {
+    const res = await fetch(`/api/products/tags?${params}`);
+    if (!res.ok) {
+      el.pTagCount.textContent = "—";
+      return;
+    }
+    const data = await res.json();
+    el.pTagCount.textContent = String(data.count);
+    if (data.count) {
+      data.assignments.forEach((a) => {
+        const li = document.createElement("li");
+        li.innerHTML = `
+          <span class="recent__epc">${escapeHtml(a.rfid_id)}</span>
+          <span class="recent__meta">${escapeHtml(
+            (a.assigned_at || "").slice(0, 10)
+          )} · ${escapeHtml(a.assigned_by || "")}</span>`;
+        el.tagsList.append(li);
+      });
+      el.tagsPanel.hidden = false;
+    }
+  } catch (err) {
+    el.pTagCount.textContent = "—";
+  }
+}
+
+// --- Print & encode labels -------------------------------------------------
+el.printBtn.addEventListener("click", async () => {
+  if (!pendingProduct) return;
+  const quantity = Math.max(1, Math.min(100, Number(el.printQty.value) || 1));
+  el.printBtn.disabled = true;
+  el.printStatus.textContent = "Queueing…";
+  try {
+    const res = await fetch("/api/print-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ quantity, ...pendingProduct }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      el.printStatus.textContent = body.detail || "Queueing failed.";
+      return;
+    }
+    const data = await res.json();
+    watchPrintJobs(data.jobs.map((j) => j.id));
+  } catch (err) {
+    el.printStatus.textContent = "Network error while queueing.";
+  } finally {
+    el.printBtn.disabled = false;
+  }
+});
+
+// Poll the queued jobs until they all finish (or we give up watching —
+// the agent keeps printing regardless).
+async function watchPrintJobs(ids) {
+  const started = Date.now();
+  const idsParam = ids.join(",");
+  while (Date.now() - started < 120000) {
+    try {
+      const res = await fetch(`/api/print-jobs?ids=${idsParam}`);
+      if (res.ok) {
+        const { jobs } = await res.json();
+        const done = jobs.filter((j) => j.status === "done").length;
+        const failed = jobs.filter((j) => j.status === "error");
+        const waiting = jobs.length - done - failed.length;
+        el.printStatus.textContent = failed.length
+          ? `${done}/${jobs.length} printed, ${failed.length} FAILED: ${
+              failed[0].error || "printer error"
+            }`
+          : waiting
+          ? `Printing… ${done}/${jobs.length}`
+          : `Printed ${done}/${jobs.length} ✓`;
+        if (!waiting) {
+          if (pendingProduct) loadTags(pendingProduct);
+          loadRecent();
+          return;
+        }
+      }
+    } catch (err) {
+      /* transient — keep polling */
+    }
+    await new Promise((r) => setTimeout(r, 2500));
+  }
+  el.printStatus.textContent += " (still queued — agent will print when up)";
 }
 
 // --- Step 2: rfid -> save assignment ---------------------------------------

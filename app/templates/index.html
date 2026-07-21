@@ -6,7 +6,7 @@
   <title>RFID Inventory — Scan Station</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body>
+<body data-remote-print="{{ 'on' if allow_remote_print else 'off' }}">
   <div class="station">
     <header class="station__head">
       <div class="brand">
@@ -53,7 +53,26 @@
           <div><dt>SKU</dt><dd id="p-sku">—</dd></div>
           <div><dt>Barcode</dt><dd id="p-barcode">—</dd></div>
           <div><dt>Bin</dt><dd id="p-bin" class="product__bin">—</dd></div>
+          <div><dt>Source</dt><dd id="p-source">—</dd></div>
+          <div><dt>Tags on file</dt><dd id="p-tagcount">—</dd></div>
         </dl>
+
+        <!-- Existing tags for this product -->
+        <details class="tags" id="tags-panel" hidden>
+          <summary class="tags__summary">Show tags</summary>
+          <ul class="tags__list" id="tags-list"></ul>
+        </details>
+
+        <!-- Print & encode (visible on the printer station, or everywhere
+             when ALLOW_REMOTE_PRINT is on) -->
+        <div class="print" id="print-panel" hidden>
+          <label class="print__label" for="print-qty">Labels</label>
+          <input id="print-qty" class="print__qty" type="number" min="1" max="100" value="1" />
+          <button class="print__btn" id="print-btn" type="button">
+            Print &amp; encode RFID labels
+          </button>
+          <span class="print__status" id="print-status"></span>
+        </div>
       </section>
 
       <!-- STEP 2: rfid -->
