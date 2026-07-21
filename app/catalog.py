@@ -12,7 +12,9 @@ Read-only: this module only ever SELECTs from the mirror tables.
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-# Bin resolution mirrors the spirit of the Shopify metafield fallback:
+# Matches the scanned/typed term against barcode first, SKU second — some
+# products have bad or missing barcodes, so operators can type the SKU into
+# the same field. Bin resolution mirrors the Shopify metafield fallback:
 # Shopify_Inventory.Bin_Name when populated, else "No bin assigned".
 _LOOKUP_SQL = text(
     """
@@ -33,7 +35,8 @@ _LOOKUP_SQL = text(
     LEFT JOIN dbo.Shopify_Inventory i
            ON i.Handle_ID = v.Handle_ID
           AND i.Variant_SKU = v.Variant_SKU
-    WHERE v.Variant_Barcode = :barcode
+    WHERE v.Variant_Barcode = :term OR v.Variant_SKU = :term
+    ORDER BY CASE WHEN v.Variant_Barcode = :term THEN 0 ELSE 1 END
     """
 )
 
@@ -49,10 +52,10 @@ def _variant_title(row) -> str | None:
     return None if (not title or title == "Default Title") else title
 
 
-def lookup_barcode(session: Session, barcode: str) -> dict | None:
-    """Look up a variant by barcode in TELCAN. Returns the same flat dict
-    shape as shopify.lookup_barcode (plus source='telcan'), or None."""
-    row = session.execute(_LOOKUP_SQL, {"barcode": barcode}).first()
+def lookup_barcode(session: Session, term: str) -> dict | None:
+    """Look up a variant by barcode or SKU in TELCAN. Returns the same flat
+    dict shape as shopify.lookup_barcode (plus source='telcan'), or None."""
+    row = session.execute(_LOOKUP_SQL, {"term": term}).first()
     if row is None:
         return None
 

@@ -150,7 +150,8 @@ def _lookup_api(barcode: str) -> dict | None:
     dependencies=[Depends(require_user)],
 )
 def product_by_barcode(barcode: str):
-    """Barcode -> product. Source order is config.BARCODE_LOOKUP:
+    """Barcode-or-SKU -> product (bad/missing barcodes happen, so the same
+    field accepts a typed SKU). Source order is config.BARCODE_LOOKUP:
     auto = TELCAN first, Shopify API fallback; or force 'db' / 'api'."""
     barcode = barcode.strip()
     mode = config.BARCODE_LOOKUP
@@ -195,7 +196,7 @@ def product_by_barcode(barcode: str):
         raise HTTPException(
             500, "Neither the database nor Shopify credentials are configured."
         )
-    raise HTTPException(404, "No product found for that barcode.")
+    raise HTTPException(404, "No product found for that barcode or SKU.")
 
 
 @app.get("/api/products/tags", dependencies=[Depends(require_user)])

@@ -131,14 +131,21 @@ query FindVariant($search: String!) {
 """
 
 
-def lookup_barcode(barcode: str) -> dict | None:
-    """Look up a variant by barcode. Returns a flat dict or None if not found.
+def lookup_barcode(term: str) -> dict | None:
+    """Look up a variant by barcode — or by SKU when the barcode search
+    misses, since some products have bad or missing barcodes. Returns a
+    flat dict or None if not found.
 
     The bin resolution order matches your terminal script exactly:
     variant stock.bin -> product my_fields.bin_location -> "No bin assigned".
     """
-    data = query_shopify(_FIND_VARIANT_QUERY, {"search": f"barcode:{barcode}"})
-    nodes = data["productVariants"]["nodes"]
+    quoted = term.replace('"', "")  # SKUs can contain spaces; quote the query
+    nodes = None
+    for search in (f'barcode:"{quoted}"', f'sku:"{quoted}"'):
+        data = query_shopify(_FIND_VARIANT_QUERY, {"search": search})
+        nodes = data["productVariants"]["nodes"]
+        if nodes:
+            break
     if not nodes:
         return None
 

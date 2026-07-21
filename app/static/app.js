@@ -130,7 +130,7 @@ el.barcode.addEventListener("keydown", async (event) => {
       `/api/products/by-barcode/${encodeURIComponent(barcode)}`
     );
     if (res.status === 404) {
-      setResult("No product found for that barcode.", "err");
+      setResult("No product found for that barcode or SKU.", "err");
       el.barcode.select();
       return;
     }
