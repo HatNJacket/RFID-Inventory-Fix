@@ -138,6 +138,19 @@ def product_by_barcode(barcode: str):
         try:
             product = _lookup_db(barcode)
             if product is not None:
+                # TELCAN's Bin_Name is often empty; the authoritative bins
+                # live in Shopify metafields (variant stock.bin and product
+                # my_fields.bin_location / "EasyScan Product Bin Location").
+                # Enrich from the API whenever TELCAN has no bin.
+                if product.get("bin_location") in (None, "", "No bin assigned") and api_ok:
+                    try:
+                        api_product = shopify.lookup_barcode(barcode)
+                        if api_product and api_product.get("bin_location") not in (
+                            None, "", "No bin assigned"
+                        ):
+                            product["bin_location"] = api_product["bin_location"]
+                    except RuntimeError as error:
+                        logger.warning("bin enrichment failed: %s", error)
                 return product
         except Exception as error:  # DB down/misconfigured -> try the API
             logger.warning("TELCAN lookup failed: %s", error)
