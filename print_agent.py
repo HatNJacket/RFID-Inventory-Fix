@@ -68,7 +68,7 @@ LABEL_ZPL = """^XA
 
 # Mode A (automatic) makes the printer pick the densest Code 128 encoding,
 # which is what _code128_width_dots models — required for true centering.
-BARCODE_LINE = "^FO{bx},88^BY2,3,80^BCN,80,Y,N,N,A^FD{barcode}^FS\n"
+BARCODE_LINE = "^FO{bx},88^BY{module},3,80^BCN,80,Y,N,N,A^FD{barcode}^FS\n"
 
 # Prepended only for RFID-encoding printers: auto tag setup + write the EPC.
 RFID_ZPL = "^RS8\n^RFW,H^FD{epc}^FS\n"
@@ -125,10 +125,21 @@ def build_zpl(job: dict, encode_rfid: bool,
 
     pw, ll = label_dots(width_in, height_in)
     barcode = clean(job.get("barcode"), fallback="")
+    if not barcode:
+        # No barcode on file: encode the SKU instead — the app's scan field
+        # accepts SKUs, so scanning this label still resolves the product.
+        barcode = clean(job.get("sku"), fallback="")
     barcode_line = ""
     if barcode:
-        bx = max(0, (pw - _code128_width_dots(barcode)) // 2)
-        barcode_line = BARCODE_LINE.format(bx=bx, barcode=barcode)
+        # Prefer 2-dot modules; long codes (like alphanumeric SKUs) drop to
+        # 1-dot so they still fit with quiet zones inside the label width.
+        module = 2
+        width = _code128_width_dots(barcode, module)
+        if width > pw - 24:
+            module = 1
+            width = _code128_width_dots(barcode, module)
+        bx = max(2, (pw - width) // 2)
+        barcode_line = BARCODE_LINE.format(bx=bx, barcode=barcode, module=module)
     return LABEL_ZPL.format(
         rfid_setup=RFID_ZPL.format(epc=job["epc"]) if encode_rfid else "",
         pw=pw,
