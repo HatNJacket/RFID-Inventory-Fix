@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RFID Inventory — Scan Station</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  {% if app_bridge_key %}
+  <!-- Loaded only inside Shopify admin; authenticates API calls there. -->
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="{{ app_bridge_key }}"></script>
+  {% endif %}
 </head>
 <body data-remote-print="{{ 'on' if allow_remote_print else 'off' }}">
   <div class="station">
@@ -22,10 +26,21 @@
         {% if not db_ready %}
         <span class="pill pill--warn">No database — assignments won't save</span>
         {% endif %}
+        <select class="operator" id="operator" title="Who's using the station">
+          <option value="">Who's scanning?</option>
+          {% for name in operators %}
+          <option value="{{ name }}">{{ name }}</option>
+          {% endfor %}
+        </select>
       </div>
     </header>
 
-    <main class="flow">
+    <nav class="tabs" role="tablist">
+      <button class="tabs__tab tabs__tab--active" id="tab-btn-scan" data-tab="scan" role="tab">Scan station</button>
+      <button class="tabs__tab" id="tab-btn-inventory" data-tab="inventory" role="tab">Inventory</button>
+    </nav>
+
+    <main class="flow" id="tab-scan">
       <!-- STEP 1: barcode -->
       <section class="step step--active" id="step-barcode" data-step="barcode">
         <div class="step__index">1</div>
@@ -53,7 +68,7 @@
           <div><dt>SKU</dt><dd id="p-sku">—</dd></div>
           <div><dt>Barcode</dt><dd id="p-barcode">—</dd></div>
           <div><dt>Bin</dt><dd id="p-bin" class="product__bin">—</dd></div>
-          <div><dt>Source</dt><dd id="p-source">—</dd></div>
+          <div><dt>Data source</dt><dd id="p-source">—</dd></div>
           <div><dt>Tags on file</dt><dd id="p-tagcount">—</dd></div>
         </dl>
 
@@ -100,13 +115,38 @@
       <button class="reset" id="reset" type="button">Reset / new package (Esc)</button>
     </main>
 
-    <footer class="recent">
+    <footer class="recent" id="scan-footer">
       <div class="recent__head">
         <h2>Recent assignments</h2>
         <input id="search" class="recent__search" type="search" placeholder="Search EPC, SKU, product…" autocomplete="off" />
       </div>
       <ul class="recent__list" id="recent-list"></ul>
     </footer>
+
+    <!-- Inventory tab -->
+    <section class="inventory" id="tab-inventory" hidden>
+      <div class="recent__head">
+        <h2>Products in the RFID system</h2>
+        <input id="inv-search" class="recent__search" type="search" placeholder="Filter by product, SKU, bin…" autocomplete="off" />
+      </div>
+      <div class="inventory__scroll">
+        <table class="inventory__table">
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>SKU</th>
+              <th>Bin</th>
+              <th class="num">Tags</th>
+              <th class="num">Shopify qty</th>
+              <th>Last tag added</th>
+            </tr>
+          </thead>
+          <tbody id="inv-body">
+            <tr><td colspan="6" class="inventory__empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </div>
 
   <script src="/static/app.js"></script>

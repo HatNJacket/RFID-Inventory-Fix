@@ -41,6 +41,18 @@ ALLOW_REMOTE_PRINT = os.getenv("ALLOW_REMOTE_PRINT", "false").strip().lower() in
 # it as an X-Agent-Key header on claim/complete/fail calls.
 PRINT_AGENT_KEY = os.getenv("PRINT_AGENT_KEY")
 
+# Access control for everything else. When set, every page/API request must
+# carry this key (X-Station-Key header, or ?key= once in the URL) OR a valid
+# Shopify session token (embedded admin use). Unset = open, for local dev.
+STATION_KEY = os.getenv("STATION_KEY")
+
+# Who can be picked in the UI's operator dropdown, comma-separated.
+OPERATORS = [
+    name.strip()
+    for name in os.getenv("OPERATORS", "Steve,Matt,Clay,Nick").split(",")
+    if name.strip()
+]
+
 API_VERSION = "2026-07"
 GRAPHQL_URL = f"https://{SHOPIFY_STORE}/admin/api/{API_VERSION}/graphql.json"
 ACCESS_TOKEN_URL = f"https://{SHOPIFY_STORE}/admin/oauth/access_token"

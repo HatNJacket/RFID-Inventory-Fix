@@ -17,12 +17,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import or_, select
+from sqlalchemy import bindparam, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
 from app import catalog, config, shopify
+from app.auth import require_user
 from app.database import (
     DatabaseNotConfigured,
     database_configured,
@@ -48,6 +49,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RFID Inventory", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+
+@app.middleware("http")
+async def frame_ancestors_for_shopify(request: Request, call_next):
+    """Allow the page to be iframed by Shopify admin (embedded app) and
+    nothing else."""
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Content-Security-Policy"] = (
+            "frame-ancestors https://admin.shopify.com https://*.myshopify.com"
+        )
+    return response
 
 
 @app.exception_handler(DatabaseNotConfigured)
@@ -95,6 +108,14 @@ def index(request: Request):
             "missing_env": missing,
             "db_ready": database_configured(),
             "allow_remote_print": config.ALLOW_REMOTE_PRINT,
+            "operators": config.OPERATORS,
+            # App Bridge only when loaded inside Shopify admin (it adds a
+            # 'host' query param); the script is inert/broken outside it.
+            "app_bridge_key": (
+                config.SHOPIFY_CLIENT_ID
+                if request.query_params.get("host")
+                else None
+            ),
         },
     )
 
@@ -124,7 +145,10 @@ def _lookup_api(barcode: str) -> dict | None:
     return product
 
 
-@app.get("/api/products/by-barcode/{barcode}")
+@app.get(
+    "/api/products/by-barcode/{barcode}",
+    dependencies=[Depends(require_user)],
+)
 def product_by_barcode(barcode: str):
     """Barcode -> product. Source order is config.BARCODE_LOOKUP:
     auto = TELCAN first, Shopify API fallback; or force 'db' / 'api'."""
@@ -174,7 +198,7 @@ def product_by_barcode(barcode: str):
     raise HTTPException(404, "No product found for that barcode.")
 
 
-@app.get("/api/products/tags")
+@app.get("/api/products/tags", dependencies=[Depends(require_user)])
 def tags_for_product(
     sku: str | None = None,
     barcode: str | None = None,
@@ -199,7 +223,11 @@ def tags_for_product(
 
 
 # ---------------------------------------------------------- assignment API ---
-@app.post("/api/rfid-assignments", status_code=201)
+@app.post(
+    "/api/rfid-assignments",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
 def create_assignment(
     payload: AssignmentIn, session: Session = Depends(get_session)
 ):
@@ -218,7 +246,7 @@ def create_assignment(
     return assignment.as_dict()
 
 
-@app.get("/api/rfid-assignments")
+@app.get("/api/rfid-assignments", dependencies=[Depends(require_user)])
 def list_assignments(
     q: str | None = None,
     limit: int = 100,
@@ -242,7 +270,9 @@ def list_assignments(
     return {"count": len(rows), "assignments": [r.as_dict() for r in rows]}
 
 
-@app.get("/api/rfid-assignments/{rfid_id}")
+@app.get(
+    "/api/rfid-assignments/{rfid_id}", dependencies=[Depends(require_user)]
+)
 def get_assignment(rfid_id: str, session: Session = Depends(get_session)):
     row = session.scalar(
         select(RfidAssignment).where(RfidAssignment.rfid_id == rfid_id.strip())
@@ -252,7 +282,11 @@ def get_assignment(rfid_id: str, session: Session = Depends(get_session)):
     return row.as_dict()
 
 
-@app.delete("/api/rfid-assignments/{rfid_id}", status_code=204)
+@app.delete(
+    "/api/rfid-assignments/{rfid_id}",
+    status_code=204,
+    dependencies=[Depends(require_user)],
+)
 def unassign(rfid_id: str, session: Session = Depends(get_session)):
     row = session.scalar(
         select(RfidAssignment).where(RfidAssignment.rfid_id == rfid_id.strip())
@@ -299,7 +333,9 @@ class PrintJobIn(BaseModel):
         return v.strip()
 
 
-@app.post("/api/print-jobs", status_code=201)
+@app.post(
+    "/api/print-jobs", status_code=201, dependencies=[Depends(require_user)]
+)
 def create_print_jobs(
     payload: PrintJobIn, session: Session = Depends(get_session)
 ):
@@ -316,7 +352,7 @@ def create_print_jobs(
     return {"count": len(jobs), "jobs": [j.as_dict() for j in jobs]}
 
 
-@app.get("/api/print-jobs")
+@app.get("/api/print-jobs", dependencies=[Depends(require_user)])
 def list_print_jobs(
     status: str | None = None,
     ids: str | None = None,
@@ -425,7 +461,65 @@ def fail_print_job(
     return job.as_dict()
 
 
-@app.post("/api/print-jobs/{job_id}/cancel")
+# -------------------------------------------------------- inventory view ---
+@app.get("/api/inventory/summary", dependencies=[Depends(require_user)])
+def inventory_summary(session: Session = Depends(get_session)):
+    """One row per product in the RFID system: identity, bin, tag count,
+    newest tag date — plus current Shopify quantity from the TELCAN mirror
+    when available, so tag counts can be eyeballed against stock levels."""
+    rows = session.execute(
+        select(
+            RfidAssignment.sku,
+            RfidAssignment.barcode,
+            func.max(RfidAssignment.product_title).label("product_title"),
+            func.max(RfidAssignment.variant_title).label("variant_title"),
+            func.max(RfidAssignment.bin_location).label("bin_location"),
+            func.count().label("tag_count"),
+            func.max(RfidAssignment.assigned_at).label("last_assigned_at"),
+        ).group_by(RfidAssignment.sku, RfidAssignment.barcode)
+    ).all()
+
+    products = [
+        {
+            "sku": r.sku,
+            "barcode": r.barcode,
+            "product_title": r.product_title,
+            "variant_title": r.variant_title,
+            "bin_location": r.bin_location,
+            "tag_count": r.tag_count,
+            "last_assigned_at": (
+                r.last_assigned_at.isoformat() if r.last_assigned_at else None
+            ),
+            "shopify_qty": None,
+        }
+        for r in rows
+    ]
+    products.sort(key=lambda p: p["last_assigned_at"] or "", reverse=True)
+
+    # Enrich with live stock counts from the TELCAN catalog mirror.
+    skus = [p["sku"] for p in products if p["sku"]]
+    if skus and session.get_bind().dialect.name == "mssql":
+        try:
+            qty_rows = session.execute(
+                text(
+                    "SELECT Variant_SKU, MAX(Variant_Inventory_Qty) AS qty "
+                    "FROM dbo.Shopify_Variants "
+                    "WHERE Variant_SKU IN :skus GROUP BY Variant_SKU"
+                ).bindparams(bindparam("skus", expanding=True)),
+                {"skus": skus},
+            ).all()
+            qty_by_sku = {r.Variant_SKU: r.qty for r in qty_rows}
+            for p in products:
+                p["shopify_qty"] = qty_by_sku.get(p["sku"])
+        except Exception as error:
+            logger.warning("inventory qty enrichment failed: %s", error)
+
+    return {"count": len(products), "products": products}
+
+
+@app.post(
+    "/api/print-jobs/{job_id}/cancel", dependencies=[Depends(require_user)]
+)
 def cancel_print_job(job_id: int, session: Session = Depends(get_session)):
     job = session.get(PrintJob, job_id)
     if job is None:

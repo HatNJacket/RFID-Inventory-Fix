@@ -92,10 +92,14 @@ def label_dots(width_in: float, height_in: float) -> tuple[int, int]:
 
 
 def _code128_width_dots(data: str, module: int = 2) -> int:
-    """Printed width of a Code 128 barcode, so it can be centered.
-    Digit-only even-length data packs two digits per symbol (subset C)."""
+    """Printed width of a Code 128 barcode (mode A auto-encoding), so it
+    can be centered. Digit pairs pack into subset-C symbols; odd-length
+    numbers spend one extra symbol switching subsets for the last digit."""
     n = len(data)
-    symbols = n // 2 if (n and data.isdigit() and n % 2 == 0) else n
+    if n and data.isdigit():
+        symbols = n // 2 if n % 2 == 0 else (n - 1) // 2 + 2
+    else:
+        symbols = n
     return (11 * (symbols + 2) + 13) * module  # start+data+check, then stop
 
 

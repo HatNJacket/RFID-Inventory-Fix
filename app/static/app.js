@@ -38,6 +38,56 @@ const printingEnabled =
   document.body.dataset.remotePrint === "on" ||
   new URLSearchParams(location.search).has("printer");
 
+// --- Access + identity ------------------------------------------------------
+// Station key: captured once from a ?key=... link, remembered, then sent as
+// a header on every API call. Inside Shopify admin, App Bridge injects its
+// own Authorization header instead, so both paths work through apiFetch.
+const urlParams = new URLSearchParams(location.search);
+if (urlParams.get("key")) {
+  localStorage.setItem("stationKey", urlParams.get("key"));
+}
+const stationKey = localStorage.getItem("stationKey");
+
+function apiFetch(url, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (stationKey) headers["X-Station-Key"] = stationKey;
+  return fetch(url, { ...opts, headers });
+}
+
+// Operator: who is physically using the station. Persisted per device and
+// stamped onto every assignment and print job.
+const operatorEl = document.getElementById("operator");
+operatorEl.value = localStorage.getItem("operator") || "";
+operatorEl.addEventListener("change", () => {
+  localStorage.setItem("operator", operatorEl.value);
+});
+
+function requireOperator() {
+  if (operatorEl.value) return operatorEl.value;
+  setResult("Pick who's scanning (top right) first.", "err");
+  operatorEl.focus();
+  return null;
+}
+
+// --- Tabs -------------------------------------------------------------------
+const tabScan = [
+  document.getElementById("tab-scan"),
+  document.getElementById("scan-footer"),
+];
+const tabInventory = document.getElementById("tab-inventory");
+document.querySelectorAll(".tabs__tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tabs__tab").forEach((b) =>
+      b.classList.toggle("tabs__tab--active", b === btn)
+    );
+    const showScan = btn.dataset.tab === "scan";
+    tabScan.forEach((el) => (el.hidden = !showScan));
+    tabInventory.hidden = showScan;
+    if (!showScan) loadInventory();
+    else el.barcode.focus();
+  });
+});
+
 // Current product awaiting an RFID tag. Null when we're on step 1.
 let pendingProduct = null;
 
@@ -76,7 +126,7 @@ el.barcode.addEventListener("keydown", async (event) => {
 
   setResult("Looking up product…", "busy");
   try {
-    const res = await fetch(
+    const res = await apiFetch(
       `/api/products/by-barcode/${encodeURIComponent(barcode)}`
     );
     if (res.status === 404) {
@@ -124,7 +174,7 @@ async function loadTags(p) {
     return;
   }
   try {
-    const res = await fetch(`/api/products/tags?${params}`);
+    const res = await apiFetch(`/api/products/tags?${params}`);
     if (!res.ok) {
       el.pTagCount.textContent = "—";
       return;
@@ -151,14 +201,20 @@ async function loadTags(p) {
 // --- Print & encode labels -------------------------------------------------
 el.printBtn.addEventListener("click", async () => {
   if (!pendingProduct) return;
+  const operator = requireOperator();
+  if (!operator) return;
   const quantity = Math.max(1, Math.min(100, Number(el.printQty.value) || 1));
   el.printBtn.disabled = true;
   el.printStatus.textContent = "Queueing…";
   try {
-    const res = await fetch("/api/print-jobs", {
+    const res = await apiFetch("/api/print-jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ quantity, ...pendingProduct }),
+      body: JSON.stringify({
+        quantity,
+        ...pendingProduct,
+        requested_by: operator,
+      }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -181,7 +237,7 @@ async function watchPrintJobs(ids) {
   const idsParam = ids.join(",");
   while (Date.now() - started < 120000) {
     try {
-      const res = await fetch(`/api/print-jobs?ids=${idsParam}`);
+      const res = await apiFetch(`/api/print-jobs?ids=${idsParam}`);
       if (res.ok) {
         const { jobs } = await res.json();
         const done = jobs.filter((j) => j.status === "done").length;
@@ -213,13 +269,19 @@ el.rfid.addEventListener("keydown", async (event) => {
   if (event.key !== "Enter") return;
   const rfid = el.rfid.value.trim();
   if (!rfid || !pendingProduct) return;
+  const operator = requireOperator();
+  if (!operator) return;
 
   setResult("Saving assignment…", "busy");
   try {
-    const res = await fetch("/api/rfid-assignments", {
+    const res = await apiFetch("/api/rfid-assignments", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rfid_id: rfid, ...pendingProduct }),
+      body: JSON.stringify({
+        rfid_id: rfid,
+        ...pendingProduct,
+        assigned_by: operator,
+      }),
     });
     if (res.status === 409) {
       setResult(`Tag ${rfid} is already assigned.`, "err");
@@ -268,7 +330,7 @@ async function loadRecent(query = "") {
     const url = query
       ? `/api/rfid-assignments?q=${encodeURIComponent(query)}`
       : "/api/rfid-assignments";
-    const res = await fetch(url);
+    const res = await apiFetch(url);
     if (!res.ok) return;
     const data = await res.json();
     el.recentList.innerHTML = "";
@@ -285,11 +347,80 @@ async function loadRecent(query = "") {
 
 async function unassign(rfid, li) {
   if (!confirm(`Unassign tag ${rfid}?`)) return;
-  const res = await fetch(`/api/rfid-assignments/${encodeURIComponent(rfid)}`, {
-    method: "DELETE",
-  });
+  const res = await apiFetch(
+    `/api/rfid-assignments/${encodeURIComponent(rfid)}`,
+    { method: "DELETE" }
+  );
   if (res.ok) li.remove();
 }
+
+// --- Inventory tab ----------------------------------------------------------
+let inventoryRows = [];
+
+async function loadInventory() {
+  const body = document.getElementById("inv-body");
+  try {
+    const res = await apiFetch("/api/inventory/summary");
+    if (!res.ok) {
+      body.innerHTML =
+        '<tr><td colspan="6" class="inventory__empty">Could not load inventory.</td></tr>';
+      return;
+    }
+    inventoryRows = (await res.json()).products;
+    renderInventory();
+  } catch (err) {
+    body.innerHTML =
+      '<tr><td colspan="6" class="inventory__empty">Network error.</td></tr>';
+  }
+}
+
+function renderInventory() {
+  const body = document.getElementById("inv-body");
+  const q = document.getElementById("inv-search").value.trim().toLowerCase();
+  const rows = q
+    ? inventoryRows.filter((p) =>
+        [p.product_title, p.variant_title, p.sku, p.barcode, p.bin_location]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(q))
+      )
+    : inventoryRows;
+  if (!rows.length) {
+    body.innerHTML =
+      '<tr><td colspan="6" class="inventory__empty">No products yet — assign or print a first tag.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows
+    .map((p) => {
+      const title =
+        escapeHtml(p.product_title || "") +
+        (p.variant_title
+          ? ` <span class="inventory__variant">(${escapeHtml(p.variant_title)})</span>`
+          : "");
+      const when = p.last_assigned_at
+        ? new Date(p.last_assigned_at).toLocaleString(undefined, {
+            dateStyle: "medium",
+            timeStyle: "short",
+          })
+        : "—";
+      return `<tr>
+        <td>${title}</td>
+        <td class="mono">${escapeHtml(p.sku || "—")}</td>
+        <td>${p.bin_location && p.bin_location !== "No bin assigned"
+          ? `<span class="inventory__bin">${escapeHtml(p.bin_location)}</span>`
+          : "—"}</td>
+        <td class="num">${p.tag_count}</td>
+        <td class="num">${p.shopify_qty ?? "—"}</td>
+        <td>${escapeHtml(when)}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+let invSearchTimer;
+document.getElementById("inv-search").addEventListener("input", () => {
+  clearTimeout(invSearchTimer);
+  invSearchTimer = setTimeout(renderInventory, 150);
+});
 
 let searchTimer;
 el.search.addEventListener("input", () => {
