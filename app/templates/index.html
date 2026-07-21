@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RFID Inventory — Scan Station</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="station">
+    <header class="station__head">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true"></span>
+        <span class="brand__name">RFID Inventory</span>
+      </div>
+      <div class="status" id="status-strip">
+        {% if not shopify_ready %}
+        <span class="pill pill--bad">Shopify not configured: {{ missing_env|join(', ') }}</span>
+        {% else %}
+        <span class="pill pill--ok">Shopify connected</span>
+        {% endif %}
+        {% if not db_ready %}
+        <span class="pill pill--warn">No database — assignments won't save</span>
+        {% endif %}
+      </div>
+    </header>
+
+    <main class="flow">
+      <!-- STEP 1: barcode -->
+      <section class="step step--active" id="step-barcode" data-step="barcode">
+        <div class="step__index">1</div>
+        <div class="step__body">
+          <label class="step__label" for="barcode">Scan package barcode</label>
+          <input
+            id="barcode"
+            class="scan"
+            type="text"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="Waiting for barcode…"
+            aria-describedby="barcode-hint"
+          />
+          <p class="step__hint" id="barcode-hint">The scanner types here and presses Enter.</p>
+        </div>
+      </section>
+
+      <!-- Product confirmation -->
+      <section class="product" id="product-card" hidden>
+        <div class="product__title" id="p-title">—</div>
+        <dl class="product__grid">
+          <div><dt>Variant</dt><dd id="p-variant">—</dd></div>
+          <div><dt>SKU</dt><dd id="p-sku">—</dd></div>
+          <div><dt>Barcode</dt><dd id="p-barcode">—</dd></div>
+          <div><dt>Bin</dt><dd id="p-bin" class="product__bin">—</dd></div>
+        </dl>
+      </section>
+
+      <!-- STEP 2: rfid -->
+      <section class="step" id="step-rfid" data-step="rfid">
+        <div class="step__index">2</div>
+        <div class="step__body">
+          <label class="step__label" for="rfid">Scan RFID tag</label>
+          <input
+            id="rfid"
+            class="scan"
+            type="text"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="Confirm product above, then scan the tag…"
+            disabled
+          />
+          <p class="step__hint">One tag per physical package.</p>
+        </div>
+      </section>
+
+      <!-- Result line -->
+      <div class="result" id="result" role="status" aria-live="polite"></div>
+
+      <button class="reset" id="reset" type="button">Reset / new package (Esc)</button>
+    </main>
+
+    <footer class="recent">
+      <div class="recent__head">
+        <h2>Recent assignments</h2>
+        <input id="search" class="recent__search" type="search" placeholder="Search EPC, SKU, product…" autocomplete="off" />
+      </div>
+      <ul class="recent__list" id="recent-list"></ul>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
