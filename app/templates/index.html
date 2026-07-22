@@ -26,6 +26,29 @@
         {% if not db_ready %}
         <span class="pill pill--warn">No database — assignments won't save</span>
         {% endif %}
+        <details class="settings" id="settings-menu">
+          <summary>⚙ Settings</summary>
+          <div class="settings__panel">
+            <label class="settings__item">
+              <input type="checkbox" id="auto-reset" />
+              <span>Auto-reset after tag scan
+                <span class="settings__hint">Return to the barcode step after each tag saves (one tag per product). Off = stay on the product for bulk tagging.</span>
+              </span>
+            </label>
+            <label class="settings__item" id="auto-print-item">
+              <input type="checkbox" id="auto-print" />
+              <span>Auto-print label on scan
+                <span class="settings__hint">Prints one label instantly when scanning an Astronomik serial with a confirmed name.</span>
+              </span>
+            </label>
+            <label class="settings__item" id="require-bin-item">
+              <input type="checkbox" id="require-bin" />
+              <span>Skip auto-print without a bin
+                <span class="settings__hint">Hold the label when the product has no bin assigned — set the bin (click its chip) and the label prints.</span>
+              </span>
+            </label>
+          </div>
+        </details>
         <select class="operator" id="operator" title="Who's using the station">
           <option value="">Who's scanning?</option>
           {% for name in operators %}
@@ -57,10 +80,6 @@
             aria-describedby="barcode-hint"
           />
           <p class="step__hint" id="barcode-hint">The scanner types here and presses Enter. Bad or missing barcode? Type the SKU instead.</p>
-          <label class="autoprint" id="auto-print-wrap" hidden title="When checked, scanning an Astronomik filter whose name has already been confirmed immediately prints one label — no button press. Filters without a confirmed name open the name panel first; saving the name prints the label. Remembered on this device; only available on the printer station.">
-            <input type="checkbox" id="auto-print" />
-            Auto-print label on scan (confirmed Astronomik names only)
-          </label>
         </div>
       </section>
 

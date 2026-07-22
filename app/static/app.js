@@ -57,6 +57,8 @@ const el = {
   serialLabelInput: document.getElementById("serial-label-input"),
   serialLabelSave: document.getElementById("serial-label-save"),
   autoPrint: document.getElementById("auto-print"),
+  autoReset: document.getElementById("auto-reset"),
+  requireBin: document.getElementById("require-bin"),
   prefixSection: document.getElementById("prefix-section"),
   prefixInput: document.getElementById("prefix-input"),
   prefixSave: document.getElementById("prefix-save"),
@@ -111,6 +113,8 @@ el.binInput.addEventListener("keydown", async (event) => {
     setResult(`Bin set to ${bin} (saved to Shopify).`, "ok");
     closeBinEditor();
     el.rfid.focus();
+    // A held auto-print (missing bin) can proceed now.
+    maybeAutoPrint();
   } catch (err) {
     setResult("Network error during the bin update.", "err");
   } finally {
@@ -122,13 +126,17 @@ el.binInput.addEventListener("blur", () => {
   if (!el.binInput.disabled) closeBinEditor();
 });
 
-// Auto-print is a standing station preference (bulk receiving mode),
-// shown up-front under the scan field — but only where a printer prints.
-el.autoPrint.checked = localStorage.getItem("autoPrint") === "1";
-el.autoPrint.addEventListener("change", () => {
-  localStorage.setItem("autoPrint", el.autoPrint.checked ? "1" : "0");
-});
-// (Visibility is set after printingEnabled is computed below.)
+// Station settings (the ⚙ menu): all persisted per device.
+function bindSetting(input, key) {
+  input.checked = localStorage.getItem(key) === "1";
+  input.addEventListener("change", () => {
+    localStorage.setItem(key, input.checked ? "1" : "0");
+  });
+}
+bindSetting(el.autoPrint, "autoPrint");
+bindSetting(el.autoReset, "autoReset");
+bindSetting(el.requireBin, "requireBinForAutoPrint");
+// (Print-related items are hidden after printingEnabled is computed below.)
 
 // Printing UI shows on printer stations, or everywhere when the server flag
 // ALLOW_REMOTE_PRINT is on. Station status is sticky per device: visiting
@@ -142,7 +150,8 @@ el.autoPrint.addEventListener("change", () => {
 const printingEnabled =
   document.body.dataset.remotePrint === "on" ||
   localStorage.getItem("printerStation") === "1";
-document.getElementById("auto-print-wrap").hidden = !printingEnabled;
+document.getElementById("auto-print-item").hidden = !printingEnabled;
+document.getElementById("require-bin-item").hidden = !printingEnabled;
 
 // --- Access + identity ------------------------------------------------------
 // Station key: captured once from a ?key=... link, remembered, then sent as
@@ -299,6 +308,15 @@ function maybeAutoPrint() {
     setResult(
       "Auto-print skipped: the label name isn't confirmed yet — press " +
         "Save name (or print once) to confirm it.",
+      "err"
+    );
+    return;
+  }
+  const bin = pendingProduct.bin_location;
+  if (el.requireBin.checked && (!bin || bin === "No bin assigned")) {
+    setResult(
+      "Auto-print held: no bin assigned — click the bin chip to set one " +
+        "and the label will print.",
       "err"
     );
     return;
@@ -880,11 +898,15 @@ el.rfid.addEventListener("keydown", async (event) => {
     const saved = await res.json();
     setResult(`Assigned ${saved.rfid_id} → ${saved.product_title}`, "ok");
     prependRecent(saved);
-    // Stay on this product for bulk tagging: clear the field and keep
-    // scanning tags. Reset (Esc) or scanning a new barcode moves on.
-    el.rfid.value = "";
-    el.rfid.focus();
-    loadTags(pendingProduct);
+    if (el.autoReset.checked) {
+      // One tag per product: brief confirmation, then back to the barcode.
+      setTimeout(resetStation, 700);
+    } else {
+      // Bulk tagging: stay on this product and keep scanning tags.
+      el.rfid.value = "";
+      el.rfid.focus();
+      loadTags(pendingProduct);
+    }
   } catch (err) {
     setResult("Network error while saving.", "err");
   }
@@ -894,12 +916,19 @@ el.rfid.addEventListener("keydown", async (event) => {
 function recentRow(a) {
   const li = document.createElement("li");
   li.dataset.rfid = a.rfid_id;
+  const when = a.assigned_at
+    ? new Date(a.assigned_at).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })
+    : "—";
   li.innerHTML = `
     <span class="recent__epc">${escapeHtml(a.rfid_id)}</span>
     <span class="recent__prod">${escapeHtml(a.product_title || "")}${
       a.variant_title ? " (" + escapeHtml(a.variant_title) + ")" : ""
     }</span>
     <span class="recent__meta">${escapeHtml(a.bin_location || "")}</span>
+    <span class="recent__meta recent__when">${escapeHtml(when)}</span>
     <button class="recent__unassign" type="button">unassign</button>
   `;
   li.querySelector(".recent__unassign").addEventListener("click", () =>
