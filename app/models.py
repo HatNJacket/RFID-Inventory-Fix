@@ -122,6 +122,11 @@ class SerialPrefix(Base):
     brand: Mapped[str] = mapped_column(String(50), nullable=False)
     sku: Mapped[str | None] = mapped_column(String(100), index=True)
     item_name: Mapped[str | None] = mapped_column(String(255))
+    # Operator-preferred short name, printed on labels in place of the store
+    # name. Starts empty (a default is derived from item_name at lookup
+    # time); once an operator saves one it sticks — the xlsx loader never
+    # writes this column, so sheet reloads can't clobber it.
+    label_name: Mapped[str | None] = mapped_column(String(255))
 
     def as_dict(self) -> dict:
         return {
@@ -129,6 +134,7 @@ class SerialPrefix(Base):
             "brand": self.brand,
             "sku": self.sku,
             "item_name": self.item_name,
+            "label_name": self.label_name,
         }
 
 
@@ -203,6 +209,10 @@ class PrintJob(Base):
     # handles run up to 255 chars.
     shopify_product_id: Mapped[str | None] = mapped_column(String(300))
 
+    # Operator-preferred label header (serialized brands like Astronomik);
+    # when set, the agent prints it in place of the store name.
+    label_name: Mapped[str | None] = mapped_column(String(255))
+
     requested_by: Mapped[str | None] = mapped_column(String(100))
     error: Mapped[str | None] = mapped_column(String(500))
 
@@ -223,6 +233,7 @@ class PrintJob(Base):
             "bin_location": self.bin_location,
             "shopify_variant_id": self.shopify_variant_id,
             "shopify_product_id": self.shopify_product_id,
+            "label_name": self.label_name,
             "requested_by": self.requested_by,
             "error": self.error,
             "created_at": (

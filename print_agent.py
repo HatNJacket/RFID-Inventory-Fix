@@ -138,7 +138,13 @@ def build_zpl(job: dict, encode_rfid: bool,
     pw, ll = label_dots(width_in, height_in)
 
     title = clean(job.get("product_title"), fallback="")
-    if "astronomik" in title.lower():
+    label = clean(job.get("label_name"), fallback="")
+    if label:
+        # Operator-preferred name (e.g. what the physical Astronomik label
+        # says). Short names get a bigger face.
+        size = 28 if len(label) <= 26 else 20
+        header = f"^CF0,{size}\n^FO0,6^FB{pw},2,0,C^FD{label[:84]}^FS\n"
+    elif "astronomik" in title.lower():
         name = title
         if job.get("variant_title"):
             name += f" ({clean(job['variant_title'])})"

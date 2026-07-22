@@ -7,6 +7,7 @@ No terminal input anywhere. The scanner types into browser fields exactly
 as it would type into Notepad, and JavaScript forwards each scan here.
 """
 import logging
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -264,6 +265,10 @@ def product_by_barcode(barcode: str):
                     product["serial_brand"] = sp.brand
                     product["serial_prefix"] = sp.prefix
                     product["serial_number"] = barcode
+                    product["serial_item_name"] = sp.item_name
+                    product["serial_label"] = (
+                        sp.label_name or _default_serial_label(sp.item_name)
+                    )
                     return product
                 raise HTTPException(
                     404,
@@ -277,6 +282,20 @@ def product_by_barcode(barcode: str):
             500, "Neither the database nor Shopify credentials are configured."
         )
     raise HTTPException(404, "No product found for that barcode or SKU.")
+
+
+def _default_serial_label(item_name: str | None) -> str:
+    """Sensible label default from the manufacturer's item name: drop the
+    ', Made in Germany' tail, cut at the first parenthesis, drop the leading
+    brand word. (Their sizes use decimal commas — '1,25"' — so cutting at
+    the first comma would mangle most names.) Operators overwrite this with
+    whatever the physical product label actually says."""
+    if not item_name:
+        return ""
+    name = re.sub(r",?\s*made in germany\s*$", "", item_name, flags=re.I)
+    name = name.split("(")[0]
+    name = re.sub(r"^\s*astronomik\s+", "", name, flags=re.I)
+    return name.strip(" ,")
 
 
 def _resolve(term: str, mode: str, db_ok: bool, api_ok: bool) -> dict | None:
@@ -433,6 +452,7 @@ class PrintJobIn(BaseModel):
     sku: str | None = Field(default=None, max_length=100)
     barcode: str | None = Field(default=None, max_length=64)
     bin_location: str | None = Field(default=None, max_length=100)
+    label_name: str | None = Field(default=None, max_length=255)
     requested_by: str | None = Field(default=None, max_length=100)
 
     @field_validator("shopify_variant_id", "product_title")
@@ -644,6 +664,35 @@ def delete_alias(alias_barcode: str, session: Session = Depends(get_session)):
         raise HTTPException(404, "No such linked barcode.")
     session.delete(row)
     session.commit()
+
+
+# -------------------------------------------------------- serial labels ---
+class SerialLabelIn(BaseModel):
+    label_name: str = Field(max_length=255)
+
+    @field_validator("label_name")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.put(
+    "/api/serial-prefixes/{prefix}/label",
+    dependencies=[Depends(require_user)],
+)
+def set_serial_label(
+    prefix: str, payload: SerialLabelIn, session: Session = Depends(get_session)
+):
+    """Save the operator's preferred label name for a serial prefix (what
+    prints at the top of that product's labels)."""
+    row = session.get(SerialPrefix, prefix.strip())
+    if row is None:
+        raise HTTPException(404, "No such serial prefix.")
+    row.label_name = payload.label_name
+    session.commit()
+    return row.as_dict()
 
 
 # ------------------------------------------------------ barcode overwrite ---

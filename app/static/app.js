@@ -52,6 +52,10 @@ const el = {
   overwriteText: document.getElementById("overwrite-text"),
   overwriteAck: document.getElementById("overwrite-ack"),
   overwriteGo: document.getElementById("overwrite-go"),
+  serialPanel: document.getElementById("serial-panel"),
+  serialSheetName: document.getElementById("serial-sheet-name"),
+  serialLabelInput: document.getElementById("serial-label-input"),
+  serialLabelSave: document.getElementById("serial-label-save"),
 };
 
 // Printing UI shows on the printer station (?printer=1 in the URL) or for
@@ -136,6 +140,8 @@ function resetStation() {
   el.tagsPanel.open = false;
   el.printPanel.hidden = true;
   el.printStatus.textContent = "";
+  el.serialPanel.hidden = true;
+  serialLoadedLabel = null;
   closeLinkbox();
   setResult("", null);
   activate("barcode");
@@ -182,9 +188,62 @@ function acceptProduct(product, message) {
   pendingProduct = product;
   closeLinkbox();
   showProduct(product);
+  showSerialPanel(product);
   setResult(message, "ok");
   activate("rfid");
 }
+
+// --- Serialized-brand label names (Astronomik) ------------------------------
+// The panel opens whenever a serial-recognized product loads: shows the
+// manufacturer's sheet name and an editable preferred name that prints at
+// the top of the label. Saved per serial prefix; survives sheet reloads.
+let serialLoadedLabel = null;
+
+function showSerialPanel(p) {
+  if (!p || !p.serial_prefix) {
+    el.serialPanel.hidden = true;
+    serialLoadedLabel = null;
+    return;
+  }
+  el.serialSheetName.textContent =
+    `${p.serial_brand} sheet name: ${p.serial_item_name || "—"}`;
+  el.serialLabelInput.value = p.serial_label || "";
+  serialLoadedLabel = el.serialLabelInput.value.trim();
+  el.serialLabelSave.textContent = "Save name";
+  el.serialPanel.hidden = false;
+}
+
+async function saveSerialLabel(showFeedback) {
+  const name = el.serialLabelInput.value.trim();
+  if (!pendingProduct || !pendingProduct.serial_prefix || !name) return;
+  if (name === serialLoadedLabel) return;
+  try {
+    const res = await apiFetch(
+      `/api/serial-prefixes/${encodeURIComponent(pendingProduct.serial_prefix)}/label`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label_name: name }),
+      }
+    );
+    if (res.ok) {
+      serialLoadedLabel = name;
+      if (showFeedback) {
+        el.serialLabelSave.textContent = "Saved ✓";
+        setTimeout(() => (el.serialLabelSave.textContent = "Save name"), 1500);
+      }
+    } else if (showFeedback) {
+      setResult("Could not save the label name.", "err");
+    }
+  } catch (err) {
+    if (showFeedback) setResult("Network error saving the label name.", "err");
+  }
+}
+
+el.serialLabelSave.addEventListener("click", () => saveSerialLabel(true));
+el.serialLabelInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") saveSerialLabel(true);
+});
 
 // --- Foreign-barcode linking ------------------------------------------------
 // State for the linkbox: the unknown code just scanned, and the product the
@@ -467,12 +526,20 @@ el.printBtn.addEventListener("click", async () => {
   el.printBtn.disabled = true;
   el.printStatus.textContent = "Queueing…";
   try {
+    // Serialized-brand products print the operator's preferred name; save
+    // any unsaved edit so the next scan remembers it too.
+    let labelName = null;
+    if (pendingProduct.serial_prefix) {
+      labelName = el.serialLabelInput.value.trim() || null;
+      saveSerialLabel(false);
+    }
     const res = await apiFetch("/api/print-jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         quantity,
         ...pendingProduct,
+        label_name: labelName,
         requested_by: operator,
       }),
     });
