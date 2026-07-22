@@ -72,6 +72,10 @@ async def frame_ancestors_for_shopify(request: Request, call_next):
         response.headers["Content-Security-Policy"] = (
             "frame-ancestors https://admin.shopify.com https://*.myshopify.com"
         )
+        # The page must never be cached: it carries the version-stamped
+        # asset URLs, so a cached page pins stale JS/CSS across deploys
+        # (the "feature didn't reach the warehouse browser" bug, twice).
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
