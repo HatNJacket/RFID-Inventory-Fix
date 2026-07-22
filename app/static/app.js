@@ -601,14 +601,21 @@ el.rfid.addEventListener("keydown", async (event) => {
 
   setResult("Saving assignment…", "busy");
   try {
+    const payload = { rfid_id: rfid, ...pendingProduct, assigned_by: operator };
+    // Serialized brands: store the operator's preferred name as the title
+    // (it already names the size, so the variant column would just repeat it).
+    if (pendingProduct.serial_prefix) {
+      const name = el.serialLabelInput.value.trim();
+      if (name) {
+        payload.product_title = name;
+        payload.variant_title = null;
+      }
+      saveSerialLabel(false);
+    }
     const res = await apiFetch("/api/rfid-assignments", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        rfid_id: rfid,
-        ...pendingProduct,
-        assigned_by: operator,
-      }),
+      body: JSON.stringify(payload),
     });
     if (res.status === 409) {
       setResult(`Tag ${rfid} is already assigned.`, "err");
@@ -639,7 +646,9 @@ function recentRow(a) {
   li.dataset.rfid = a.rfid_id;
   li.innerHTML = `
     <span class="recent__epc">${escapeHtml(a.rfid_id)}</span>
-    <span class="recent__prod">${escapeHtml(a.product_title || "")}</span>
+    <span class="recent__prod">${escapeHtml(a.product_title || "")}${
+      a.variant_title ? " (" + escapeHtml(a.variant_title) + ")" : ""
+    }</span>
     <span class="recent__meta">${escapeHtml(a.bin_location || "")}</span>
     <button class="recent__unassign" type="button">unassign</button>
   `;
