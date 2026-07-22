@@ -30,7 +30,6 @@ two-scan flow (scan barcode, scan tag). Omit this flag only on R-series
 printers (ZD621R etc.) that can actually encode.
 """
 import argparse
-import os
 import socket
 import sys
 import time
@@ -219,12 +218,10 @@ class AppClient:
         ).raise_for_status()
 
 
-def build_parser() -> argparse.ArgumentParser:
+# ------------------------------------------------------------------ main ----
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--app",
-        help="App base URL (defaults to PRINT_AGENT_APP_URL or APP_URL)",
-    )
+    parser.add_argument("--app", required=True, help="App base URL")
     parser.add_argument("--printer-host", help="Printer IP (network mode)")
     parser.add_argument("--printer-port", type=int, default=9100)
     parser.add_argument("--printer-name", help="Windows printer name (USB)")
@@ -255,17 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shift-right", type=int, default=SHIFT_RIGHT_DOTS,
                         help="Move the whole image right N dots "
                              "(default %(default)s)")
-    return parser
-
-
-def main() -> None:
-    parser = build_parser()
     args = parser.parse_args()
-
-    if not args.app:
-        args.app = os.getenv("PRINT_AGENT_APP_URL") or os.getenv("APP_URL")
-    if not args.app:
-        parser.error("need --app, PRINT_AGENT_APP_URL, or APP_URL")
 
     if not args.dry_run and not (args.printer_host or args.printer_name):
         parser.error("need --printer-host, --printer-name, or --dry-run")
