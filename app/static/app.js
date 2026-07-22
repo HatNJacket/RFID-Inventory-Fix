@@ -128,16 +128,21 @@ el.autoPrint.checked = localStorage.getItem("autoPrint") === "1";
 el.autoPrint.addEventListener("change", () => {
   localStorage.setItem("autoPrint", el.autoPrint.checked ? "1" : "0");
 });
-document.getElementById("auto-print-wrap").hidden = !(
-  document.body.dataset.remotePrint === "on" ||
-  new URLSearchParams(location.search).has("printer")
-);
+// (Visibility is set after printingEnabled is computed below.)
 
-// Printing UI shows on the printer station (?printer=1 in the URL) or for
-// everyone when the server flag ALLOW_REMOTE_PRINT is on.
+// Printing UI shows on printer stations, or everywhere when the server flag
+// ALLOW_REMOTE_PRINT is on. Station status is sticky per device: visiting
+// once with ?printer=1 marks it permanently (?printer=0 unmarks), so the
+// bare URL keeps working afterwards.
+{
+  const p = new URLSearchParams(location.search).get("printer");
+  if (p === "0") localStorage.removeItem("printerStation");
+  else if (p !== null) localStorage.setItem("printerStation", "1");
+}
 const printingEnabled =
   document.body.dataset.remotePrint === "on" ||
-  new URLSearchParams(location.search).has("printer");
+  localStorage.getItem("printerStation") === "1";
+document.getElementById("auto-print-wrap").hidden = !printingEnabled;
 
 // --- Access + identity ------------------------------------------------------
 // Station key: captured once from a ?key=... link, remembered, then sent as
