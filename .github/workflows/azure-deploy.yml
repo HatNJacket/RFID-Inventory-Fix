@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: your-rfid-app        # <-- change to your App Service name
+  AZURE_WEBAPP_NAME: telcan-rfid
   PYTHON_VERSION: "3.12"
 
 jobs:

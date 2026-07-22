@@ -156,6 +156,40 @@ def _lookup_api(barcode: str) -> dict | None:
         product["source"] = "shopify"
     return product
 
+MISSING_BIN_VALUES = (None, "", "No bin assigned")
+
+
+def _enrich_bin_from_shopify(
+    product: dict,
+    lookup_term: str,
+    api_ok: bool,
+) -> dict:
+    """Fill a missing TELCAN bin using the matching Shopify variant."""
+
+    if not api_ok:
+        return product
+
+    if product.get("bin_location") not in MISSING_BIN_VALUES:
+        return product
+
+    try:
+        api_product = shopify.lookup_barcode(lookup_term)
+
+        if (
+            api_product
+            and api_product.get("bin_location") not in MISSING_BIN_VALUES
+        ):
+            product["bin_location"] = api_product["bin_location"]
+
+    except RuntimeError as error:
+        logger.warning(
+            "Shopify bin enrichment failed for %s: %s",
+            lookup_term,
+            error,
+        )
+
+    return product
+
 
 @app.get(
     "/api/products/by-barcode/{barcode}",
@@ -174,24 +208,18 @@ def product_by_barcode(barcode: str):
     if mode in ("auto", "db") and db_ok:
         try:
             product = _lookup_db(barcode)
+
             if product is not None:
-                # TELCAN's Bin_Name is often empty; the authoritative bins
-                # live in Shopify metafields (variant stock.bin and product
-                # my_fields.bin_location / "EasyScan Product Bin Location").
-                # Enrich from the API whenever TELCAN has no bin.
-                if product.get("bin_location") in (None, "", "No bin assigned") and api_ok:
-                    try:
-                        api_product = shopify.lookup_barcode(barcode)
-                        if api_product and api_product.get("bin_location") not in (
-                            None, "", "No bin assigned"
-                        ):
-                            product["bin_location"] = api_product["bin_location"]
-                    except RuntimeError as error:
-                        logger.warning("bin enrichment failed: %s", error)
-                return product
-        except Exception as error:  # DB down/misconfigured -> try the API
+                return _enrich_bin_from_shopify(
+                    product=product,
+                    lookup_term=barcode,
+                    api_ok=api_ok,
+                )
+
+        except Exception as error:
             logger.warning("TELCAN lookup failed: %s", error)
             errors.append(f"TELCAN lookup failed: {error}")
+
             if mode == "db":
                 raise HTTPException(502, errors[-1])
 
@@ -252,22 +280,31 @@ def product_by_barcode(barcode: str):
 
 
 def _resolve(term: str, mode: str, db_ok: bool, api_ok: bool) -> dict | None:
-    """Plain barcode/SKU resolution without alias handling (used to resolve
-    alias targets)."""
+    """Resolve a barcode or SKU without alias/serial handling."""
+
     if not term:
         return None
+
     if mode in ("auto", "db") and db_ok:
         try:
             product = _lookup_db(term)
+
             if product is not None:
-                return product
+                return _enrich_bin_from_shopify(
+                    product=product,
+                    lookup_term=term,
+                    api_ok=api_ok,
+                )
+
         except Exception as error:
             logger.warning("TELCAN lookup failed: %s", error)
+
     if mode in ("auto", "api") and api_ok:
         try:
             return _lookup_api(term)
         except RuntimeError as error:
             logger.warning("Shopify lookup failed: %s", error)
+
     return None
 
 
