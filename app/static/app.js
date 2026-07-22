@@ -30,6 +30,23 @@ const el = {
   reset: document.getElementById("reset"),
   recentList: document.getElementById("recent-list"),
   search: document.getElementById("search"),
+  trustAlias: document.getElementById("trust-alias"),
+  linkbox: document.getElementById("linkbox"),
+  linkboxTitle: document.getElementById("linkbox-title"),
+  linkboxText: document.getElementById("linkbox-text"),
+  linkboxForm: document.getElementById("linkbox-form"),
+  aliasTarget: document.getElementById("alias-target"),
+  aliasCheck: document.getElementById("alias-check"),
+  aliasPreview: document.getElementById("alias-preview"),
+  aliasImg: document.getElementById("alias-img"),
+  aliasPtitle: document.getElementById("alias-ptitle"),
+  aliasPid: document.getElementById("alias-pid"),
+  aliasPsku: document.getElementById("alias-psku"),
+  aliasPbarcode: document.getElementById("alias-pbarcode"),
+  aliasPbin: document.getElementById("alias-pbin"),
+  aliasAccept: document.getElementById("alias-accept"),
+  aliasUnlink: document.getElementById("alias-unlink"),
+  aliasCancel: document.getElementById("alias-cancel"),
 };
 
 // Printing UI shows on the printer station (?printer=1 in the URL) or for
@@ -114,6 +131,7 @@ function resetStation() {
   el.tagsPanel.open = false;
   el.printPanel.hidden = true;
   el.printStatus.textContent = "";
+  closeLinkbox();
   setResult("", null);
   activate("barcode");
 }
@@ -130,8 +148,7 @@ el.barcode.addEventListener("keydown", async (event) => {
       `/api/products/by-barcode/${encodeURIComponent(barcode)}`
     );
     if (res.status === 404) {
-      setResult("No product found for that barcode or SKU.", "err");
-      el.barcode.select();
+      openLinkbox(barcode);
       return;
     }
     if (!res.ok) {
@@ -139,13 +156,184 @@ el.barcode.addEventListener("keydown", async (event) => {
       setResult(body.detail || "Lookup failed.", "err");
       return;
     }
-    pendingProduct = await res.json();
-    showProduct(pendingProduct);
-    setResult("Product found. Scan the RFID tag.", "ok");
-    activate("rfid");
+    const product = await res.json();
+    if (product.alias_warning && !el.trustAlias.checked) {
+      openConfirmBox(product);
+      return;
+    }
+    acceptProduct(
+      product,
+      product.alias_warning
+        ? "Linked barcode → product found. Scan the RFID tag."
+        : "Product found. Scan the RFID tag."
+    );
   } catch (err) {
     setResult("Network error during lookup.", "err");
   }
+});
+
+function acceptProduct(product, message) {
+  pendingProduct = product;
+  closeLinkbox();
+  showProduct(product);
+  setResult(message, "ok");
+  activate("rfid");
+}
+
+// --- Foreign-barcode linking ------------------------------------------------
+// State for the linkbox: the unknown code just scanned, and the product the
+// operator is previewing (link mode) or confirming (alias-scan mode).
+let aliasCandidate = null;
+let aliasPreviewProduct = null;
+
+function renderAliasPreview(p) {
+  aliasPreviewProduct = p;
+  el.aliasPtitle.textContent =
+    (p.product_title || "—") + (p.variant_title ? ` (${p.variant_title})` : "");
+  el.aliasPid.textContent = p.shopify_variant_id || "—";
+  el.aliasPsku.textContent = p.sku || "—";
+  el.aliasPbarcode.textContent = p.barcode || "—";
+  el.aliasPbin.textContent = p.bin_location || "—";
+  if (p.image_url) {
+    el.aliasImg.src = p.image_url;
+    el.aliasImg.hidden = false;
+  } else {
+    el.aliasImg.hidden = true;
+    el.aliasImg.removeAttribute("src");
+  }
+  el.aliasPreview.hidden = false;
+}
+
+function openLinkbox(scannedCode) {
+  aliasCandidate = scannedCode;
+  aliasPreviewProduct = null;
+  el.linkboxTitle.textContent = "Unknown barcode";
+  el.linkboxText.textContent =
+    `"${scannedCode}" isn't in the system. If this is a manufacturer ` +
+    `barcode on a known product, enter our barcode or SKU to link them.`;
+  el.linkboxForm.hidden = false;
+  el.aliasTarget.value = "";
+  el.aliasPreview.hidden = true;
+  el.aliasAccept.hidden = true;
+  el.aliasAccept.textContent = "Link barcode & continue";
+  el.aliasUnlink.hidden = true;
+  el.linkbox.hidden = false;
+  setResult("No product found for that barcode or SKU.", "err");
+  el.aliasTarget.focus();
+}
+
+function openConfirmBox(product) {
+  aliasCandidate = product.alias_barcode;
+  el.linkboxTitle.textContent = "Linked barcode — confirm the item";
+  el.linkboxText.textContent =
+    `"${product.alias_barcode}" doesn't match internal barcodes; it was ` +
+    `previously linked to this product. Confirm this is the right item.`;
+  el.linkboxForm.hidden = true;
+  renderAliasPreview(product);
+  el.aliasAccept.hidden = false;
+  el.aliasAccept.textContent = "Confirm item";
+  el.aliasUnlink.hidden = false;
+  el.linkbox.hidden = false;
+  setResult("", null);
+}
+
+function closeLinkbox() {
+  el.linkbox.hidden = true;
+  aliasCandidate = null;
+  aliasPreviewProduct = null;
+}
+
+async function checkAliasTarget() {
+  const term = el.aliasTarget.value.trim();
+  if (!term) return;
+  el.aliasCheck.disabled = true;
+  try {
+    const res = await apiFetch(
+      `/api/products/by-barcode/${encodeURIComponent(term)}`
+    );
+    if (res.status === 404) {
+      el.aliasPreview.hidden = true;
+      el.aliasAccept.hidden = true;
+      setResult("No product found for that barcode or SKU either.", "err");
+      el.aliasTarget.select();
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setResult(body.detail || "Lookup failed.", "err");
+      return;
+    }
+    renderAliasPreview(await res.json());
+    el.aliasAccept.hidden = false;
+    setResult("Check the product, then link.", null);
+  } catch (err) {
+    setResult("Network error during lookup.", "err");
+  } finally {
+    el.aliasCheck.disabled = false;
+  }
+}
+
+el.aliasCheck.addEventListener("click", checkAliasTarget);
+el.aliasTarget.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") checkAliasTarget();
+});
+
+el.aliasAccept.addEventListener("click", async () => {
+  if (!aliasPreviewProduct) return;
+  // Confirm mode: the alias already exists, just proceed.
+  if (el.linkboxForm.hidden) {
+    acceptProduct(aliasPreviewProduct, "Item confirmed. Scan the RFID tag.");
+    return;
+  }
+  // Link mode: create the alias, then proceed with the previewed product.
+  const operator = requireOperator();
+  if (!operator) return;
+  el.aliasAccept.disabled = true;
+  try {
+    const res = await apiFetch("/api/barcode-aliases", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        alias_barcode: aliasCandidate,
+        target: el.aliasTarget.value.trim(),
+        created_by: operator,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setResult(body.detail || "Linking failed.", "err");
+      return;
+    }
+    const product = { ...aliasPreviewProduct, alias_barcode: aliasCandidate };
+    acceptProduct(product, "Barcode linked. Scan the RFID tag.");
+  } catch (err) {
+    setResult("Network error while linking.", "err");
+  } finally {
+    el.aliasAccept.disabled = false;
+  }
+});
+
+el.aliasUnlink.addEventListener("click", async () => {
+  if (!aliasCandidate) return;
+  if (!confirm(`Unlink barcode ${aliasCandidate} from this product?`)) return;
+  const res = await apiFetch(
+    `/api/barcode-aliases/${encodeURIComponent(aliasCandidate)}`,
+    { method: "DELETE" }
+  );
+  if (res.ok || res.status === 404) {
+    closeLinkbox();
+    el.barcode.value = "";
+    setResult("Barcode unlinked.", "ok");
+    activate("barcode");
+  } else {
+    setResult("Could not unlink that barcode.", "err");
+  }
+});
+
+el.aliasCancel.addEventListener("click", () => {
+  closeLinkbox();
+  el.barcode.select();
+  setResult("", null);
 });
 
 function showProduct(p) {

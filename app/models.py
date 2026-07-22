@@ -66,6 +66,49 @@ class RfidAssignment(Base):
         }
 
 
+class BarcodeAlias(Base):
+    """Maps a foreign ("fake") barcode — e.g. a manufacturer barcode on the
+    box — to a known product, after an operator confirmed the link. Lives in
+    its own app-owned table rather than a column on the TELCAN mirror tables,
+    which get rewritten by the Shopify sync.
+
+    Scans of an alias resolve to the product but carry a warning flag so the
+    UI can ask for confirmation (skippable per session for bulk work)."""
+
+    __tablename__ = "rfid_barcode_aliases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    # The scanned foreign barcode.
+    alias_barcode: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False
+    )
+
+    # Product anchor + display snapshot (SKU is the stable key both TELCAN
+    # and the Shopify API agree on).
+    sku: Mapped[str | None] = mapped_column(String(100), index=True)
+    barcode: Mapped[str | None] = mapped_column(String(64))
+    product_title: Mapped[str | None] = mapped_column(String(255))
+
+    created_by: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "alias_barcode": self.alias_barcode,
+            "sku": self.sku,
+            "barcode": self.barcode,
+            "product_title": self.product_title,
+            "created_by": self.created_by,
+            "created_at": (
+                self.created_at.isoformat() if self.created_at else None
+            ),
+        }
+
+
 class PrintJob(Base):
     """One queued Zebra label: print the barcode AND encode the EPC into the
     sticker's RFID chip in a single pass.

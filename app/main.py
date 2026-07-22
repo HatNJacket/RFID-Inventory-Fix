@@ -30,7 +30,7 @@ from app.database import (
     get_session,
     init_db,
 )
-from app.models import PrintJob, RfidAssignment
+from app.models import BarcodeAlias, PrintJob, RfidAssignment
 
 logger = logging.getLogger("rfid")
 
@@ -192,11 +192,50 @@ def product_by_barcode(barcode: str):
             errors.append(f"Shopify lookup failed: {error}")
             raise HTTPException(502, errors[-1])
 
+    # Not a real barcode/SKU — maybe an operator-linked alias (a foreign
+    # barcode, e.g. the manufacturer's, confirmed to mean one of our
+    # products). Resolves normally but flagged so the UI can confirm.
+    if db_ok:
+        from app.database import get_engine
+
+        with Session(get_engine()) as session:
+            alias = session.scalar(
+                select(BarcodeAlias).where(
+                    BarcodeAlias.alias_barcode == barcode
+                )
+            )
+        if alias is not None:
+            product = _resolve(alias.sku or alias.barcode, mode, db_ok, api_ok)
+            if product is not None:
+                product["alias_barcode"] = alias.alias_barcode
+                product["alias_warning"] = True
+                return product
+
     if not db_ok and not api_ok:
         raise HTTPException(
             500, "Neither the database nor Shopify credentials are configured."
         )
     raise HTTPException(404, "No product found for that barcode or SKU.")
+
+
+def _resolve(term: str, mode: str, db_ok: bool, api_ok: bool) -> dict | None:
+    """Plain barcode/SKU resolution without alias handling (used to resolve
+    alias targets)."""
+    if not term:
+        return None
+    if mode in ("auto", "db") and db_ok:
+        try:
+            product = _lookup_db(term)
+            if product is not None:
+                return product
+        except Exception as error:
+            logger.warning("TELCAN lookup failed: %s", error)
+    if mode in ("auto", "api") and api_ok:
+        try:
+            return _lookup_api(term)
+        except RuntimeError as error:
+            logger.warning("Shopify lookup failed: %s", error)
+    return None
 
 
 @app.get("/api/products/tags", dependencies=[Depends(require_user)])
@@ -460,6 +499,81 @@ def fail_print_job(
     job.error = payload.error
     session.commit()
     return job.as_dict()
+
+
+# --------------------------------------------------------- barcode aliases ---
+class AliasIn(BaseModel):
+    alias_barcode: str = Field(max_length=64)
+    target: str = Field(max_length=100)  # the known/internal barcode or SKU
+    created_by: str | None = Field(default=None, max_length=100)
+
+    @field_validator("alias_barcode", "target")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/barcode-aliases",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def create_alias(payload: AliasIn, session: Session = Depends(get_session)):
+    """Link a foreign barcode to a known product (identified by its real
+    barcode or SKU). Returns the alias and the resolved product."""
+    db_ok = database_configured()
+    api_ok = not config.check_shopify_env()
+    mode = config.BARCODE_LOOKUP
+
+    # The alias must not itself be a real barcode/SKU of some product.
+    if _resolve(payload.alias_barcode, mode, db_ok, api_ok) is not None:
+        raise HTTPException(
+            409,
+            "That scanned code already matches a real product — it can't "
+            "be linked as an alias.",
+        )
+
+    product = _resolve(payload.target, mode, db_ok, api_ok)
+    if product is None:
+        raise HTTPException(404, "No product found for that barcode or SKU.")
+
+    alias = BarcodeAlias(
+        alias_barcode=payload.alias_barcode,
+        sku=product.get("sku"),
+        barcode=product.get("barcode"),
+        product_title=product.get("product_title"),
+        created_by=payload.created_by,
+    )
+    session.add(alias)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(
+            409, "That scanned code is already linked to a product."
+        )
+    session.refresh(alias)
+    product["alias_barcode"] = alias.alias_barcode
+    return {"alias": alias.as_dict(), "product": product}
+
+
+@app.delete(
+    "/api/barcode-aliases/{alias_barcode}",
+    status_code=204,
+    dependencies=[Depends(require_user)],
+)
+def delete_alias(alias_barcode: str, session: Session = Depends(get_session)):
+    row = session.scalar(
+        select(BarcodeAlias).where(
+            BarcodeAlias.alias_barcode == alias_barcode.strip()
+        )
+    )
+    if row is None:
+        raise HTTPException(404, "No such linked barcode.")
+    session.delete(row)
+    session.commit()
 
 
 # -------------------------------------------------------- inventory view ---

@@ -57,6 +57,39 @@
             aria-describedby="barcode-hint"
           />
           <p class="step__hint" id="barcode-hint">The scanner types here and presses Enter. Bad or missing barcode? Type the SKU instead.</p>
+          <label class="trust" title="When checked, scanning a linked (non-internal) barcode goes straight through without the confirmation window. Use when reading in many similar items whose manufacturer barcodes don't match ours (e.g. Astronomik filters). Resets when the page reloads.">
+            <input type="checkbox" id="trust-alias" />
+            Skip linked-barcode confirmation
+          </label>
+        </div>
+      </section>
+
+      <!-- Foreign-barcode linking / confirmation -->
+      <section class="linkbox" id="linkbox" hidden>
+        <div class="linkbox__title" id="linkbox-title">Unknown barcode</div>
+        <p class="linkbox__text" id="linkbox-text"></p>
+        <div class="linkbox__form" id="linkbox-form" hidden>
+          <input id="alias-target" class="linkbox__input" type="text"
+                 autocomplete="off" spellcheck="false"
+                 placeholder="Known barcode or SKU…" />
+          <button class="reset" id="alias-check" type="button">Check product</button>
+        </div>
+        <div class="linkbox__card" id="alias-preview" hidden>
+          <img class="linkbox__img" id="alias-img" alt="" hidden />
+          <div class="linkbox__info">
+            <div class="linkbox__ptitle" id="alias-ptitle">—</div>
+            <dl class="product__grid">
+              <div><dt>ID</dt><dd id="alias-pid">—</dd></div>
+              <div><dt>SKU</dt><dd id="alias-psku">—</dd></div>
+              <div><dt>Barcode</dt><dd id="alias-pbarcode">—</dd></div>
+              <div><dt>Bin</dt><dd id="alias-pbin">—</dd></div>
+            </dl>
+          </div>
+        </div>
+        <div class="linkbox__actions">
+          <button class="print__btn" id="alias-accept" type="button" hidden>Link barcode &amp; continue</button>
+          <button class="reset" id="alias-unlink" type="button" hidden>Unlink this barcode</button>
+          <button class="reset" id="alias-cancel" type="button">Cancel</button>
         </div>
       </section>
 

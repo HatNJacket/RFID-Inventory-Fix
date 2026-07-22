@@ -198,6 +198,71 @@ body {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* trust checkbox under the scan hint */
+.trust {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  cursor: help;
+  user-select: none;
+}
+.trust input { accent-color: var(--accent); cursor: pointer; }
+
+/* foreign-barcode link/confirm panel */
+.linkbox {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn-ink);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 16px;
+  margin-bottom: 12px;
+  animation: pop 0.16s ease-out;
+}
+.linkbox__title { font-size: 15px; font-weight: 650; margin-bottom: 6px; }
+.linkbox__text { margin: 0 0 12px; font-size: 13px; color: var(--ink-dim); }
+.linkbox__form { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.linkbox__input {
+  flex: 1 1 240px;
+  font-family: var(--mono);
+  font-size: 16px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1.5px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 12px;
+  outline: none;
+}
+.linkbox__input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.linkbox__card {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.linkbox__img {
+  width: 84px;
+  height: 84px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.linkbox__info { flex: 1 1 auto; min-width: 0; }
+.linkbox__ptitle { font-size: 14px; font-weight: 650; margin-bottom: 8px; }
+.linkbox__actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
 /* product card */
 .product {
   background: var(--card);

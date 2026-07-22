@@ -41,6 +41,18 @@ _LOOKUP_SQL = text(
 )
 
 
+# Product photo for preview cards: prefer the variant's own image, else the
+# product's primary image.
+_IMAGE_SQL = text(
+    """
+    SELECT TOP 1 Image_Src
+    FROM dbo.Shopify_Images
+    WHERE Handle_ID = :handle
+    ORDER BY CASE WHEN Variant_SKU = :sku THEN 0 ELSE 1 END, Image_Position
+    """
+)
+
+
 def _variant_title(row) -> str | None:
     """Combine option values ("0.5m", "Blue / Large"); Shopify's placeholder
     'Default Title' means the product has no real variants."""
@@ -59,7 +71,12 @@ def lookup_barcode(session: Session, term: str) -> dict | None:
     if row is None:
         return None
 
+    image_url = session.execute(
+        _IMAGE_SQL, {"handle": row.Handle_ID, "sku": row.Variant_SKU}
+    ).scalar()
+
     return {
+        "image_url": image_url,
         "shopify_variant_id": f"telcan:{row.Variant_ID}",
         "shopify_product_id": f"handle:{row.Handle_ID}",
         "product_title": row.Product_Title or row.Handle_ID or "(unknown)",
