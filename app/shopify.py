@@ -162,6 +162,38 @@ def update_variant_barcode(
     return result["productVariants"][0]
 
 
+_UPDATE_SKU_MUTATION = """
+mutation SetSku($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    productVariants { id inventoryItem { sku } }
+    userErrors { field message }
+  }
+}
+"""
+
+
+def update_variant_sku(
+    product_gid: str, variant_gid: str, new_sku: str
+) -> dict:
+    """Replace a variant's SKU in Shopify (source of truth; TELCAN's mirror
+    catches up on its next sync). Requires the write_products scope."""
+    data = query_shopify(
+        _UPDATE_SKU_MUTATION,
+        {
+            "productId": product_gid,
+            "variants": [
+                {"id": variant_gid, "inventoryItem": {"sku": new_sku}}
+            ],
+        },
+    )
+    result = data["productVariantsBulkUpdate"]
+    if result["userErrors"]:
+        raise RuntimeError(
+            "; ".join(e["message"] for e in result["userErrors"])
+        )
+    return result["productVariants"][0]
+
+
 def lookup_barcode(term: str) -> dict | None:
     """Look up a variant by barcode — or by SKU when the barcode search
     misses, since some products have bad or missing barcodes. Returns a

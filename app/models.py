@@ -151,6 +151,11 @@ class BarcodeChange(Base):
     sku: Mapped[str | None] = mapped_column(String(100), index=True)
     product_title: Mapped[str | None] = mapped_column(String(255))
     shopify_variant_id: Mapped[str | None] = mapped_column(String(64))
+    # What was replaced: "barcode" or "sku" (old_/new_ hold either kind).
+    changed_field: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="barcode",
+        server_default="barcode",
+    )
     old_barcode: Mapped[str | None] = mapped_column(String(64))
     new_barcode: Mapped[str] = mapped_column(String(64), index=True)
 
@@ -165,6 +170,7 @@ class BarcodeChange(Base):
             "sku": self.sku,
             "product_title": self.product_title,
             "shopify_variant_id": self.shopify_variant_id,
+            "changed_field": self.changed_field,
             "old_barcode": self.old_barcode,
             "new_barcode": self.new_barcode,
             "changed_by": self.changed_by,

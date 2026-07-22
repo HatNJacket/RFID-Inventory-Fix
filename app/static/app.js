@@ -57,13 +57,25 @@ const el = {
   serialLabelInput: document.getElementById("serial-label-input"),
   serialLabelSave: document.getElementById("serial-label-save"),
   autoPrint: document.getElementById("auto-print"),
+  prefixSection: document.getElementById("prefix-section"),
+  prefixInput: document.getElementById("prefix-input"),
+  prefixSave: document.getElementById("prefix-save"),
+  skuSection: document.getElementById("sku-section"),
+  newSkuInput: document.getElementById("newsku-input"),
+  skuAck: document.getElementById("sku-ack"),
+  skuSave: document.getElementById("sku-save"),
 };
 
-// Auto-print is a standing station preference (bulk receiving mode).
+// Auto-print is a standing station preference (bulk receiving mode),
+// shown up-front under the scan field — but only where a printer prints.
 el.autoPrint.checked = localStorage.getItem("autoPrint") === "1";
 el.autoPrint.addEventListener("change", () => {
   localStorage.setItem("autoPrint", el.autoPrint.checked ? "1" : "0");
 });
+document.getElementById("auto-print-wrap").hidden = !(
+  document.body.dataset.remotePrint === "on" ||
+  new URLSearchParams(location.search).has("printer")
+);
 
 // Printing UI shows on the printer station (?printer=1 in the URL) or for
 // everyone when the server flag ALLOW_REMOTE_PRINT is on.
@@ -166,7 +178,11 @@ el.barcode.addEventListener("keydown", async (event) => {
       `/api/products/by-barcode/${encodeURIComponent(barcode)}`
     );
     if (res.status === 404) {
-      openLinkbox(barcode);
+      const body = await res.json().catch(() => ({}));
+      openLinkbox(
+        barcode,
+        body.detail && typeof body.detail === "object" ? body.detail : null
+      );
       return;
     }
     if (!res.ok) {
@@ -281,6 +297,25 @@ el.serialLabelInput.addEventListener("keydown", (event) => {
 // operator is previewing (link mode) or confirming (alias-scan mode).
 let aliasCandidate = null;
 let aliasPreviewProduct = null;
+let linkboxInfo = null; // structured 404 detail (e.g. known-prefix, bad SKU)
+
+function hideLinkboxExtras() {
+  el.prefixSection.hidden = true;
+  el.skuSection.hidden = true;
+  el.skuAck.checked = false;
+  el.skuSave.disabled = true;
+}
+
+// Re-run the original scan after a fix (new prefix, updated SKU) so the
+// normal flow — serial recognition, name panel, auto-print — takes over.
+function retryLookup(code) {
+  closeLinkbox();
+  el.barcode.disabled = false;
+  el.barcode.value = code;
+  el.barcode.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", bubbles: true })
+  );
+}
 
 function renderAliasPreview(p) {
   aliasPreviewProduct = p;
@@ -300,14 +335,20 @@ function renderAliasPreview(p) {
   el.aliasPreview.hidden = false;
 }
 
-function openLinkbox(scannedCode) {
+function openLinkbox(scannedCode, info = null) {
   el.flow.classList.add("flow--side");
   aliasCandidate = scannedCode;
   aliasPreviewProduct = null;
-  el.linkboxTitle.textContent = "Unknown barcode";
-  el.linkboxText.textContent =
-    `"${scannedCode}" isn't in the system. If this is a manufacturer ` +
-    `barcode on a known product, enter our barcode or SKU to link them.`;
+  linkboxInfo = info;
+  hideLinkboxExtras();
+  el.linkboxTitle.textContent = info
+    ? "Serial recognized — store SKU outdated"
+    : "Unknown barcode";
+  el.linkboxText.textContent = info
+    ? `${info.message} Look up the product below (by its current barcode ` +
+      `or SKU), then update its SKU.`
+    : `"${scannedCode}" isn't in the system. If this is a manufacturer ` +
+      `barcode on a known product, enter our barcode or SKU to link them.`;
   el.linkboxForm.hidden = false;
   el.aliasTarget.value = "";
   el.aliasPreview.hidden = true;
@@ -335,6 +376,7 @@ function openConfirmBox(product) {
   el.aliasOverwrite.hidden = true;
   el.aliasUnlink.hidden = false;
   hideOverwrite();
+  hideLinkboxExtras();
   el.linkbox.hidden = false;
   setResult("", null);
 }
@@ -377,6 +419,14 @@ async function checkAliasTarget() {
     el.aliasAccept.hidden = false;
     el.aliasOverwrite.hidden = false;
     hideOverwrite();
+    // Extra tools once a product is in view: register an Astronomik serial
+    // prefix (when the scan looks like a serial), and update an outdated SKU.
+    if (/^\d{5,12}$/.test(aliasCandidate || "")) {
+      el.prefixInput.value = aliasCandidate.slice(0, 4);
+      el.prefixSection.hidden = false;
+    }
+    el.newSkuInput.value = (linkboxInfo && linkboxInfo.suggested_sku) || "";
+    el.skuSection.hidden = false;
     setResult("Check the product, then link.", null);
   } catch (err) {
     setResult("Network error during lookup.", "err");
@@ -446,6 +496,81 @@ el.aliasCancel.addEventListener("click", () => {
   closeLinkbox();
   el.barcode.select();
   setResult("", null);
+});
+
+// Register a new Astronomik serial prefix for the previewed product.
+el.prefixSave.addEventListener("click", async () => {
+  if (!aliasPreviewProduct) return;
+  const operator = requireOperator();
+  if (!operator) return;
+  const prefix = el.prefixInput.value.trim();
+  if (!/^\d{4}$/.test(prefix)) {
+    setResult("The prefix must be exactly 4 digits.", "err");
+    return;
+  }
+  el.prefixSave.disabled = true;
+  try {
+    const res = await apiFetch("/api/serial-prefixes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prefix,
+        target: el.aliasTarget.value.trim(),
+        created_by: operator,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setResult(body.detail || "Saving the prefix failed.", "err");
+      return;
+    }
+    setResult(`Prefix ${prefix} saved — rescanning…`, "ok");
+    retryLookup(aliasCandidate);
+  } catch (err) {
+    setResult("Network error while saving the prefix.", "err");
+  } finally {
+    el.prefixSave.disabled = false;
+  }
+});
+
+// Replace the previewed product's SKU in Shopify.
+el.skuAck.addEventListener("change", () => {
+  el.skuSave.disabled = !el.skuAck.checked;
+});
+
+el.skuSave.addEventListener("click", async () => {
+  if (!aliasPreviewProduct || !el.skuAck.checked) return;
+  const operator = requireOperator();
+  if (!operator) return;
+  const newSku = el.newSkuInput.value.trim();
+  if (!newSku) {
+    setResult("Enter the new SKU first.", "err");
+    return;
+  }
+  el.skuSave.disabled = true;
+  try {
+    const res = await apiFetch("/api/sku-overwrites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        new_sku: newSku,
+        target: el.aliasTarget.value.trim(),
+        changed_by: operator,
+        confirmed: true,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setResult(body.detail || "SKU update failed.", "err");
+      el.skuSave.disabled = false;
+      return;
+    }
+    setResult(`SKU updated to ${newSku} — rescanning…`, "ok");
+    retryLookup(aliasCandidate);
+  } catch (err) {
+    setResult("Network error during the SKU update.", "err");
+    el.skuSave.disabled = false;
+  }
 });
 
 // --- Barcode replacement (adopt the scanned code as the real barcode) ------

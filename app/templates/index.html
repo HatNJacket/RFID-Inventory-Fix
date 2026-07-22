@@ -57,6 +57,10 @@
             aria-describedby="barcode-hint"
           />
           <p class="step__hint" id="barcode-hint">The scanner types here and presses Enter. Bad or missing barcode? Type the SKU instead.</p>
+          <label class="autoprint" id="auto-print-wrap" hidden title="When checked, scanning an Astronomik filter whose name has already been confirmed immediately prints one label — no button press. Filters without a confirmed name open the name panel first; saving the name prints the label. Remembered on this device; only available on the printer station.">
+            <input type="checkbox" id="auto-print" />
+            Auto-print label on scan (confirmed Astronomik names only)
+          </label>
         </div>
       </section>
 
@@ -82,6 +86,24 @@
             </dl>
           </div>
         </div>
+        <!-- Register a new Astronomik serial prefix (sheet gaps) -->
+        <div class="linkbox__extra" id="prefix-section" hidden>
+          <span class="linkbox__extra-label">New Astronomik serial prefix — future serials starting with these 4 digits will resolve to this product:</span>
+          <input id="prefix-input" class="linkbox__input linkbox__short" type="text" maxlength="4" inputmode="numeric" autocomplete="off" />
+          <button class="reset" id="prefix-save" type="button">Save prefix &rarr; this product</button>
+        </div>
+
+        <!-- Update the product's SKU in Shopify (outdated store SKUs) -->
+        <div class="linkbox__extra" id="sku-section" hidden>
+          <span class="linkbox__extra-label">Update this product's SKU in Shopify (e.g. to the manufacturer's current item number):</span>
+          <input id="newsku-input" class="linkbox__input" type="text" maxlength="100" placeholder="New SKU…" autocomplete="off" spellcheck="false" />
+          <label class="overwrite__ack">
+            <input type="checkbox" id="sku-ack" />
+            I understand this permanently replaces the product's SKU in Shopify.
+          </label>
+          <button class="overwrite__btn" id="sku-save" type="button" disabled>Update SKU</button>
+        </div>
+
         <div class="linkbox__actions">
           <button class="print__btn" id="alias-accept" type="button" hidden>Link barcode &amp; continue</button>
           <button class="reset" id="alias-overwrite" type="button" hidden
@@ -141,10 +163,6 @@
           <button class="reset" id="serial-label-save" type="button">Save name</button>
         </div>
         <p class="step__hint">Printed at the top of this product's labels in place of "Telescopes Canada". Match it to what the physical product says.</p>
-        <label class="autoprint" title="When checked, scanning an Astronomik filter whose name has already been confirmed immediately prints one label — no button press. Filters without a confirmed name still open this panel first; saving the name prints the label. Remembered on this device.">
-          <input type="checkbox" id="auto-print" />
-          Auto-print label on scan (confirmed names only)
-        </label>
       </section>
 
       <!-- STEP 2: rfid -->

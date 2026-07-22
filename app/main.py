@@ -273,11 +273,21 @@ def product_by_barcode(barcode: str):
                     # UI's auto-print trusts confirmed names, not defaults.
                     product["serial_label_saved"] = sp.label_name is not None
                     return product
+                # Structured detail: the UI prefills its SKU-update flow
+                # with the manufacturer's current SKU for this prefix.
                 raise HTTPException(
                     404,
-                    f"Recognized an {sp.brand} serial number (prefix "
-                    f"{sp.prefix} = {sp.item_name}), but no product with "
-                    f"SKU {sp.sku} exists in the catalog.",
+                    {
+                        "message": (
+                            f"Recognized an {sp.brand} serial number "
+                            f"(prefix {sp.prefix} = {sp.item_name}), but no "
+                            f"product with SKU {sp.sku} exists in the "
+                            f"catalog — the store's SKU may be outdated."
+                        ),
+                        "suggested_sku": sp.sku,
+                        "serial_prefix": sp.prefix,
+                        "brand": sp.brand,
+                    },
                 )
 
     if not db_ok and not api_ok:
@@ -669,6 +679,58 @@ def delete_alias(alias_barcode: str, session: Session = Depends(get_session)):
     session.commit()
 
 
+# ------------------------------------------------------- serial prefixes ---
+class SerialPrefixIn(BaseModel):
+    """Register a new 4-digit Astronomik serial prefix -> product link,
+    for items missing from the loaded manufacturer sheet."""
+
+    prefix: str = Field(min_length=4, max_length=4)
+    target: str = Field(max_length=100)  # known barcode or SKU
+    created_by: str | None = Field(default=None, max_length=100)
+
+    @field_validator("prefix")
+    @classmethod
+    def four_digits(cls, v: str) -> str:
+        v = v.strip()
+        if not (len(v) == 4 and v.isdigit()):
+            raise ValueError("must be exactly 4 digits")
+        return v
+
+    @field_validator("target")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/serial-prefixes",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def create_serial_prefix(
+    payload: SerialPrefixIn, session: Session = Depends(get_session)
+):
+    db_ok = database_configured()
+    api_ok = not config.check_shopify_env()
+    product = _resolve(payload.target, config.BARCODE_LOOKUP, db_ok, api_ok)
+    if product is None:
+        raise HTTPException(404, "No product found for that barcode or SKU.")
+
+    name = product.get("product_title") or ""
+    if product.get("variant_title"):
+        name += f" ({product['variant_title']})"
+    row = session.get(SerialPrefix, payload.prefix)
+    if row is None:
+        row = SerialPrefix(prefix=payload.prefix, brand="Astronomik")
+        session.add(row)
+    row.sku = product.get("sku")
+    row.item_name = name[:255]  # label_name untouched if one was saved
+    session.commit()
+    return {"serial_prefix": row.as_dict(), "product": product}
+
+
 # -------------------------------------------------------- serial labels ---
 class SerialLabelIn(BaseModel):
     label_name: str = Field(max_length=255)
@@ -785,6 +847,86 @@ def overwrite_barcode(
 
     product["barcode"] = payload.new_barcode
     return {"change": change.as_dict(), "product": product}
+
+
+class SkuOverwriteIn(BaseModel):
+    """Replace a product's SKU in Shopify (e.g. store SKU is outdated vs
+    the manufacturer's current item number)."""
+
+    new_sku: str = Field(max_length=100)
+    target: str = Field(max_length=100)  # current barcode or SKU
+    changed_by: str | None = Field(default=None, max_length=100)
+    confirmed: bool = False
+
+    @field_validator("new_sku", "target")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/sku-overwrites",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def overwrite_sku(
+    payload: SkuOverwriteIn, session: Session = Depends(get_session)
+):
+    if not payload.confirmed:
+        raise HTTPException(
+            422, "Confirmation checkbox is required for SKU replacement."
+        )
+    if config.check_shopify_env():
+        raise HTTPException(500, "Shopify credentials are not configured.")
+
+    db_ok = database_configured()
+    if _resolve(payload.new_sku, config.BARCODE_LOOKUP, db_ok, True):
+        raise HTTPException(
+            409,
+            "That SKU already belongs to a product — it can't replace "
+            "another product's SKU.",
+        )
+
+    try:
+        product = _lookup_api(payload.target)
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify lookup failed: {error}")
+    if product is None:
+        raise HTTPException(
+            404, "No product found in Shopify for that barcode or SKU."
+        )
+
+    try:
+        shopify.update_variant_sku(
+            product["shopify_product_id"],
+            product["shopify_variant_id"],
+            payload.new_sku,
+        )
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify SKU update failed: {error}")
+
+    old_sku = product.get("sku")
+    session.add(BarcodeChange(
+        sku=payload.new_sku,
+        product_title=product.get("product_title"),
+        shopify_variant_id=product.get("shopify_variant_id"),
+        changed_field="sku",
+        old_barcode=old_sku,
+        new_barcode=payload.new_sku,
+        changed_by=payload.changed_by,
+    ))
+    # Serial prefixes that pointed at the old SKU follow the product.
+    if old_sku:
+        for row in session.scalars(
+            select(SerialPrefix).where(SerialPrefix.sku == old_sku)
+        ):
+            row.sku = payload.new_sku
+    session.commit()
+
+    product["sku"] = payload.new_sku
+    return {"product": product}
 
 
 @app.get("/api/barcode-overwrites", dependencies=[Depends(require_user)])
