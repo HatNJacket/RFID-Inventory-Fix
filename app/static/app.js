@@ -296,8 +296,11 @@ el.rfid.addEventListener("keydown", async (event) => {
     const saved = await res.json();
     setResult(`Assigned ${saved.rfid_id} → ${saved.product_title}`, "ok");
     prependRecent(saved);
-    // Brief pause so the operator sees confirmation, then reset for next box.
-    setTimeout(resetStation, 700);
+    // Stay on this product for bulk tagging: clear the field and keep
+    // scanning tags. Reset (Esc) or scanning a new barcode moves on.
+    el.rfid.value = "";
+    el.rfid.focus();
+    loadTags(pendingProduct);
   } catch (err) {
     setResult("Network error while saving.", "err");
   }

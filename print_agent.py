@@ -68,7 +68,13 @@ LABEL_ZPL = """^XA
 
 # Mode A (automatic) makes the printer pick the densest Code 128 encoding,
 # which is what _code128_width_dots models — required for true centering.
-BARCODE_LINE = "^FO{bx},88^BY{module},3,80^BCN,80,Y,N,N,A^FD{barcode}^FS\n"
+# The printer's own interpretation line shrinks with the module width, so
+# it's disabled; a separate normal-sized centered caption is printed below.
+BARCODE_LINE = (
+    "^FO{bx},88^BY{module},3,72^BCN,72,N,N,N,A^FD{barcode}^FS\n"
+    "^CF0,20\n"
+    "^FO0,164^FB{pw},1,0,C^FD{barcode}^FS\n"
+)
 
 # Prepended only for RFID-encoding printers: auto tag setup + write the EPC.
 RFID_ZPL = "^RS8\n^RFW,H^FD{epc}^FS\n"
@@ -139,7 +145,9 @@ def build_zpl(job: dict, encode_rfid: bool,
             module = 1
             width = _code128_width_dots(barcode, module)
         bx = max(2, (pw - width) // 2)
-        barcode_line = BARCODE_LINE.format(bx=bx, barcode=barcode, module=module)
+        barcode_line = BARCODE_LINE.format(
+            bx=bx, barcode=barcode, module=module, pw=pw
+        )
     return LABEL_ZPL.format(
         rfid_setup=RFID_ZPL.format(epc=job["epc"]) if encode_rfid else "",
         pw=pw,
