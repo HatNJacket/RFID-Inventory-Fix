@@ -109,6 +109,29 @@ class BarcodeAlias(Base):
         }
 
 
+class SerialPrefix(Base):
+    """Brand serial-number prefixes. Some manufacturers (Astronomik) put a
+    product identifier in the first digits of each unit's serial number and
+    barcode the serial — so the barcode differs per unit, but its prefix
+    identifies the product. Loaded from the manufacturer's mapping sheet via
+    load_astronomik.py; scans resolve prefix -> SKU."""
+
+    __tablename__ = "rfid_serial_prefixes"
+
+    prefix: Mapped[str] = mapped_column(String(8), primary_key=True)
+    brand: Mapped[str] = mapped_column(String(50), nullable=False)
+    sku: Mapped[str | None] = mapped_column(String(100), index=True)
+    item_name: Mapped[str | None] = mapped_column(String(255))
+
+    def as_dict(self) -> dict:
+        return {
+            "prefix": self.prefix,
+            "brand": self.brand,
+            "sku": self.sku,
+            "item_name": self.item_name,
+        }
+
+
 class BarcodeChange(Base):
     """Audit log of barcode overwrites: an operator replaced a product's
     real Shopify barcode with a scanned (usually manufacturer) barcode.

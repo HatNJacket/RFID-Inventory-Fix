@@ -36,6 +36,7 @@ from app.models import (
     BarcodeChange,
     PrintJob,
     RfidAssignment,
+    SerialPrefix,
 )
 
 logger = logging.getLogger("rfid")
@@ -221,6 +222,27 @@ def product_by_barcode(barcode: str):
                 product["alias_barcode"] = alias.alias_barcode
                 product["alias_warning"] = True
                 return product
+
+        # Or a brand serial number whose leading digits identify the
+        # product (Astronomik barcodes each unit's serial; the first 4
+        # digits are the item). Length-bounded so ordinary UPC/EAN-13/14
+        # retail barcodes never fall in here.
+        if barcode.isdigit() and 5 <= len(barcode) <= 12:
+            with Session(get_engine()) as session:
+                sp = session.get(SerialPrefix, barcode[:4])
+            if sp is not None:
+                product = _resolve(sp.sku, mode, db_ok, api_ok)
+                if product is not None:
+                    product["serial_brand"] = sp.brand
+                    product["serial_prefix"] = sp.prefix
+                    product["serial_number"] = barcode
+                    return product
+                raise HTTPException(
+                    404,
+                    f"Recognized an {sp.brand} serial number (prefix "
+                    f"{sp.prefix} = {sp.item_name}), but no product with "
+                    f"SKU {sp.sku} exists in the catalog.",
+                )
 
     if not db_ok and not api_ok:
         raise HTTPException(
