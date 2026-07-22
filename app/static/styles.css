@@ -198,6 +198,26 @@ body {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* When the link/confirm panel is open on a wide screen, it becomes a side
+   window: the scan flow shifts left and the panel takes a sticky right
+   column. Narrow screens keep the stacked layout. */
+@media (min-width: 880px) {
+  .flow--side {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 360px;
+    gap: 0 18px;
+    align-items: start;
+  }
+  .flow--side > * { grid-column: 1; }
+  .flow--side > .linkbox {
+    grid-column: 2;
+    grid-row: 1 / span 8;
+    position: sticky;
+    top: 16px;
+    margin-bottom: 0;
+  }
+}
+
 /* trust checkbox under the scan hint */
 .trust {
   display: inline-flex;

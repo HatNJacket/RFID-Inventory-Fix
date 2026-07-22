@@ -31,6 +31,8 @@ const el = {
   recentList: document.getElementById("recent-list"),
   search: document.getElementById("search"),
   trustAlias: document.getElementById("trust-alias"),
+  trustWrap: document.getElementById("trust-wrap"),
+  flow: document.getElementById("tab-scan"),
   linkbox: document.getElementById("linkbox"),
   linkboxTitle: document.getElementById("linkbox-title"),
   linkboxText: document.getElementById("linkbox-text"),
@@ -204,7 +206,15 @@ function renderAliasPreview(p) {
   el.aliasPreview.hidden = false;
 }
 
+// The trust checkbox stays irrelevant noise until a linked/unknown barcode
+// actually shows up; from then on it stays available until page reload.
+function revealTrustOption() {
+  el.trustWrap.hidden = false;
+}
+
 function openLinkbox(scannedCode) {
+  revealTrustOption();
+  el.flow.classList.add("flow--side");
   aliasCandidate = scannedCode;
   aliasPreviewProduct = null;
   el.linkboxTitle.textContent = "Unknown barcode";
@@ -223,6 +233,8 @@ function openLinkbox(scannedCode) {
 }
 
 function openConfirmBox(product) {
+  revealTrustOption();
+  el.flow.classList.add("flow--side");
   aliasCandidate = product.alias_barcode;
   el.linkboxTitle.textContent = "Linked barcode — confirm the item";
   el.linkboxText.textContent =
@@ -239,6 +251,7 @@ function openConfirmBox(product) {
 
 function closeLinkbox() {
   el.linkbox.hidden = true;
+  el.flow.classList.remove("flow--side");
   aliasCandidate = null;
   aliasPreviewProduct = null;
 }

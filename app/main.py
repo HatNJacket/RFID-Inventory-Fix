@@ -8,6 +8,7 @@ as it would type into Notepad, and JavaScript forwards each scan here.
 """
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,10 @@ logger = logging.getLogger("rfid")
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+# Cache-buster for static assets: changes on every app start (i.e. every
+# deploy), so browsers stop serving stale JS/CSS after updates.
+ASSET_VERSION = str(int(time.time()))
 
 
 @asynccontextmanager
@@ -109,6 +114,7 @@ def index(request: Request):
             "db_ready": database_configured(),
             "allow_remote_print": config.ALLOW_REMOTE_PRINT,
             "operators": config.OPERATORS,
+            "asset_version": ASSET_VERSION,
             # App Bridge only when loaded inside Shopify admin (it adds a
             # 'host' query param); the script is inert/broken outside it.
             "app_bridge_key": (

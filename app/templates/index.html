@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RFID Inventory — Scan Station</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}" />
   {% if app_bridge_key %}
   <!-- Loaded only inside Shopify admin; authenticates API calls there. -->
   <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="{{ app_bridge_key }}"></script>
@@ -57,9 +57,9 @@
             aria-describedby="barcode-hint"
           />
           <p class="step__hint" id="barcode-hint">The scanner types here and presses Enter. Bad or missing barcode? Type the SKU instead.</p>
-          <label class="trust" title="When checked, scanning a linked (non-internal) barcode goes straight through without the confirmation window. Use when reading in many similar items whose manufacturer barcodes don't match ours (e.g. Astronomik filters). Resets when the page reloads.">
+          <label class="trust" id="trust-wrap" hidden title="When checked, barcodes that were previously linked to a product scan straight through without asking you to confirm the item each time. Use for batches of similar items whose manufacturer barcodes don't match ours (e.g. Astronomik filters). Turns itself off when the page reloads.">
             <input type="checkbox" id="trust-alias" />
-            Skip linked-barcode confirmation
+            Trust linked barcodes for this session
           </label>
         </div>
       </section>
@@ -182,6 +182,6 @@
     </section>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v={{ asset_version }}"></script>
 </body>
 </html>
