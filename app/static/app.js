@@ -309,7 +309,16 @@ function showSerialPanel(p) {
 async function saveSerialLabel(showFeedback) {
   const name = el.serialLabelInput.value.trim();
   if (!pendingProduct || !pendingProduct.serial_prefix || !name) return;
-  if (name === serialLoadedLabel) return;
+  // Skip only when this exact name is already confirmed server-side.
+  // An unchanged-but-never-saved default still needs saving — printing or
+  // hitting Save IS the confirmation that makes auto-print trust it.
+  if (name === serialLoadedLabel && pendingProduct.serial_label_saved) {
+    if (showFeedback) {
+      el.serialLabelSave.textContent = "Saved ✓";
+      setTimeout(() => (el.serialLabelSave.textContent = "Save name"), 1500);
+    }
+    return;
+  }
   try {
     const res = await apiFetch(
       `/api/serial-prefixes/${encodeURIComponent(pendingProduct.serial_prefix)}/label`,
