@@ -381,6 +381,19 @@ body {
   border-radius: 6px;
   padding: 2px 8px;
 }
+.product__bin--edit { cursor: pointer; }
+.product__bin--edit:hover { outline: 1.5px solid var(--accent); }
+.product__bin-input {
+  width: 110px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1.5px solid var(--accent);
+  border-radius: 6px;
+  padding: 2px 8px;
+  outline: none;
+}
 
 /* tags-on-file panel inside the product card */
 .tags {

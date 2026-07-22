@@ -849,6 +849,58 @@ def overwrite_barcode(
     return {"change": change.as_dict(), "product": product}
 
 
+class BinUpdateIn(BaseModel):
+    """Set a product's bin location (Shopify stock.bin metafield)."""
+
+    target: str = Field(max_length=100)  # barcode or SKU
+    bin: str = Field(max_length=100)
+    changed_by: str | None = Field(default=None, max_length=100)
+
+    @field_validator("target", "bin")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/bin-updates",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
+    if config.check_shopify_env():
+        raise HTTPException(500, "Shopify credentials are not configured.")
+    # Shopify API resolution: the metafield write needs the variant GID.
+    try:
+        product = _lookup_api(payload.target)
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify lookup failed: {error}")
+    if product is None:
+        raise HTTPException(
+            404, "No product found in Shopify for that barcode or SKU."
+        )
+    try:
+        shopify.set_variant_bin(product["shopify_variant_id"], payload.bin)
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify bin update failed: {error}")
+
+    session.add(BarcodeChange(
+        sku=product.get("sku"),
+        product_title=product.get("product_title"),
+        shopify_variant_id=product.get("shopify_variant_id"),
+        changed_field="bin",
+        old_barcode=(product.get("bin_location") or "")[:64] or None,
+        new_barcode=payload.bin[:64],
+        changed_by=payload.changed_by,
+    ))
+    session.commit()
+
+    product["bin_location"] = payload.bin
+    return {"product": product}
+
+
 class SkuOverwriteIn(BaseModel):
     """Replace a product's SKU in Shopify (e.g. store SKU is outdated vs
     the manufacturer's current item number)."""

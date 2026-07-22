@@ -64,7 +64,63 @@ const el = {
   newSkuInput: document.getElementById("newsku-input"),
   skuAck: document.getElementById("sku-ack"),
   skuSave: document.getElementById("sku-save"),
+  binInput: document.getElementById("bin-input"),
 };
+
+// --- Click-to-edit bin: chip -> empty text box -> Enter saves to Shopify ---
+el.pBin.addEventListener("click", () => {
+  if (!pendingProduct) return;
+  el.pBin.hidden = true;
+  el.binInput.value = "";
+  el.binInput.hidden = false;
+  el.binInput.focus();
+});
+
+function closeBinEditor() {
+  el.binInput.hidden = true;
+  el.pBin.hidden = false;
+}
+
+el.binInput.addEventListener("keydown", async (event) => {
+  if (event.key === "Escape") {
+    event.stopPropagation(); // don't let the global Esc reset the station
+    closeBinEditor();
+    return;
+  }
+  if (event.key !== "Enter") return;
+  const bin = el.binInput.value.trim();
+  if (!bin || !pendingProduct) return;
+  el.binInput.disabled = true;
+  try {
+    const res = await apiFetch("/api/bin-updates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target: pendingProduct.sku || pendingProduct.barcode,
+        bin,
+        changed_by: operatorEl.value || null,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setResult(body.detail || "Bin update failed.", "err");
+      return;
+    }
+    pendingProduct.bin_location = bin;
+    el.pBin.textContent = bin;
+    setResult(`Bin set to ${bin} (saved to Shopify).`, "ok");
+    closeBinEditor();
+    el.rfid.focus();
+  } catch (err) {
+    setResult("Network error during the bin update.", "err");
+  } finally {
+    el.binInput.disabled = false;
+  }
+});
+
+el.binInput.addEventListener("blur", () => {
+  if (!el.binInput.disabled) closeBinEditor();
+});
 
 // Auto-print is a standing station preference (bulk receiving mode),
 // shown up-front under the scan field — but only where a printer prints.
@@ -627,6 +683,7 @@ function showProduct(p) {
   el.pVariant.textContent = p.variant_title || "—";
   el.pSku.textContent = p.sku || "—";
   el.pBarcode.textContent = p.barcode || "—";
+  closeBinEditor();
   el.pBin.textContent = p.bin_location || "—";
   el.pSource.textContent =
     (p.source === "telcan" ? "TELCAN" : p.source === "shopify" ? "Shopify" : "—") +

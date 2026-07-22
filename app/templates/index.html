@@ -130,7 +130,10 @@
           <div><dt>Variant</dt><dd id="p-variant">—</dd></div>
           <div><dt>SKU</dt><dd id="p-sku">—</dd></div>
           <div><dt>Barcode</dt><dd id="p-barcode">—</dd></div>
-          <div><dt>Bin</dt><dd id="p-bin" class="product__bin">—</dd></div>
+          <div><dt>Bin</dt><dd>
+            <span id="p-bin" class="product__bin product__bin--edit" title="Click to set the bin (saves to Shopify)">—</span>
+            <input id="bin-input" class="product__bin-input" type="text" maxlength="100" autocomplete="off" spellcheck="false" placeholder="Bin…" hidden />
+          </dd></div>
           <div><dt>Data source</dt><dd id="p-source">—</dd></div>
           <div><dt>Tags on file</dt><dd id="p-tagcount">—</dd></div>
         </dl>

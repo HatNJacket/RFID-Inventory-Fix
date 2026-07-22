@@ -194,6 +194,38 @@ def update_variant_sku(
     return result["productVariants"][0]
 
 
+_SET_BIN_MUTATION = """
+mutation SetBin($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    metafields { id value }
+    userErrors { field message }
+  }
+}
+"""
+
+
+def set_variant_bin(variant_gid: str, bin_value: str) -> None:
+    """Write the variant's stock.bin metafield — the bin source the lookup
+    reads first. Requires write_products."""
+    data = query_shopify(
+        _SET_BIN_MUTATION,
+        {
+            "metafields": [{
+                "ownerId": variant_gid,
+                "namespace": "stock",
+                "key": "bin",
+                "type": "single_line_text_field",
+                "value": bin_value,
+            }]
+        },
+    )
+    result = data["metafieldsSet"]
+    if result["userErrors"]:
+        raise RuntimeError(
+            "; ".join(e["message"] for e in result["userErrors"])
+        )
+
+
 def lookup_barcode(term: str) -> dict | None:
     """Look up a variant by barcode — or by SKU when the barcode search
     misses, since some products have bad or missing barcodes. Returns a
