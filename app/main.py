@@ -269,6 +269,9 @@ def product_by_barcode(barcode: str):
                     product["serial_label"] = (
                         sp.label_name or _default_serial_label(sp.item_name)
                     )
+                    # True only when an operator has saved the name — the
+                    # UI's auto-print trusts confirmed names, not defaults.
+                    product["serial_label_saved"] = sp.label_name is not None
                     return product
                 raise HTTPException(
                     404,

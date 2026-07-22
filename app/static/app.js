@@ -56,7 +56,14 @@ const el = {
   serialSheetName: document.getElementById("serial-sheet-name"),
   serialLabelInput: document.getElementById("serial-label-input"),
   serialLabelSave: document.getElementById("serial-label-save"),
+  autoPrint: document.getElementById("auto-print"),
 };
+
+// Auto-print is a standing station preference (bulk receiving mode).
+el.autoPrint.checked = localStorage.getItem("autoPrint") === "1";
+el.autoPrint.addEventListener("change", () => {
+  localStorage.setItem("autoPrint", el.autoPrint.checked ? "1" : "0");
+});
 
 // Printing UI shows on the printer station (?printer=1 in the URL) or for
 // everyone when the server flag ALLOW_REMOTE_PRINT is on.
@@ -186,11 +193,25 @@ el.barcode.addEventListener("keydown", async (event) => {
 
 function acceptProduct(product, message) {
   pendingProduct = product;
+  autoPrintedThisScan = false;
   closeLinkbox();
   showProduct(product);
   showSerialPanel(product);
   setResult(message, "ok");
   activate("rfid");
+  maybeAutoPrint();
+}
+
+// One label per unit scanned: when auto-print is on and the scanned serial's
+// name has been operator-confirmed, the label prints with no button press.
+let autoPrintedThisScan = false;
+
+function maybeAutoPrint() {
+  if (!printingEnabled || !el.autoPrint.checked) return;
+  if (!pendingProduct || !pendingProduct.serial_prefix) return;
+  if (!pendingProduct.serial_label_saved) return;
+  if (autoPrintedThisScan) return;
+  queueLabels(1);
 }
 
 // --- Serialized-brand label names (Astronomik) ------------------------------
@@ -228,9 +249,12 @@ async function saveSerialLabel(showFeedback) {
     );
     if (res.ok) {
       serialLoadedLabel = name;
+      if (pendingProduct) pendingProduct.serial_label_saved = true;
       if (showFeedback) {
         el.serialLabelSave.textContent = "Saved ✓";
         setTimeout(() => (el.serialLabelSave.textContent = "Save name"), 1500);
+        // Freshly confirmed name + auto-print mode = print this unit now.
+        maybeAutoPrint();
       }
     } else if (showFeedback) {
       setResult("Could not save the label name.", "err");
@@ -525,11 +549,11 @@ async function loadTags(p) {
 }
 
 // --- Print & encode labels -------------------------------------------------
-el.printBtn.addEventListener("click", async () => {
+async function queueLabels(quantity) {
   if (!pendingProduct) return;
   const operator = requireOperator();
   if (!operator) return;
-  const quantity = Math.max(1, Math.min(100, Number(el.printQty.value) || 1));
+  autoPrintedThisScan = true; // any print covers the unit in hand
   el.printBtn.disabled = true;
   el.printStatus.textContent = "Queueing…";
   try {
@@ -565,7 +589,11 @@ el.printBtn.addEventListener("click", async () => {
     // scanning the tag — no mouse required.
     el.rfid.focus();
   }
-});
+}
+
+el.printBtn.addEventListener("click", () =>
+  queueLabels(Math.max(1, Math.min(100, Number(el.printQty.value) || 1)))
+);
 
 // Poll the queued jobs until they all finish (or we give up watching —
 // the agent keeps printing regardless).
