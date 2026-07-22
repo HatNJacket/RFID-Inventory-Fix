@@ -52,20 +52,25 @@ DPI = 203
 SHIFT_DOWN_DOTS = 31   # ^LT: + moves the whole image down (max 120)
 SHIFT_RIGHT_DOTS = 2   # ^LH x: + moves the whole image right
 
-# Layout (all centered): store name / SKU / barcode / BIN.
+# Layout (all centered): header / SKU / barcode / BIN. The header is the
+# store name normally, but Astronomik items swap it for the full product +
+# variant name (their labels identify serialized filters, so the name is
+# what the picker needs to see).
 LABEL_ZPL = """^XA
 {rfid_setup}^PW{pw}
 ^LL{ll}
 ^LH{sr},0
 ^LT{sd}
-^CF0,34
-^FO0,10^FB{pw},1,0,C^FDTelescopes Canada^FS
-^CF0,30
+{header}^CF0,30
 ^FO0,52^FB{pw},1,0,C^FD{sku}^FS
 {barcode_line}^CF0,30
 ^FO0,{bin_y}^FB{pw},1,0,C^FDBIN: {bin}^FS
 ^XZ
 """
+
+HEADER_STORE = "^CF0,34\n^FO0,10^FB{pw},1,0,C^FDTelescopes Canada^FS\n"
+# Two wrapped, centered lines of the product name in place of the store name.
+HEADER_PRODUCT = "^CF0,20\n^FO0,4^FB{pw},2,0,C^FD{name}^FS\n"
 
 # Mode A (automatic) makes the printer pick the densest Code 128 encoding,
 # which is what _code128_width_dots models — required for true centering.
@@ -131,6 +136,16 @@ def build_zpl(job: dict, encode_rfid: bool,
         return text.replace("^", " ").replace("~", " ").strip()
 
     pw, ll = label_dots(width_in, height_in)
+
+    title = clean(job.get("product_title"), fallback="")
+    if "astronomik" in title.lower():
+        name = title
+        if job.get("variant_title"):
+            name += f" ({clean(job['variant_title'])})"
+        header = HEADER_PRODUCT.format(pw=pw, name=name[:84])
+    else:
+        header = HEADER_STORE.format(pw=pw)
+
     barcode = clean(job.get("barcode"), fallback="")
     if not barcode:
         # No barcode on file: encode the SKU instead — the app's scan field
@@ -155,6 +170,7 @@ def build_zpl(job: dict, encode_rfid: bool,
         ll=ll,
         sd=shift_down,
         sr=shift_right,
+        header=header,
         bin_y=ll - 45,
         sku=clean(job.get("sku")),
         barcode_line=barcode_line,

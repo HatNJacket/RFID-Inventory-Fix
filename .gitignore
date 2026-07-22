@@ -8,3 +8,6 @@ __pycache__/
 *.db
 .pytest_cache/
 .claude/
+print_agent_loop.cmd
+print_agent_hidden.vbs
+deploy.zip
