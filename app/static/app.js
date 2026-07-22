@@ -240,9 +240,16 @@ async function saveSerialLabel(showFeedback) {
   }
 }
 
-el.serialLabelSave.addEventListener("click", () => saveSerialLabel(true));
+el.serialLabelSave.addEventListener("click", () => {
+  saveSerialLabel(true);
+  el.rfid.focus();
+});
 el.serialLabelInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") saveSerialLabel(true);
+  if (event.key === "Enter") {
+    saveSerialLabel(true);
+    // Same idea as after printing: next action is scanning the tag.
+    el.rfid.focus();
+  }
 });
 
 // --- Foreign-barcode linking ------------------------------------------------
