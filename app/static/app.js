@@ -279,9 +279,25 @@ function acceptProduct(product, message) {
 let autoPrintedThisScan = false;
 
 function maybeAutoPrint() {
-  if (!printingEnabled || !el.autoPrint.checked) return;
   if (!pendingProduct || !pendingProduct.serial_prefix) return;
-  if (!pendingProduct.serial_label_saved) return;
+  if (!el.autoPrint.checked) return;
+  // From here on the operator expects a print — never refuse silently.
+  if (!printingEnabled) {
+    setResult(
+      "Auto-print skipped: this isn't the printer-station page " +
+        "(the address needs ?printer=1).",
+      "err"
+    );
+    return;
+  }
+  if (!pendingProduct.serial_label_saved) {
+    setResult(
+      "Auto-print skipped: the label name isn't confirmed yet — press " +
+        "Save name (or print once) to confirm it.",
+      "err"
+    );
+    return;
+  }
   if (autoPrintedThisScan) return;
   queueLabels(1);
 }
