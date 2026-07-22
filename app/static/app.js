@@ -554,6 +554,9 @@ el.printBtn.addEventListener("click", async () => {
     el.printStatus.textContent = "Network error while queueing.";
   } finally {
     el.printBtn.disabled = false;
+    // Hands back on the scanner: the label is printing, the next action is
+    // scanning the tag — no mouse required.
+    el.rfid.focus();
   }
 });
 
