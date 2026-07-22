@@ -31,7 +31,12 @@ from app.database import (
     get_session,
     init_db,
 )
-from app.models import BarcodeAlias, PrintJob, RfidAssignment
+from app.models import (
+    BarcodeAlias,
+    BarcodeChange,
+    PrintJob,
+    RfidAssignment,
+)
 
 logger = logging.getLogger("rfid")
 
@@ -580,6 +585,107 @@ def delete_alias(alias_barcode: str, session: Session = Depends(get_session)):
         raise HTTPException(404, "No such linked barcode.")
     session.delete(row)
     session.commit()
+
+
+# ------------------------------------------------------ barcode overwrite ---
+class OverwriteIn(BaseModel):
+    """Adopt a scanned (manufacturer) barcode as the product's REAL barcode,
+    replacing the one in Shopify."""
+
+    new_barcode: str = Field(max_length=64)
+    target: str = Field(max_length=100)  # current barcode or SKU
+    changed_by: str | None = Field(default=None, max_length=100)
+    confirmed: bool = False  # the UI checkbox; server refuses without it
+
+    @field_validator("new_barcode", "target")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/barcode-overwrites",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def overwrite_barcode(
+    payload: OverwriteIn, session: Session = Depends(get_session)
+):
+    """Replace a product's barcode in Shopify with the scanned one, and log
+    who did it and when. TELCAN's mirror catches up on its next sync; until
+    then the Shopify-API lookup fallback resolves the new barcode."""
+    if not payload.confirmed:
+        raise HTTPException(
+            422, "Confirmation checkbox is required for barcode replacement."
+        )
+    if config.check_shopify_env():
+        raise HTTPException(500, "Shopify credentials are not configured.")
+
+    db_ok = database_configured()
+    if _resolve(payload.new_barcode, config.BARCODE_LOOKUP, db_ok, True):
+        raise HTTPException(
+            409,
+            "That scanned code already belongs to a product — it can't "
+            "replace another product's barcode.",
+        )
+
+    # Must resolve via the Shopify API: the mutation needs real Shopify ids,
+    # which the TELCAN mirror doesn't store.
+    try:
+        product = _lookup_api(payload.target)
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify lookup failed: {error}")
+    if product is None:
+        raise HTTPException(
+            404, "No product found in Shopify for that barcode or SKU."
+        )
+
+    try:
+        shopify.update_variant_barcode(
+            product["shopify_product_id"],
+            product["shopify_variant_id"],
+            payload.new_barcode,
+        )
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify barcode update failed: {error}")
+
+    change = BarcodeChange(
+        sku=product.get("sku"),
+        product_title=product.get("product_title"),
+        shopify_variant_id=product.get("shopify_variant_id"),
+        old_barcode=product.get("barcode"),
+        new_barcode=payload.new_barcode,
+        changed_by=payload.changed_by,
+    )
+    session.add(change)
+    # If this code was previously linked as an alias, the link is now
+    # redundant (and would shadow nothing, but keep the table honest).
+    stale_alias = session.scalar(
+        select(BarcodeAlias).where(
+            BarcodeAlias.alias_barcode == payload.new_barcode
+        )
+    )
+    if stale_alias is not None:
+        session.delete(stale_alias)
+    session.commit()
+    session.refresh(change)
+
+    product["barcode"] = payload.new_barcode
+    return {"change": change.as_dict(), "product": product}
+
+
+@app.get("/api/barcode-overwrites", dependencies=[Depends(require_user)])
+def list_barcode_overwrites(
+    limit: int = 100, session: Session = Depends(get_session)
+):
+    rows = session.scalars(
+        select(BarcodeChange)
+        .order_by(BarcodeChange.id.desc())
+        .limit(min(limit, 500))
+    ).all()
+    return {"count": len(rows), "changes": [c.as_dict() for c in rows]}
 
 
 # -------------------------------------------------------- inventory view ---

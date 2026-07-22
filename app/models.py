@@ -109,6 +109,42 @@ class BarcodeAlias(Base):
         }
 
 
+class BarcodeChange(Base):
+    """Audit log of barcode overwrites: an operator replaced a product's
+    real Shopify barcode with a scanned (usually manufacturer) barcode.
+    One row per change — who, when, old and new — so accidents are easy
+    to trace and reverse."""
+
+    __tablename__ = "rfid_barcode_changes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    sku: Mapped[str | None] = mapped_column(String(100), index=True)
+    product_title: Mapped[str | None] = mapped_column(String(255))
+    shopify_variant_id: Mapped[str | None] = mapped_column(String(64))
+    old_barcode: Mapped[str | None] = mapped_column(String(64))
+    new_barcode: Mapped[str] = mapped_column(String(64), index=True)
+
+    changed_by: Mapped[str | None] = mapped_column(String(100))
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "sku": self.sku,
+            "product_title": self.product_title,
+            "shopify_variant_id": self.shopify_variant_id,
+            "old_barcode": self.old_barcode,
+            "new_barcode": self.new_barcode,
+            "changed_by": self.changed_by,
+            "changed_at": (
+                self.changed_at.isoformat() if self.changed_at else None
+            ),
+        }
+
+
 class PrintJob(Base):
     """One queued Zebra label: print the barcode AND encode the EPC into the
     sticker's RFID chip in a single pass.

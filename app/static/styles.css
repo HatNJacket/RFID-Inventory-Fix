@@ -283,6 +283,40 @@ body {
 .linkbox__ptitle { font-size: 14px; font-weight: 650; margin-bottom: 8px; }
 .linkbox__actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
+/* barcode replacement confirmation — deliberately alarming */
+.overwrite {
+  margin-top: 12px;
+  border: 1px solid var(--bad-ink);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--bad-bg);
+}
+.overwrite__text { margin: 0 0 10px; font-size: 13px; color: var(--bad-ink); }
+.overwrite__ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--bad-ink);
+  margin-bottom: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.overwrite__ack input { accent-color: var(--bad-ink); margin-top: 2px; }
+.overwrite__btn {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: #c5280c;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+.overwrite__btn:hover { filter: brightness(1.1); }
+.overwrite__btn:disabled { opacity: 0.45; cursor: default; }
+
 /* product card */
 .product {
   background: var(--card);

@@ -47,8 +47,13 @@ const el = {
   aliasPbarcode: document.getElementById("alias-pbarcode"),
   aliasPbin: document.getElementById("alias-pbin"),
   aliasAccept: document.getElementById("alias-accept"),
+  aliasOverwrite: document.getElementById("alias-overwrite"),
   aliasUnlink: document.getElementById("alias-unlink"),
   aliasCancel: document.getElementById("alias-cancel"),
+  overwriteConfirm: document.getElementById("overwrite-confirm"),
+  overwriteText: document.getElementById("overwrite-text"),
+  overwriteAck: document.getElementById("overwrite-ack"),
+  overwriteGo: document.getElementById("overwrite-go"),
 };
 
 // Printing UI shows on the printer station (?printer=1 in the URL) or for
@@ -226,7 +231,9 @@ function openLinkbox(scannedCode) {
   el.aliasPreview.hidden = true;
   el.aliasAccept.hidden = true;
   el.aliasAccept.textContent = "Link barcode & continue";
+  el.aliasOverwrite.hidden = true;
   el.aliasUnlink.hidden = true;
+  hideOverwrite();
   el.linkbox.hidden = false;
   setResult("No product found for that barcode or SKU.", "err");
   el.aliasTarget.focus();
@@ -244,7 +251,9 @@ function openConfirmBox(product) {
   renderAliasPreview(product);
   el.aliasAccept.hidden = false;
   el.aliasAccept.textContent = "Confirm item";
+  el.aliasOverwrite.hidden = true;
   el.aliasUnlink.hidden = false;
+  hideOverwrite();
   el.linkbox.hidden = false;
   setResult("", null);
 }
@@ -252,8 +261,15 @@ function openConfirmBox(product) {
 function closeLinkbox() {
   el.linkbox.hidden = true;
   el.flow.classList.remove("flow--side");
+  hideOverwrite();
   aliasCandidate = null;
   aliasPreviewProduct = null;
+}
+
+function hideOverwrite() {
+  el.overwriteConfirm.hidden = true;
+  el.overwriteAck.checked = false;
+  el.overwriteGo.disabled = true;
 }
 
 async function checkAliasTarget() {
@@ -278,6 +294,8 @@ async function checkAliasTarget() {
     }
     renderAliasPreview(await res.json());
     el.aliasAccept.hidden = false;
+    el.aliasOverwrite.hidden = false;
+    hideOverwrite();
     setResult("Check the product, then link.", null);
   } catch (err) {
     setResult("Network error during lookup.", "err");
@@ -347,6 +365,55 @@ el.aliasCancel.addEventListener("click", () => {
   closeLinkbox();
   el.barcode.select();
   setResult("", null);
+});
+
+// --- Barcode replacement (adopt the scanned code as the real barcode) ------
+el.aliasOverwrite.addEventListener("click", () => {
+  if (!aliasPreviewProduct) return;
+  el.overwriteText.textContent =
+    `Replace the barcode on "${aliasPreviewProduct.product_title}"` +
+    (aliasPreviewProduct.variant_title
+      ? ` (${aliasPreviewProduct.variant_title})`
+      : "") +
+    `: "${aliasPreviewProduct.barcode || "(none)"}" → "${aliasCandidate}". ` +
+    `This changes the product in Shopify itself.`;
+  el.overwriteConfirm.hidden = false;
+  el.overwriteAck.checked = false;
+  el.overwriteGo.disabled = true;
+});
+
+el.overwriteAck.addEventListener("change", () => {
+  el.overwriteGo.disabled = !el.overwriteAck.checked;
+});
+
+el.overwriteGo.addEventListener("click", async () => {
+  if (!aliasPreviewProduct || !el.overwriteAck.checked) return;
+  const operator = requireOperator();
+  if (!operator) return;
+  el.overwriteGo.disabled = true;
+  try {
+    const res = await apiFetch("/api/barcode-overwrites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        new_barcode: aliasCandidate,
+        target: el.aliasTarget.value.trim(),
+        changed_by: operator,
+        confirmed: true,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setResult(body.detail || "Barcode replacement failed.", "err");
+      el.overwriteGo.disabled = false;
+      return;
+    }
+    const { product } = await res.json();
+    acceptProduct(product, "Barcode replaced in Shopify. Scan the RFID tag.");
+  } catch (err) {
+    setResult("Network error during barcode replacement.", "err");
+    el.overwriteGo.disabled = false;
+  }
 });
 
 function showProduct(p) {

@@ -88,8 +88,20 @@
         </div>
         <div class="linkbox__actions">
           <button class="print__btn" id="alias-accept" type="button" hidden>Link barcode &amp; continue</button>
+          <button class="reset" id="alias-overwrite" type="button" hidden
+                  title="Adopt the scanned barcode as this product's real barcode in Shopify, instead of keeping it as a separate linked barcode.">Replace product barcode…</button>
           <button class="reset" id="alias-unlink" type="button" hidden>Unlink this barcode</button>
           <button class="reset" id="alias-cancel" type="button">Cancel</button>
+        </div>
+
+        <!-- Barcode replacement: destructive, so double-confirmed -->
+        <div class="overwrite" id="overwrite-confirm" hidden>
+          <p class="overwrite__text" id="overwrite-text"></p>
+          <label class="overwrite__ack">
+            <input type="checkbox" id="overwrite-ack" />
+            I understand this permanently replaces the product's barcode in Shopify.
+          </label>
+          <button class="overwrite__btn" id="overwrite-go" type="button" disabled>Replace barcode</button>
         </div>
       </section>
 
