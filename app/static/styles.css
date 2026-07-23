@@ -433,9 +433,11 @@ body {
 }
 .product__bin--edit { cursor: pointer; }
 .product__bin--edit:hover { outline: 1.5px solid var(--accent); }
-.product__editable { cursor: pointer; border-bottom: 1px dashed transparent; }
-.product__editable:hover { border-bottom-color: var(--accent); color: var(--accent); }
-.product__bin-input--wide { width: 170px; }
+.product__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
 .product__bin-input {
   width: 110px;
   font-family: var(--mono);

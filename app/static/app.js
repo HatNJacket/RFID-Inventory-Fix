@@ -68,80 +68,8 @@ const el = {
   skuAck: document.getElementById("sku-ack"),
   skuSave: document.getElementById("sku-save"),
   binInput: document.getElementById("bin-input"),
-  skuInline: document.getElementById("sku-inline-input"),
+  productEdit: document.getElementById("product-edit"),
 };
-
-// --- Click-to-edit SKU: like the bin, but confirm() guards the Shopify
-// write (SKU replacement is destructive and audited).
-el.pSku.addEventListener("click", () => {
-  if (!pendingProduct) return;
-  el.pSku.hidden = true;
-  el.skuInline.value = pendingProduct.sku || "";
-  el.skuInline.hidden = false;
-  el.skuInline.focus();
-  el.skuInline.select();
-});
-
-function closeSkuEditor() {
-  el.skuInline.hidden = true;
-  el.pSku.hidden = false;
-}
-
-el.skuInline.addEventListener("keydown", async (event) => {
-  if (event.key === "Escape") {
-    event.stopPropagation();
-    closeSkuEditor();
-    return;
-  }
-  if (event.key !== "Enter") return;
-  const newSku = el.skuInline.value.trim();
-  if (!newSku || !pendingProduct) return;
-  if (newSku === pendingProduct.sku) {
-    closeSkuEditor();
-    return;
-  }
-  const operator = requireOperator();
-  if (!operator) return;
-  if (
-    !confirm(
-      `Replace SKU "${pendingProduct.sku || "(none)"}" with "${newSku}" ` +
-        `in Shopify for "${pendingProduct.product_title}"?`
-    )
-  ) {
-    return;
-  }
-  el.skuInline.disabled = true;
-  try {
-    const res = await apiFetch("/api/sku-overwrites", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        new_sku: newSku,
-        target: pendingProduct.barcode || pendingProduct.sku,
-        changed_by: operator,
-        confirmed: true,
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      setResult(body.detail || "SKU update failed.", "err");
-      return;
-    }
-    pendingProduct.sku = newSku;
-    el.pSku.textContent = newSku;
-    setResult(`SKU updated to ${newSku} in Shopify.`, "ok");
-    closeSkuEditor();
-    el.rfid.focus();
-  } catch (err) {
-    setResult("Network error during the SKU update.", "err");
-  } finally {
-    el.skuInline.disabled = false;
-  }
-});
-
-el.skuInline.addEventListener("blur", () => {
-  if (!el.skuInline.disabled) closeSkuEditor();
-});
 
 // --- Click-to-edit bin: chip -> empty text box -> Enter saves to Shopify ---
 el.pBin.addEventListener("click", () => {
@@ -572,9 +500,46 @@ function closeLinkbox() {
   el.linkbox.hidden = true;
   el.flow.classList.remove("flow--side");
   hideOverwrite();
+  hideLinkboxExtras();
   aliasCandidate = null;
   aliasPreviewProduct = null;
+  linkboxEditMode = false;
 }
+
+// Edit mode: the same window, opened from a loaded product's Edit button —
+// no unknown scan involved. Offers the serial-prefix and SKU tools wired
+// to the current product.
+let linkboxEditMode = false;
+
+function openEditbox() {
+  if (!pendingProduct) return;
+  linkboxEditMode = true;
+  aliasCandidate = null;
+  linkboxInfo = null;
+  el.flow.classList.add("flow--side");
+  el.linkboxTitle.textContent = "Edit product";
+  el.linkboxText.textContent =
+    "Register the Astronomik serial prefix (the first 4 digits of the " +
+    "unit's serial number) and/or update the SKU in Shopify.";
+  el.linkboxForm.hidden = true;
+  // The hidden target field feeds the save handlers.
+  el.aliasTarget.value = pendingProduct.barcode || pendingProduct.sku || "";
+  renderAliasPreview(pendingProduct);
+  el.aliasAccept.hidden = true;
+  el.aliasOverwrite.hidden = true;
+  el.aliasUnlink.hidden = true;
+  hideOverwrite();
+  el.prefixInput.value = pendingProduct.serial_prefix || "";
+  el.prefixSection.hidden = false;
+  el.newSkuInput.value = pendingProduct.sku || "";
+  el.skuSection.hidden = false;
+  el.skuAck.checked = false;
+  el.skuSave.disabled = true;
+  el.linkbox.hidden = false;
+  el.prefixInput.focus();
+}
+
+el.productEdit.addEventListener("click", openEditbox);
 
 function hideOverwrite() {
   el.overwriteConfirm.hidden = true;
@@ -722,8 +687,15 @@ el.prefixSave.addEventListener("click", async () => {
       setResult(body.detail || "Saving the prefix failed.", "err");
       return;
     }
-    setResult(`Prefix ${prefix} saved — rescanning…`, "ok");
-    retryLookup(aliasCandidate);
+    if (aliasCandidate) {
+      setResult(`Prefix ${prefix} saved — rescanning…`, "ok");
+      retryLookup(aliasCandidate);
+    } else {
+      // Edit mode: stay on the loaded product.
+      setResult(`Serial prefix ${prefix} now points at this product.`, "ok");
+      closeLinkbox();
+      el.rfid.focus();
+    }
   } catch (err) {
     setResult("Network error while saving the prefix.", "err");
   } finally {
@@ -763,8 +735,19 @@ el.skuSave.addEventListener("click", async () => {
       el.skuSave.disabled = false;
       return;
     }
-    setResult(`SKU updated to ${newSku} — rescanning…`, "ok");
-    retryLookup(aliasCandidate);
+    if (aliasCandidate) {
+      setResult(`SKU updated to ${newSku} — rescanning…`, "ok");
+      retryLookup(aliasCandidate);
+    } else {
+      // Edit mode: update the card in place.
+      if (pendingProduct) {
+        pendingProduct.sku = newSku;
+        el.pSku.textContent = newSku;
+      }
+      setResult(`SKU updated to ${newSku} in Shopify.`, "ok");
+      closeLinkbox();
+      el.rfid.focus();
+    }
   } catch (err) {
     setResult("Network error during the SKU update.", "err");
     el.skuSave.disabled = false;
@@ -826,7 +809,6 @@ function showProduct(p) {
   el.pSku.textContent = p.sku || "—";
   el.pBarcode.textContent = p.barcode || "—";
   closeBinEditor();
-  closeSkuEditor();
   el.pBin.textContent = p.bin_location || "—";
   el.pSource.textContent =
     (p.source === "telcan" ? "TELCAN" : p.source === "shopify" ? "Shopify" : "—") +
