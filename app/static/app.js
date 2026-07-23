@@ -67,7 +67,80 @@ const el = {
   skuAck: document.getElementById("sku-ack"),
   skuSave: document.getElementById("sku-save"),
   binInput: document.getElementById("bin-input"),
+  skuInline: document.getElementById("sku-inline-input"),
 };
+
+// --- Click-to-edit SKU: like the bin, but confirm() guards the Shopify
+// write (SKU replacement is destructive and audited).
+el.pSku.addEventListener("click", () => {
+  if (!pendingProduct) return;
+  el.pSku.hidden = true;
+  el.skuInline.value = pendingProduct.sku || "";
+  el.skuInline.hidden = false;
+  el.skuInline.focus();
+  el.skuInline.select();
+});
+
+function closeSkuEditor() {
+  el.skuInline.hidden = true;
+  el.pSku.hidden = false;
+}
+
+el.skuInline.addEventListener("keydown", async (event) => {
+  if (event.key === "Escape") {
+    event.stopPropagation();
+    closeSkuEditor();
+    return;
+  }
+  if (event.key !== "Enter") return;
+  const newSku = el.skuInline.value.trim();
+  if (!newSku || !pendingProduct) return;
+  if (newSku === pendingProduct.sku) {
+    closeSkuEditor();
+    return;
+  }
+  const operator = requireOperator();
+  if (!operator) return;
+  if (
+    !confirm(
+      `Replace SKU "${pendingProduct.sku || "(none)"}" with "${newSku}" ` +
+        `in Shopify for "${pendingProduct.product_title}"?`
+    )
+  ) {
+    return;
+  }
+  el.skuInline.disabled = true;
+  try {
+    const res = await apiFetch("/api/sku-overwrites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        new_sku: newSku,
+        target: pendingProduct.barcode || pendingProduct.sku,
+        changed_by: operator,
+        confirmed: true,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setResult(body.detail || "SKU update failed.", "err");
+      return;
+    }
+    pendingProduct.sku = newSku;
+    el.pSku.textContent = newSku;
+    setResult(`SKU updated to ${newSku} in Shopify.`, "ok");
+    closeSkuEditor();
+    el.rfid.focus();
+  } catch (err) {
+    setResult("Network error during the SKU update.", "err");
+  } finally {
+    el.skuInline.disabled = false;
+  }
+});
+
+el.skuInline.addEventListener("blur", () => {
+  if (!el.skuInline.disabled) closeSkuEditor();
+});
 
 // --- Click-to-edit bin: chip -> empty text box -> Enter saves to Shopify ---
 el.pBin.addEventListener("click", () => {
@@ -746,6 +819,7 @@ function showProduct(p) {
   el.pSku.textContent = p.sku || "—";
   el.pBarcode.textContent = p.barcode || "—";
   closeBinEditor();
+  closeSkuEditor();
   el.pBin.textContent = p.bin_location || "—";
   el.pSource.textContent =
     (p.source === "telcan" ? "TELCAN" : p.source === "shopify" ? "Shopify" : "—") +

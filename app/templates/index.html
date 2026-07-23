@@ -152,7 +152,10 @@
         <div class="product__title" id="p-title">—</div>
         <dl class="product__grid">
           <div><dt>Variant</dt><dd id="p-variant">—</dd></div>
-          <div><dt>SKU</dt><dd id="p-sku">—</dd></div>
+          <div><dt>SKU</dt><dd>
+            <span id="p-sku" class="product__editable" title="Click to update this product's SKU in Shopify">—</span>
+            <input id="sku-inline-input" class="product__bin-input product__bin-input--wide" type="text" maxlength="100" autocomplete="off" spellcheck="false" placeholder="New SKU…" hidden />
+          </dd></div>
           <div><dt>Barcode</dt><dd id="p-barcode">—</dd></div>
           <div><dt>Bin</dt><dd>
             <span id="p-bin" class="product__bin product__bin--edit" title="Click to set the bin (saves to Shopify)">—</span>
