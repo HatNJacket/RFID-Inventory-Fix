@@ -593,6 +593,7 @@ body {
 .recent__meta { color: var(--ink-dim); font-size: 12px; }
 .recent__when { white-space: nowrap; }
 .suspect { color: var(--warn-ink); cursor: help; font-size: 14px; }
+.recent__note { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--ink-dim); }
 .recent__unassign {
   font-size: 12px;
   font-weight: 550;

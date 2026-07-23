@@ -988,9 +988,11 @@ function prependRecent(a) {
 
 async function loadRecent(query = "") {
   try {
+    // The Inventory tab is the full view; this list is just a live tail
+    // of the last few scans (searches get more room).
     const url = query
-      ? `/api/rfid-assignments?q=${encodeURIComponent(query)}`
-      : "/api/rfid-assignments";
+      ? `/api/rfid-assignments?q=${encodeURIComponent(query)}&limit=50`
+      : "/api/rfid-assignments?limit=10";
     const res = await apiFetch(url);
     if (!res.ok) return;
     const data = await res.json();

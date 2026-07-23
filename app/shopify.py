@@ -194,6 +194,31 @@ def update_variant_sku(
     return result["productVariants"][0]
 
 
+_QTY_QUERY = """
+query Quantities($search: String!) {
+  productVariants(first: 50, query: $search) {
+    nodes { sku inventoryQuantity }
+  }
+}
+"""
+
+
+def get_quantities_by_skus(skus: list[str]) -> dict[str, int]:
+    """Live inventory quantities for a set of SKUs, batched ~25 per query.
+    The TELCAN mirror's quantities lag its sync schedule; this is the
+    real-time truth for the inventory view."""
+    quantities: dict[str, int] = {}
+    cleaned = [s.replace('"', "") for s in skus if s]
+    for i in range(0, len(cleaned), 25):
+        chunk = cleaned[i:i + 25]
+        search = " OR ".join(f'sku:"{s}"' for s in chunk)
+        data = query_shopify(_QTY_QUERY, {"search": search})
+        for node in data["productVariants"]["nodes"]:
+            if node["sku"]:
+                quantities[node["sku"]] = node["inventoryQuantity"]
+    return quantities
+
+
 _SET_BIN_MUTATION = """
 mutation SetBin($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {

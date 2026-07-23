@@ -1004,6 +1004,22 @@ def list_barcode_overwrites(
 
 
 # -------------------------------------------------------- inventory view ---
+# Live-quantity cache: refreshing on every tab visit is the useful moment,
+# but scan sessions reload the tab constantly — cache briefly.
+_qty_cache: dict = {"key": None, "at": 0.0, "data": {}}
+_QTY_CACHE_TTL = 120  # seconds
+
+
+def _live_quantities(skus: list[str]) -> dict[str, int]:
+    key = tuple(sorted(skus))
+    now = time.time()
+    if _qty_cache["key"] == key and now - _qty_cache["at"] < _QTY_CACHE_TTL:
+        return _qty_cache["data"]
+    data = shopify.get_quantities_by_skus(skus)
+    _qty_cache.update(key=key, at=now, data=data)
+    return data
+
+
 @app.get("/api/inventory/summary", dependencies=[Depends(require_user)])
 def inventory_summary(session: Session = Depends(get_session)):
     """One row per product in the RFID system: identity, bin, tag count,
@@ -1055,6 +1071,17 @@ def inventory_summary(session: Session = Depends(get_session)):
                 p["shopify_qty"] = qty_by_sku.get(p["sku"])
         except Exception as error:
             logger.warning("inventory qty enrichment failed: %s", error)
+
+    # Overlay live Shopify quantities (the mirror lags its sync schedule);
+    # mirror values remain as the fallback when the API is unreachable.
+    if skus and not config.check_shopify_env():
+        try:
+            live = _live_quantities(skus)
+            for p in products:
+                if p["sku"] in live:
+                    p["shopify_qty"] = live[p["sku"]]
+        except RuntimeError as error:
+            logger.warning("live quantity fetch failed: %s", error)
 
     return {"count": len(products), "products": products}
 
