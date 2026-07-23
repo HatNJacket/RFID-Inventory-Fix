@@ -37,6 +37,7 @@ from app.models import (
     BarcodeChange,
     Batch,
     BatchItem,
+    BinMapEntry,
     EpcCapture,
     PrintJob,
     ReviewTask,
@@ -60,6 +61,10 @@ async def lifespan(app: FastAPI):
     # before you provision PostgreSQL, the app still boots and does lookups.
     if database_configured():
         init_db()
+        # Warm the bin map (Shopify metafield walk) in the background; the
+        # persisted table keeps answering while a refresh runs.
+        if not config.check_shopify_env():
+            _maybe_refresh_bin_map()
     yield
 
 
@@ -1274,6 +1279,90 @@ def cancel_print_job(job_id: int, session: Session = Depends(get_session)):
 # Batches only OBSERVE — no Shopify writes anywhere in this flow. Count and
 # bin mismatches become ReviewTasks at completion, never live edits.
 
+# --- Bin map: which bin each variant lives in (Shopify metafields) --------
+# Rebuilt by a daemon thread (full catalog walk, ~1 min); the table itself
+# persists across restarts so reads never wait on the walk.
+import threading
+
+_BIN_MAP_TTL = 6 * 60 * 60  # refresh when older than 6 hours
+_bin_map_state = {"checked_at": 0.0, "running": False}
+_bin_map_lock = threading.Lock()
+
+
+def _rebuild_bin_map() -> None:
+    from app.database import get_engine
+
+    try:
+        entries = shopify.fetch_all_variant_bins()
+        with Session(get_engine()) as session:
+            session.query(BinMapEntry).delete()
+            session.add_all(
+                BinMapEntry(
+                    sku=e["sku"],
+                    barcode=e["barcode"],
+                    product_title=(e["product_title"] or "")[:255] or None,
+                    variant_title=(e["variant_title"] or "")[:255] or None,
+                    shopify_variant_id=e["shopify_variant_id"],
+                    shopify_product_id=e["shopify_product_id"],
+                    bin=e["bin"][:100],
+                    qty=e["qty"],
+                )
+                for e in entries
+            )
+            session.commit()
+        logger.info("bin map rebuilt: %d binned variants", len(entries))
+    except Exception as error:
+        logger.warning("bin map rebuild failed: %s", error)
+    finally:
+        with _bin_map_lock:
+            _bin_map_state["running"] = False
+
+
+def _bin_map_age(session: Session) -> float | None:
+    """Seconds since the newest entry; None when the table is empty."""
+    newest = session.scalar(select(func.max(BinMapEntry.updated_at)))
+    if newest is None:
+        return None
+    if newest.tzinfo is None:
+        newest = newest.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - newest).total_seconds()
+
+
+def _maybe_refresh_bin_map(force: bool = False) -> bool:
+    """Kick a background rebuild when the map is stale/empty. Returns True
+    if a rebuild is running after the call."""
+    if config.check_shopify_env() or not database_configured():
+        return False
+    with _bin_map_lock:
+        if _bin_map_state["running"]:
+            return True
+        try:
+            from app.database import get_engine
+
+            with Session(get_engine()) as session:
+                age = _bin_map_age(session)
+        except Exception as error:
+            logger.warning("bin map age check failed: %s", error)
+            return False
+        if not force and age is not None and age < _BIN_MAP_TTL:
+            return False
+        _bin_map_state["running"] = True
+    threading.Thread(target=_rebuild_bin_map, daemon=True).start()
+    return True
+
+
+@app.get("/api/bin-map/status", dependencies=[Depends(require_user)])
+def bin_map_status(session: Session = Depends(get_session)):
+    age = _bin_map_age(session)
+    return {
+        "entries": session.scalar(
+            select(func.count()).select_from(BinMapEntry)
+        ),
+        "age_minutes": None if age is None else int(age / 60),
+        "refreshing": _bin_map_state["running"],
+    }
+
+
 def _get_batch(session: Session, batch_id: int) -> Batch:
     batch = session.get(Batch, batch_id)
     if batch is None:
@@ -1323,11 +1412,79 @@ class BatchIn(BaseModel):
     "/api/batches", status_code=201, dependencies=[Depends(require_user)]
 )
 def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
+    """Start a bin batch pre-seeded with everything Shopify expects in that
+    bin (0/N tickers before the first scan). Scanning products not on the
+    list still adds them — the seed is a head start, not a wall."""
     batch = Batch(bin_name=payload.bin, created_by=payload.created_by)
     session.add(batch)
+    session.flush()
+
+    # Expected products come from the bin map (Shopify metafields cache —
+    # the mirror's Bin_Name column is empty store-wide).
+    _maybe_refresh_bin_map()  # background top-up when stale; reads go on
+    expected: list[dict] = []
+    try:
+        rows = session.scalars(
+            select(BinMapEntry)
+            .where(func.lower(BinMapEntry.bin) == payload.bin.lower())
+            .order_by(BinMapEntry.product_title, BinMapEntry.sku)
+        ).all()
+        expected = [
+            {
+                "shopify_variant_id": r.shopify_variant_id,
+                "shopify_product_id": r.shopify_product_id,
+                "product_title": r.product_title,
+                "variant_title": r.variant_title,
+                "sku": r.sku,
+                "barcode": r.barcode,
+                "bin_location": r.bin,
+                "expected_qty": r.qty,
+            }
+            for r in rows
+        ]
+    except Exception as error:
+        logger.warning("bin pre-seed failed for %s: %s", payload.bin, error)
+
+    # Serialized brands print their operator-confirmed name; grab any
+    # prefix rows for the seeded SKUs in one query.
+    sp_by_sku: dict[str, SerialPrefix] = {}
+    skus = [p["sku"] for p in expected if p.get("sku")]
+    if skus:
+        for sp in session.scalars(
+            select(SerialPrefix).where(SerialPrefix.sku.in_(skus))
+        ):
+            sp_by_sku.setdefault(sp.sku, sp)
+
+    items = []
+    for p in expected:
+        sp = sp_by_sku.get(p.get("sku") or "")
+        items.append(BatchItem(
+            batch_id=batch.id,
+            scanned_code=(p.get("barcode") or p.get("sku") or "")[:64],
+            resolved=True,
+            shopify_variant_id=p.get("shopify_variant_id"),
+            shopify_product_id=p.get("shopify_product_id"),
+            product_title=p.get("product_title"),
+            variant_title=p.get("variant_title"),
+            sku=p.get("sku"),
+            barcode=p.get("barcode"),
+            bin_location=p.get("bin_location"),
+            serial_prefix=sp.prefix if sp else None,
+            label_name=(
+                (sp.label_name if sp and sp.label_name else None)
+                or (p.get("product_title") or "")[:255] or None
+            ),
+            qty_scanned=0,
+            expected_qty=p.get("expected_qty"),
+        ))
+    session.add_all(items)
     session.commit()
     session.refresh(batch)
-    return batch.as_dict()
+    for item in items:
+        session.refresh(item)
+    result = batch.as_dict()
+    result["items"] = [i.as_dict() for i in items]
+    return result
 
 
 @app.get("/api/batches", dependencies=[Depends(require_user)])
@@ -1453,6 +1610,14 @@ def batch_scan(
             item.resolved = False
             item.product_title = f"Unresolved: {code}"
         session.add(item)
+
+    # A pre-seeded row scanned via a brand serial learns its serial info on
+    # first contact (preferred label name, prefix for pairing).
+    if product is not None and product.get("serial_prefix"):
+        if not item.serial_prefix:
+            item.serial_prefix = product["serial_prefix"]
+        if product.get("serial_label_saved") and product.get("serial_label"):
+            item.label_name = product["serial_label"][:255]
 
     item.qty_scanned += 1
     session.commit()

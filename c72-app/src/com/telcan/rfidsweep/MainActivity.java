@@ -64,11 +64,19 @@ public class MainActivity extends Activity {
     private final LinkedHashMap<String, Integer> tags = new LinkedHashMap<>();
     private final Handler ui = new Handler(Looper.getMainLooper());
 
+    // Antenna power presets: 2 = desk/scan-station range, 5 = standing at
+    // the bin, 10 = reach across a rack. (Radio max is 30 — saved for a
+    // future locate mode.)
+    private static final int[] POWER_LEVELS = {2, 5, 10};
+    private static final String[] POWER_LABELS = {
+            "PWR 2 · desk", "PWR 5 · bin", "PWR 10 · rack"};
+
     private SharedPreferences prefs;
     private TextView status;
     private TextView countView;
     private Button toggleBtn;
     private Button sendBtn;
+    private final Button[] powerBtns = new Button[POWER_LEVELS.length];
     private ArrayAdapter<String> adapter;
 
     @Override
@@ -116,6 +124,19 @@ public class MainActivity extends Activity {
         row1.addView(sendBtn, weight());
         root.addView(row1);
 
+        LinearLayout powerRow = new LinearLayout(this);
+        for (int i = 0; i < POWER_LEVELS.length; i++) {
+            final int level = POWER_LEVELS[i];
+            Button b = new Button(this);
+            b.setText(POWER_LABELS[i]);
+            b.setTextSize(12);
+            b.setAllCaps(false);
+            b.setOnClickListener(v -> setPowerLevel(level, true));
+            powerBtns[i] = b;
+            powerRow.addView(b, weight());
+        }
+        root.addView(powerRow);
+
         LinearLayout row2 = new LinearLayout(this);
         Button clearBtn = new Button(this);
         clearBtn.setText("CLEAR");
@@ -137,8 +158,41 @@ public class MainActivity extends Activity {
 
         restoreTags();
         refreshList();
+        highlightPower(prefs.getInt("power", 5));
         initReader();
         ui.postDelayed(this::refreshTick, 400);
+    }
+
+    private void highlightPower(int level) {
+        for (int i = 0; i < POWER_LEVELS.length; i++) {
+            boolean sel = POWER_LEVELS[i] == level;
+            powerBtns[i].setBackgroundColor(sel
+                    ? Color.parseColor("#005bd3")
+                    : Color.parseColor("#d9dbdd"));
+            powerBtns[i].setTextColor(sel ? Color.WHITE
+                    : Color.parseColor("#202223"));
+        }
+    }
+
+    private void setPowerLevel(int level, boolean announce) {
+        prefs.edit().putInt("power", level).apply();
+        highlightPower(level);
+        if (!readerReady) return;
+        final boolean wasScanning = scanning;
+        new Thread(() -> {
+            try {
+                if (wasScanning) reader.stopInventory();
+                final boolean ok = reader.setPower(level);
+                if (wasScanning) reader.startInventoryTag();
+                if (announce) ui.post(() -> status.setText(ok
+                        ? "Power set to " + level
+                        : "Power change FAILED — try again"));
+            } catch (Exception e) {
+                if (announce) ui.post(() ->
+                        status.setText("Power change failed: "
+                                + e.getMessage()));
+            }
+        }).start();
     }
 
     private LinearLayout.LayoutParams weight() {
@@ -177,10 +231,18 @@ public class MainActivity extends Activity {
                 });
             }
             final boolean ready = ok;
+            final int power = prefs.getInt("power", 5);
+            if (ready) {
+                try {
+                    reader.setPower(power);
+                } catch (Exception ignored) {
+                }
+            }
             ui.post(() -> {
                 readerReady = ready;
                 status.setText(ready
-                        ? "Reader ready — pull the trigger to scan"
+                        ? "Reader ready (power " + power + ") — pull the "
+                          + "trigger to scan"
                         : "Reader init FAILED — is KeyboardEmulator's "
                           + "UHF mode still on? Only one app can hold the "
                           + "module. Turn it off and reopen this app.");

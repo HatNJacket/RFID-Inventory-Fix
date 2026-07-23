@@ -332,6 +332,7 @@
             <span class="stage" data-stage="pair">4 Pair</span>
             <span class="stage" data-stage="verify">5 Verify</span>
           </div>
+          <button class="reset" id="batch-refresh" type="button" title="Re-pull this batch from the server — use it when the iPad and PC have the same batch open">Refresh</button>
           <button class="reset" id="batch-abandon" type="button">Abandon</button>
         </div>
         <div class="result" id="batch-result" role="status" aria-live="polite"></div>
@@ -344,9 +345,10 @@
               <label class="step__label" for="batch-scan">Scan every box in this bin</label>
               <input id="batch-scan" class="scan" type="text" autocomplete="off"
                      autocapitalize="off" spellcheck="false" placeholder="Waiting for barcode…" />
-              <p class="step__hint">Scanning the same product again adds to its count. Wrong scan? Fix the count with − / + on its row.</p>
+              <p class="step__hint">Everything Shopify expects in this bin is listed below as 0 / N — each scan ticks its product up (going over is fine). Wrong scan? Fix the count with − / +. Products not on the list get added when scanned.</p>
             </div>
           </section>
+          <p class="linkbox__text" id="bcollect-summary" hidden></p>
           <ul class="batch__items" id="batch-items"></ul>
           <button class="print__btn" id="batch-to-labels" type="button">Done scanning → prepare labels</button>
         </div>

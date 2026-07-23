@@ -365,6 +365,29 @@ class BatchItem(Base):
         }
 
 
+class BinMapEntry(Base):
+    """Which bin each variant lives in, per Shopify metafields. Bins exist
+    ONLY as metafields (the TELCAN mirror's Bin_Name is empty store-wide),
+    so a background job walks the whole catalog through the Shopify API and
+    rewrites this table — batch creation then answers "what's expected in
+    bin X" instantly, even right after an app restart."""
+
+    __tablename__ = "rfid_bin_map"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sku: Mapped[str | None] = mapped_column(String(100), index=True)
+    barcode: Mapped[str | None] = mapped_column(String(64))
+    product_title: Mapped[str | None] = mapped_column(String(255))
+    variant_title: Mapped[str | None] = mapped_column(String(255))
+    shopify_variant_id: Mapped[str | None] = mapped_column(String(64))
+    shopify_product_id: Mapped[str | None] = mapped_column(String(300))
+    bin: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    qty: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class EpcCapture(Base):
     """One RFID sweep sent from the C72 companion app: the operator scans a
     shelf freely (everything held on the device), then hits Send once —

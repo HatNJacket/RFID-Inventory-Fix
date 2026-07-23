@@ -1551,13 +1551,39 @@ async function startBatch() {
   bEl.create.disabled = true;
   try {
     batch = await postJson("/api/batches", { bin, created_by: operator });
-    batchItems = [];
+    batchItems = batch.items || [];
     bEl.bin.value = "";
     openBatchView("collect");
+    setBatchResult(
+      batchItems.length
+        ? `${batchItems.length} product(s) expected in bin ${batch.bin_name} — start scanning boxes.`
+        : `Nothing on file for bin ${batch.bin_name} — scan boxes and they'll be added.`,
+      "ok"
+    );
   } catch (err) {
     setBatchResult(err.message, "err");
   } finally {
     bEl.create.disabled = false;
+  }
+}
+
+// Re-pull the batch from the server: the iPad collects at the shelf while
+// the PC watches the same list — Refresh (either side) syncs the view.
+async function refreshBatch() {
+  if (!batch) return;
+  try {
+    const data = await apiJson(`/api/batches/${batch.id}`);
+    batch = data.batch;
+    batchItems = data.items;
+    if (batchStage === "collect") renderBatchItems();
+    else if (batchStage === "labels") renderLabelCard();
+    else if (batchStage === "pair") {
+      renderPairItems();
+      renderPairCard();
+    }
+    setBatchResult("Refreshed from the server.", "ok");
+  } catch (err) {
+    setBatchResult(err.message, "err");
   }
 }
 
@@ -1628,6 +1654,8 @@ function stopBatchPrintPoll() {
   }
 }
 
+document.getElementById("batch-refresh").addEventListener("click", refreshBatch);
+
 bEl.abandon.addEventListener("click", async () => {
   if (!batch) return;
   if (!confirm(`Abandon the batch for bin ${batch.bin_name}? Collected counts are kept in History but the batch closes.`)) return;
@@ -1653,8 +1681,10 @@ bEl.scan.addEventListener("keydown", async (event) => {
     const data = await postJson(`/api/batches/${batch.id}/scan`, { code });
     const item = data.item;
     const existing = batchItems.findIndex((i) => i.id === item.id);
-    if (existing >= 0) batchItems[existing] = item;
-    else batchItems.push(item);
+    if (existing >= 0) batchItems.splice(existing, 1);
+    // Freshly scanned floats to the top — big bins pre-seed a long list
+    // and the row you just ticked should stay in view.
+    batchItems.unshift(item);
     if (data.bin_mismatch) item._binMismatch = true;
     renderBatchItems();
     if (!item.resolved) {
@@ -1684,6 +1714,18 @@ bEl.scan.addEventListener("keydown", async (event) => {
 });
 
 function renderBatchItems() {
+  const summary = document.getElementById("bcollect-summary");
+  const expected = batchItems.filter((i) => i.expected_qty != null);
+  if (expected.length) {
+    const started = expected.filter((i) => i.qty_scanned > 0).length;
+    const boxes = batchItems.reduce((n, i) => n + i.qty_scanned, 0);
+    summary.textContent =
+      `${started} of ${expected.length} expected products scanned · ` +
+      `${boxes} box(es) total`;
+    summary.hidden = false;
+  } else {
+    summary.hidden = true;
+  }
   bEl.items.innerHTML = "";
   batchItems.forEach((item) => {
     const li = document.createElement("li");
@@ -1961,6 +2003,16 @@ bEl.pairInput.addEventListener("keydown", async (event) => {
     renderPairItems();
     renderPairCard();
     setBatchResult(`Active product: ${itemDisplayName(item)}`, "ok");
+    return;
+  }
+  // Barcode/serial-shaped scans that match nothing are NOT tags — saving
+  // them as EPCs would pollute the tag table.
+  if (/^\d{5,14}$/.test(code)) {
+    setBatchResult(
+      `"${code}" looks like a barcode or serial but doesn't match a ` +
+        `product in this batch.`,
+      "err"
+    );
     return;
   }
   // …anything else is an RFID tag for the active product.

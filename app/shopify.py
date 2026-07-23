@@ -251,6 +251,67 @@ def set_variant_bin(variant_gid: str, bin_value: str) -> None:
         )
 
 
+_ALL_BINS_QUERY = """
+query AllBins($cursor: String) {
+  productVariants(first: 100, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      title
+      sku
+      barcode
+      inventoryQuantity
+      bin: metafield(namespace: "stock", key: "bin") { value }
+      product {
+        id
+        title
+        easyScanBin: metafield(namespace: "my_fields", key: "bin_location") {
+          value
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_all_variant_bins() -> list[dict]:
+    """Walk EVERY variant in the store and return the ones with a bin
+    (variant stock.bin, falling back to product my_fields.bin_location).
+    ~50 paginated calls for the full catalog — callers run this in a
+    background thread and cache the result (the bin map)."""
+    results: list[dict] = []
+    cursor = None
+    while True:
+        data = query_shopify(_ALL_BINS_QUERY, {"cursor": cursor})
+        page = data["productVariants"]
+        for v in page["nodes"]:
+            variant_bin = v["bin"]["value"] if v["bin"] else None
+            easy_bin = (
+                v["product"]["easyScanBin"]["value"]
+                if v["product"]["easyScanBin"] else None
+            )
+            bin_value = (variant_bin or easy_bin or "").strip()
+            if not bin_value:
+                continue
+            results.append({
+                "shopify_variant_id": v["id"],
+                "shopify_product_id": v["product"]["id"],
+                "product_title": v["product"]["title"],
+                "variant_title": (
+                    None if v["title"] == "Default Title" else v["title"]
+                ),
+                "sku": v["sku"],
+                "barcode": v["barcode"],
+                "bin": bin_value,
+                "qty": v["inventoryQuantity"],
+            })
+        if not page["pageInfo"]["hasNextPage"]:
+            return results
+        cursor = page["pageInfo"]["endCursor"]
+        time.sleep(0.3)  # stay far away from the throttle
+
+
 def lookup_barcode(term: str) -> dict | None:
     """Look up a variant by barcode — or by SKU when the barcode search
     misses, since some products have bad or missing barcodes. Returns a
