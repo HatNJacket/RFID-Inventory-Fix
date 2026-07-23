@@ -46,6 +46,17 @@ PRINT_AGENT_KEY = os.getenv("PRINT_AGENT_KEY")
 # Shopify session token (embedded admin use). Unset = open, for local dev.
 STATION_KEY = os.getenv("STATION_KEY")
 
+# Shopify write protection, enforced server-side (hiding buttons in the
+# browser is not enough). New features must never touch the live store
+# until explicitly promoted:
+#   "scan_station_only" (default) — only the original, individually
+#       confirmed Scan Station flows (barcode/SKU/bin edits) may write
+#   "disabled"   — no Shopify writes at all (safe development mode)
+#   "production" — all confirmed write features enabled
+SHOPIFY_WRITE_MODE = os.getenv(
+    "SHOPIFY_WRITE_MODE", "scan_station_only"
+).strip().lower()
+
 # Who can be picked in the UI's operator dropdown, comma-separated.
 OPERATORS = [
     name.strip()

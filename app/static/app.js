@@ -200,21 +200,36 @@ function requireOperator() {
 }
 
 // --- Tabs -------------------------------------------------------------------
-const tabScan = [
-  document.getElementById("tab-scan"),
-  document.getElementById("scan-footer"),
-];
-const tabInventory = document.getElementById("tab-inventory");
+// Same tabs on PC and iPad; each tab loads (or refreshes) its data on entry.
+const tabSections = {
+  scan: [document.getElementById("tab-scan"), document.getElementById("scan-footer")],
+  batch: [document.getElementById("tab-batch")],
+  inventory: [document.getElementById("tab-inventory")],
+  queue: [document.getElementById("tab-queue")],
+  review: [document.getElementById("tab-review")],
+  audits: [document.getElementById("tab-audits")],
+  history: [document.getElementById("tab-history")],
+};
+const tabLoaders = {
+  batch: () => enterBatchTab(),
+  inventory: () => loadInventory(),
+  queue: () => loadQueue(),
+  review: () => loadReview(),
+  audits: () => loadAudits(),
+  history: () => loadHistory(),
+};
 document.querySelectorAll(".tabs__tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tabs__tab").forEach((b) =>
       b.classList.toggle("tabs__tab--active", b === btn)
     );
-    const showScan = btn.dataset.tab === "scan";
-    tabScan.forEach((el) => (el.hidden = !showScan));
-    tabInventory.hidden = showScan;
-    if (!showScan) loadInventory();
-    else el.barcode.focus();
+    const name = btn.dataset.tab;
+    Object.entries(tabSections).forEach(([key, els]) =>
+      els.forEach((s) => (s.hidden = key !== name))
+    );
+    stopBatchPrintPoll();
+    if (tabLoaders[name]) tabLoaders[name]();
+    if (name === "scan") el.barcode.focus();
   });
 });
 
@@ -1376,7 +1391,11 @@ el.search.addEventListener("input", () => {
 // --- Global controls -------------------------------------------------------
 el.reset.addEventListener("click", resetStation);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") resetStation();
+  // Esc resets the scan station only while it's the visible tab — otherwise
+  // it would steal focus from the batch/queue inputs.
+  if (e.key === "Escape" && !document.getElementById("tab-scan").hidden) {
+    resetStation();
+  }
 });
 
 function escapeHtml(s) {
@@ -1384,6 +1403,909 @@ function escapeHtml(s) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
+
+function fmtWhen(iso) {
+  return iso
+    ? new Date(iso).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })
+    : "—";
+}
+
+async function apiJson(url, opts) {
+  const res = await apiFetch(url, opts);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg =
+      typeof body.detail === "string" ? body.detail : "Request failed.";
+    throw new Error(msg);
+  }
+  return body;
+}
+
+function postJson(url, payload) {
+  return apiJson(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+// === Batch tagging ==========================================================
+// One bin at a time: collect -> labels -> print -> pair -> verify -> done.
+// The server owns the batch; this block just drives the stages.
+let batch = null; // {id, bin_name, status, ...}
+let batchItems = []; // BatchItem dicts (server shape)
+let batchStage = "collect";
+let labelIndex = 0;
+let pairActiveItemId = null;
+let pairHistory = []; // [{epc, item_id}] for undo
+let verifyEpcs = new Set();
+let batchPrintTimer = null;
+
+const bEl = {
+  start: document.getElementById("batch-start"),
+  bin: document.getElementById("batch-bin"),
+  create: document.getElementById("batch-create"),
+  resumeWrap: document.getElementById("batch-resume-wrap"),
+  resumeList: document.getElementById("batch-resume-list"),
+  active: document.getElementById("batch-active"),
+  binChip: document.getElementById("batch-bin-chip"),
+  stages: document.getElementById("batch-stages"),
+  abandon: document.getElementById("batch-abandon"),
+  result: document.getElementById("batch-result"),
+  scan: document.getElementById("batch-scan"),
+  items: document.getElementById("batch-items"),
+  toLabels: document.getElementById("batch-to-labels"),
+  labelCount: document.getElementById("blabel-count"),
+  labelImg: document.getElementById("blabel-img"),
+  labelTitle: document.getElementById("blabel-title"),
+  labelSku: document.getElementById("blabel-sku"),
+  labelQty: document.getElementById("blabel-qty"),
+  labelExpected: document.getElementById("blabel-expected"),
+  labelName: document.getElementById("blabel-name"),
+  labelSave: document.getElementById("blabel-save"),
+  labelPrev: document.getElementById("blabel-prev"),
+  labelNext: document.getElementById("blabel-next"),
+  queue: document.getElementById("batch-queue"),
+  printAgent: document.getElementById("bprint-agent"),
+  printStatus: document.getElementById("bprint-status"),
+  toPair: document.getElementById("batch-to-pair"),
+  pairInput: document.getElementById("batch-pair-input"),
+  pairCard: document.getElementById("bpair-card"),
+  pairActive: document.getElementById("bpair-active"),
+  pairProgress: document.getElementById("bpair-progress"),
+  pairUndo: document.getElementById("bpair-undo"),
+  pairItems: document.getElementById("bpair-items"),
+  toVerify: document.getElementById("batch-to-verify"),
+  verifyInput: document.getElementById("batch-verify-input"),
+  verifyCount: document.getElementById("bverify-count"),
+  verifyCheck: document.getElementById("bverify-check"),
+  complete: document.getElementById("batch-complete"),
+  verifyReport: document.getElementById("bverify-report"),
+};
+
+function setBatchResult(message, kind) {
+  bEl.result.textContent = message;
+  bEl.result.className = "result" + (kind ? ` result--${kind}` : "");
+}
+
+function itemDisplayName(item) {
+  return (
+    (item.label_name || item.product_title || item.scanned_code || "—") +
+    (item.variant_title && !item.label_name
+      ? ` (${item.variant_title})`
+      : "")
+  );
+}
+
+function enterBatchTab() {
+  if (batch) {
+    showBatchStage(batchStage);
+    return;
+  }
+  bEl.start.hidden = false;
+  bEl.active.hidden = true;
+  loadResumeList();
+  bEl.bin.focus();
+}
+
+async function loadResumeList() {
+  try {
+    const { batches } = await apiJson("/api/batches?status=open&limit=10");
+    bEl.resumeList.innerHTML = "";
+    bEl.resumeWrap.hidden = !batches.length;
+    batches.forEach((b) => {
+      const li = document.createElement("li");
+      li.innerHTML =
+        `<b>Bin ${escapeHtml(b.bin_name)}</b> — ${b.products} product(s), ` +
+        `${b.boxes} box(es), ${b.paired} paired · ${escapeHtml(b.status)} ` +
+        `<span class="mono">${escapeHtml(fmtWhen(b.created_at))}` +
+        `${b.created_by ? " · " + escapeHtml(b.created_by) : ""}</span>`;
+      li.addEventListener("click", () => resumeBatch(b.id));
+      bEl.resumeList.append(li);
+    });
+  } catch (err) {
+    bEl.resumeWrap.hidden = true;
+  }
+}
+
+bEl.create.addEventListener("click", startBatch);
+bEl.bin.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") startBatch();
+});
+
+async function startBatch() {
+  const bin = bEl.bin.value.trim();
+  if (!bin) {
+    bEl.bin.focus();
+    return;
+  }
+  const operator = operatorEl.value;
+  if (!operator) {
+    setBatchResult("Pick who's scanning (top right) first.", "err");
+    operatorEl.focus();
+    return;
+  }
+  bEl.create.disabled = true;
+  try {
+    batch = await postJson("/api/batches", { bin, created_by: operator });
+    batchItems = [];
+    bEl.bin.value = "";
+    openBatchView("collect");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  } finally {
+    bEl.create.disabled = false;
+  }
+}
+
+async function resumeBatch(id) {
+  try {
+    const data = await apiJson(`/api/batches/${id}`);
+    batch = data.batch;
+    batchItems = data.items;
+    const stageByStatus = {
+      collecting: "collect",
+      printing: "print",
+      pairing: "pair",
+    };
+    openBatchView(stageByStatus[batch.status] || "collect");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+}
+
+function openBatchView(stage) {
+  bEl.start.hidden = true;
+  bEl.active.hidden = false;
+  bEl.binChip.textContent = `Bin ${batch.bin_name}`;
+  setBatchResult("", null);
+  showBatchStage(stage);
+}
+
+const BATCH_STAGES = ["collect", "labels", "print", "pair", "verify"];
+
+function showBatchStage(stage) {
+  batchStage = stage;
+  stopBatchPrintPoll();
+  const idx = BATCH_STAGES.indexOf(stage);
+  bEl.stages.querySelectorAll(".stage").forEach((chip) => {
+    const i = BATCH_STAGES.indexOf(chip.dataset.stage);
+    chip.classList.toggle("stage--active", i === idx);
+    chip.classList.toggle("stage--done", i < idx);
+  });
+  BATCH_STAGES.forEach((s) => {
+    document.getElementById(`bstage-${s}`).hidden = s !== stage;
+  });
+  if (stage === "collect") {
+    renderBatchItems();
+    bEl.scan.focus();
+  } else if (stage === "labels") {
+    labelIndex = Math.min(labelIndex, labelItems().length - 1);
+    if (labelIndex < 0) labelIndex = 0;
+    renderLabelCard();
+  } else if (stage === "print") {
+    pollBatchPrint();
+    batchPrintTimer = setInterval(pollBatchPrint, 3000);
+  } else if (stage === "pair") {
+    renderPairItems();
+    renderPairCard();
+    bEl.pairInput.focus();
+  } else if (stage === "verify") {
+    verifyEpcs = new Set();
+    bEl.verifyCount.textContent = "0 unique tags collected.";
+    bEl.verifyReport.innerHTML = "";
+    bEl.verifyInput.focus();
+  }
+}
+
+function stopBatchPrintPoll() {
+  if (batchPrintTimer) {
+    clearInterval(batchPrintTimer);
+    batchPrintTimer = null;
+  }
+}
+
+bEl.abandon.addEventListener("click", async () => {
+  if (!batch) return;
+  if (!confirm(`Abandon the batch for bin ${batch.bin_name}? Collected counts are kept in History but the batch closes.`)) return;
+  try {
+    await postJson(`/api/batches/${batch.id}/abandon`, {});
+  } catch (err) {
+    /* already closed is fine */
+  }
+  batch = null;
+  batchItems = [];
+  stopBatchPrintPoll();
+  enterBatchTab();
+});
+
+// --- Stage 1: collect -------------------------------------------------------
+bEl.scan.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter") return;
+  const code = bEl.scan.value.trim();
+  bEl.scan.value = "";
+  if (!code || !batch) return;
+  setBatchResult("Looking up…", "busy");
+  try {
+    const data = await postJson(`/api/batches/${batch.id}/scan`, { code });
+    const item = data.item;
+    const existing = batchItems.findIndex((i) => i.id === item.id);
+    if (existing >= 0) batchItems[existing] = item;
+    else batchItems.push(item);
+    if (data.bin_mismatch) item._binMismatch = true;
+    renderBatchItems();
+    if (!item.resolved) {
+      setBatchResult(
+        `"${code}" isn't in the system — kept in the count as unresolved. ` +
+          `Link it later at the Scan Station.`,
+        "err"
+      );
+    } else if (data.serial_note) {
+      setBatchResult(
+        `⚠ ${data.serial_note} — ${itemDisplayName(item)}: ${item.qty_scanned} scanned.`,
+        "err"
+      );
+    } else {
+      setBatchResult(
+        `${itemDisplayName(item)} — ${item.qty_scanned} scanned` +
+          (item.expected_qty != null
+            ? ` (Shopify on-hand ${item.expected_qty})`
+            : ""),
+        "ok"
+      );
+    }
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+  bEl.scan.focus();
+});
+
+function renderBatchItems() {
+  bEl.items.innerHTML = "";
+  batchItems.forEach((item) => {
+    const li = document.createElement("li");
+    if (!item.resolved) li.classList.add("warn");
+    const expected =
+      item.expected_qty != null
+        ? `<span class="bexp${
+            item.qty_scanned !== item.expected_qty ? " bexp--off" : ""
+          }">${item.qty_scanned} / ${item.expected_qty} on hand</span>`
+        : "";
+    li.innerHTML = `
+      <span class="recent__prod"><b>${escapeHtml(itemDisplayName(item))}</b></span>
+      <span class="mono recent__meta">${escapeHtml(item.sku || item.scanned_code || "")}</span>
+      ${expected}
+      <span class="bqty">
+        <button type="button" data-d="-1">−</button>
+        <span class="bqty__n">${item.qty_scanned}</span>
+        <button type="button" data-d="1">+</button>
+      </span>`;
+    li.querySelectorAll(".bqty button").forEach((btn) =>
+      btn.addEventListener("click", () =>
+        adjustItemQty(item, item.qty_scanned + Number(btn.dataset.d))
+      )
+    );
+    if (item._binMismatch) {
+      const warn = document.createElement("div");
+      warn.className = "binwarn";
+      warn.innerHTML = `
+        <span>Saved bin is <b>${escapeHtml(item.bin_location || "?")}</b>, not ${escapeHtml(batch.bin_name)}.</span>
+        <button class="reset" type="button" data-act="keep">Keep saved bin</button>
+        <button class="reset" type="button" data-act="move">Move product to ${escapeHtml(batch.bin_name)} (Shopify)</button>`;
+      warn.querySelector('[data-act="keep"]').addEventListener("click", () => {
+        item._binMismatch = false;
+        renderBatchItems();
+      });
+      warn.querySelector('[data-act="move"]').addEventListener("click", () =>
+        moveItemBin(item)
+      );
+      li.append(warn);
+    }
+    bEl.items.append(li);
+  });
+}
+
+async function adjustItemQty(item, qty) {
+  qty = Math.max(0, qty);
+  try {
+    const updated = await postJson(
+      `/api/batches/${batch.id}/items/${item.id}/qty`,
+      { qty }
+    );
+    Object.assign(item, updated);
+    renderBatchItems();
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+  bEl.scan.focus();
+}
+
+// The one Shopify write reachable from a batch — the existing, confirmed
+// Scan Station bin update, re-used verbatim.
+async function moveItemBin(item) {
+  if (
+    !confirm(
+      `Update the bin on "${item.product_title}" in Shopify: ` +
+        `${item.bin_location || "(none)"} → ${batch.bin_name}?`
+    )
+  )
+    return;
+  try {
+    await postJson("/api/bin-updates", {
+      target: item.sku || item.barcode,
+      bin: batch.bin_name,
+      changed_by: operatorEl.value || null,
+    });
+    item.bin_location = batch.bin_name;
+    item._binMismatch = false;
+    renderBatchItems();
+    setBatchResult(`Bin updated to ${batch.bin_name} in Shopify.`, "ok");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+}
+
+bEl.toLabels.addEventListener("click", () => {
+  if (!labelItems().length) {
+    setBatchResult("Nothing to label yet — scan at least one known product.", "err");
+    return;
+  }
+  labelIndex = 0;
+  showBatchStage("labels");
+});
+
+// --- Stage 2: labels --------------------------------------------------------
+function labelItems() {
+  return batchItems.filter((i) => i.resolved && i.qty_scanned > 0);
+}
+
+function renderLabelCard() {
+  const items = labelItems();
+  const item = items[labelIndex];
+  if (!item) return;
+  bEl.labelCount.textContent = `Product ${labelIndex + 1} of ${items.length}`;
+  bEl.labelTitle.textContent =
+    (item.product_title || "—") +
+    (item.variant_title ? ` (${item.variant_title})` : "");
+  bEl.labelSku.textContent = item.sku || "—";
+  bEl.labelQty.textContent = `${item.qty_scanned} → ${item.qty_scanned} label(s)`;
+  bEl.labelExpected.textContent =
+    item.expected_qty != null ? String(item.expected_qty) : "—";
+  bEl.labelName.value = item.label_name || item.product_title || "";
+  if (item.image_url) {
+    bEl.labelImg.src = item.image_url;
+    bEl.labelImg.hidden = false;
+  } else {
+    bEl.labelImg.hidden = true;
+    bEl.labelImg.removeAttribute("src");
+  }
+  bEl.labelPrev.disabled = labelIndex === 0;
+  bEl.labelNext.disabled = labelIndex >= items.length - 1;
+  bEl.labelSave.textContent = "Save name";
+}
+
+async function saveBatchLabelName() {
+  const item = labelItems()[labelIndex];
+  const name = bEl.labelName.value.trim();
+  if (!item || !name) return;
+  try {
+    const updated = await apiJson(
+      `/api/batches/${batch.id}/items/${item.id}/label`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label_name: name }),
+      }
+    );
+    Object.assign(item, updated);
+    bEl.labelSave.textContent = "Saved ✓";
+    setTimeout(() => (bEl.labelSave.textContent = "Save name"), 1500);
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+}
+
+bEl.labelSave.addEventListener("click", saveBatchLabelName);
+bEl.labelName.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") saveBatchLabelName();
+});
+bEl.labelPrev.addEventListener("click", () => {
+  if (labelIndex > 0) {
+    labelIndex--;
+    renderLabelCard();
+  }
+});
+bEl.labelNext.addEventListener("click", () => {
+  if (labelIndex < labelItems().length - 1) {
+    labelIndex++;
+    renderLabelCard();
+  }
+});
+
+bEl.queue.addEventListener("click", async () => {
+  const total = labelItems().reduce((n, i) => n + i.qty_scanned, 0);
+  if (!confirm(`Queue ${total} label(s) for bin ${batch.bin_name}?`)) return;
+  bEl.queue.disabled = true;
+  try {
+    const data = await postJson(`/api/batches/${batch.id}/queue-labels`, {
+      requested_by: operatorEl.value || null,
+    });
+    batch.status = "printing";
+    setBatchResult(`${data.count} label(s) queued.`, "ok");
+    showBatchStage("print");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  } finally {
+    bEl.queue.disabled = false;
+  }
+});
+
+// --- Stage 3: print ---------------------------------------------------------
+async function pollBatchPrint() {
+  if (!batch) return;
+  try {
+    const [agent, jobs] = await Promise.all([
+      apiJson("/api/print-agent/status"),
+      apiJson(`/api/print-jobs?batch_id=${batch.id}&limit=200`),
+    ]);
+    bEl.printAgent.textContent = agent.online
+      ? "Printer agent: online ✓ (warehouse PC)"
+      : "Printer agent: OFFLINE — is the warehouse PC on? Jobs stay queued.";
+    const counts = { done: 0, error: 0, pending: 0, printing: 0 };
+    jobs.jobs.forEach((j) => {
+      counts[j.status] = (counts[j.status] || 0) + 1;
+    });
+    const total = jobs.jobs.length;
+    bEl.printStatus.textContent =
+      `Printed ${counts.done}/${total}` +
+      (counts.error ? ` — ${counts.error} FAILED (see Print queue)` : "") +
+      (counts.pending + counts.printing
+        ? ` — ${counts.pending + counts.printing} in the queue…`
+        : " ✓");
+    if (total && counts.done + counts.error + (counts.canceled || 0) >= total) {
+      stopBatchPrintPoll();
+    }
+  } catch (err) {
+    /* transient; next tick retries */
+  }
+}
+
+bEl.toPair.addEventListener("click", () => showBatchStage("pair"));
+
+// --- Stage 4: pair ----------------------------------------------------------
+function matchBatchItem(code) {
+  const low = code.toLowerCase();
+  return (
+    batchItems.find(
+      (i) =>
+        i.resolved &&
+        ((i.barcode && i.barcode.toLowerCase() === low) ||
+          (i.sku && i.sku.toLowerCase() === low) ||
+          (i.scanned_code && i.scanned_code.toLowerCase() === low))
+    ) ||
+    (/^\d{5,12}$/.test(code)
+      ? batchItems.find(
+          (i) => i.resolved && i.serial_prefix === code.slice(0, 4)
+        )
+      : null)
+  );
+}
+
+function renderPairCard() {
+  const item = batchItems.find((i) => i.id === pairActiveItemId);
+  bEl.pairCard.hidden = !item;
+  if (!item) return;
+  bEl.pairActive.textContent = itemDisplayName(item);
+  bEl.pairProgress.textContent = `${item.paired_count} of ${item.qty_scanned} tags paired · ${Math.max(
+    0,
+    item.qty_scanned - item.paired_count
+  )} remaining`;
+  bEl.pairUndo.disabled = !pairHistory.length;
+}
+
+function renderPairItems() {
+  bEl.pairItems.innerHTML = "";
+  batchItems
+    .filter((i) => i.resolved && i.qty_scanned > 0)
+    .forEach((item) => {
+      const li = document.createElement("li");
+      if (item.id === pairActiveItemId) li.classList.add("active");
+      const done = item.paired_count >= item.qty_scanned;
+      li.innerHTML = `
+        <span class="recent__prod"><b>${escapeHtml(itemDisplayName(item))}</b></span>
+        <span class="mono recent__meta">${escapeHtml(item.sku || "")}</span>
+        <span class="bexp${done ? "" : " bexp--off"}">${item.paired_count} / ${item.qty_scanned} paired${done ? " ✓" : ""}</span>`;
+      li.addEventListener("click", () => {
+        pairActiveItemId = item.id;
+        renderPairItems();
+        renderPairCard();
+        bEl.pairInput.focus();
+      });
+      bEl.pairItems.append(li);
+    });
+}
+
+bEl.pairInput.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter") return;
+  const code = bEl.pairInput.value.trim();
+  bEl.pairInput.value = "";
+  if (!code || !batch) return;
+
+  // A barcode from this batch switches the active product…
+  const item = matchBatchItem(code);
+  if (item) {
+    pairActiveItemId = item.id;
+    renderPairItems();
+    renderPairCard();
+    setBatchResult(`Active product: ${itemDisplayName(item)}`, "ok");
+    return;
+  }
+  // …anything else is an RFID tag for the active product.
+  if (!pairActiveItemId) {
+    setBatchResult(
+      "Scan a product barcode from this batch first — then its tags.",
+      "err"
+    );
+    return;
+  }
+  try {
+    const data = await postJson(`/api/batches/${batch.id}/pair`, {
+      epc: code,
+      item_id: pairActiveItemId,
+      created_by: operatorEl.value || null,
+    });
+    const idx = batchItems.findIndex((i) => i.id === data.item.id);
+    if (idx >= 0) {
+      const flags = batchItems[idx]._binMismatch;
+      batchItems[idx] = data.item;
+      batchItems[idx]._binMismatch = flags;
+    }
+    pairHistory.push({ epc: data.assignment.rfid_id, item_id: data.item.id });
+    renderPairItems();
+    renderPairCard();
+    setBatchResult(
+      data.assignment.suspect
+        ? `Saved, but ${code} doesn't look like a normal 24-char EPC — ` +
+            `probably a bad read. Re-scan it to be safe.`
+        : `Tag paired → ${itemDisplayName(data.item)} ` +
+            `(${data.item.paired_count}/${data.item.qty_scanned}).`,
+      data.assignment.suspect ? "err" : "ok"
+    );
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+  bEl.pairInput.focus();
+});
+
+bEl.pairUndo.addEventListener("click", async () => {
+  const last = pairHistory.pop();
+  if (!last || !batch) return;
+  try {
+    const data = await postJson(`/api/batches/${batch.id}/pair/undo`, last);
+    const idx = batchItems.findIndex((i) => i.id === data.item.id);
+    if (idx >= 0) Object.assign(batchItems[idx], data.item);
+    renderPairItems();
+    renderPairCard();
+    setBatchResult(`Undid tag ${last.epc}.`, "ok");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+  bEl.pairInput.focus();
+});
+
+bEl.toVerify.addEventListener("click", () => showBatchStage("verify"));
+
+// --- Stage 5: verify --------------------------------------------------------
+bEl.verifyInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  const code = bEl.verifyInput.value.trim();
+  bEl.verifyInput.value = "";
+  if (!code) return;
+  verifyEpcs.add(code.toUpperCase());
+  bEl.verifyCount.textContent = `${verifyEpcs.size} unique tags collected.`;
+});
+
+bEl.verifyCheck.addEventListener("click", async () => {
+  if (!batch) return;
+  bEl.verifyCheck.disabled = true;
+  try {
+    const rep = await postJson(`/api/batches/${batch.id}/verify`, {
+      epcs: [...verifyEpcs],
+    });
+    const rows = rep.items
+      .map((r) => {
+        const ok = r.detected >= r.paired_count && r.paired_count >= r.qty_scanned;
+        return `<tr>
+          <td>${escapeHtml(r.product_title || "")}</td>
+          <td class="mono">${escapeHtml(r.sku || "—")}</td>
+          <td class="num">${r.qty_scanned}</td>
+          <td class="num">${r.paired_count}</td>
+          <td class="num">${r.detected}</td>
+          <td>${ok ? "✓" : "⚠"}</td>
+        </tr>`;
+      })
+      .join("");
+    const extras = [];
+    if (rep.foreign.length) {
+      extras.push(
+        `<p class="result result--err">${rep.foreign.length} tag(s) from OTHER products detected: ` +
+          rep.foreign
+            .map((f) => `${escapeHtml(f.product_title || "?")} (${escapeHtml(f.epc)}${f.bin_location ? ", bin " + escapeHtml(f.bin_location) : ""})`)
+            .join("; ") +
+          `</p>`
+      );
+    }
+    if (rep.unknown_epcs.length) {
+      extras.push(
+        `<p class="result result--err">${rep.unknown_epcs.length} unknown tag(s): ` +
+          rep.unknown_epcs.map(escapeHtml).join(", ") +
+          `</p>`
+      );
+    }
+    bEl.verifyReport.innerHTML = `
+      ${rep.ok ? '<p class="result result--ok">Bin verified ✓ — everything paired was detected.</p>' : ""}
+      <div class="inventory__scroll"><table class="inventory__table">
+        <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      ${extras.join("")}`;
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  } finally {
+    bEl.verifyCheck.disabled = false;
+  }
+});
+
+bEl.complete.addEventListener("click", async () => {
+  if (!batch) return;
+  if (!confirm(`Complete the batch for bin ${batch.bin_name}?`)) return;
+  bEl.complete.disabled = true;
+  try {
+    const data = await postJson(`/api/batches/${batch.id}/complete`, {
+      created_by: operatorEl.value || null,
+    });
+    const n = data.review_tasks.length;
+    batch = null;
+    batchItems = [];
+    pairHistory = [];
+    pairActiveItemId = null;
+    enterBatchTab();
+    setBatchResult(
+      n
+        ? `Batch done. ${n} item(s) sent to Review (count/pairing follow-ups).`
+        : "Batch done — no follow-ups. Clean bin ✓",
+      "ok"
+    );
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  } finally {
+    bEl.complete.disabled = false;
+  }
+});
+
+// === Print queue tab ========================================================
+async function loadQueue() {
+  const body = document.getElementById("queue-body");
+  const pill = document.getElementById("agent-pill");
+  try {
+    const [agent, data] = await Promise.all([
+      apiJson("/api/print-agent/status"),
+      apiJson("/api/print-jobs?limit=100"),
+    ]);
+    pill.textContent = agent.online
+      ? "Printer agent: online ✓"
+      : "Printer agent: offline";
+    pill.className = "pill " + (agent.online ? "pill--ok" : "pill--bad");
+    if (!data.jobs.length) {
+      body.innerHTML =
+        '<tr><td colspan="9" class="inventory__empty">No print jobs yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = "";
+    data.jobs.forEach((j) => {
+      const tr = document.createElement("tr");
+      const canCancel = j.status === "pending";
+      const canReprint = ["done", "error", "canceled"].includes(j.status);
+      tr.innerHTML = `
+        <td class="mono">#${j.id}</td>
+        <td>${escapeHtml(j.label_name || j.product_title || "")}${
+          j.variant_title ? ` <span class="inventory__variant">(${escapeHtml(j.variant_title)})</span>` : ""
+        }</td>
+        <td class="mono">${escapeHtml(j.sku || "—")}</td>
+        <td>${escapeHtml(j.bin_location || "—")}</td>
+        <td class="mono">${j.batch_id ? "#" + j.batch_id : "—"}</td>
+        <td>${escapeHtml(j.requested_by || "—")}</td>
+        <td><span class="chip-status chip-status--${escapeHtml(j.status)}">${escapeHtml(j.status)}</span>${
+          j.error ? ` <span class="recent__meta" title="${escapeHtml(j.error)}">ⓘ</span>` : ""
+        }</td>
+        <td class="recent__meta">${escapeHtml(fmtWhen(j.printed_at || j.created_at))}</td>
+        <td>${canCancel ? '<button class="recent__unassign" data-act="cancel">cancel</button>' : ""}${
+          canReprint ? '<button class="recent__unassign" data-act="reprint">reprint</button>' : ""
+        }</td>`;
+      const cancelBtn = tr.querySelector('[data-act="cancel"]');
+      if (cancelBtn)
+        cancelBtn.addEventListener("click", async () => {
+          try {
+            await postJson(`/api/print-jobs/${j.id}/cancel`, {});
+            loadQueue();
+          } catch (err) {
+            alert(err.message);
+          }
+        });
+      const reprintBtn = tr.querySelector('[data-act="reprint"]');
+      if (reprintBtn)
+        reprintBtn.addEventListener("click", async () => {
+          if (!confirm(`Reprint one label for ${j.sku || j.product_title}? (New EPC — the damaged label's tag stays unassigned.)`)) return;
+          try {
+            await postJson("/api/print-jobs", {
+              quantity: 1,
+              shopify_variant_id: j.shopify_variant_id,
+              shopify_product_id: j.shopify_product_id,
+              product_title: j.product_title,
+              variant_title: j.variant_title,
+              sku: j.sku,
+              barcode: j.barcode,
+              bin_location: j.bin_location,
+              label_name: j.label_name,
+              requested_by: operatorEl.value || j.requested_by,
+            });
+            loadQueue();
+          } catch (err) {
+            alert(err.message);
+          }
+        });
+      body.append(tr);
+    });
+  } catch (err) {
+    body.innerHTML =
+      '<tr><td colspan="9" class="inventory__empty">Could not load the queue.</td></tr>';
+    pill.textContent = "Printer agent: unknown";
+    pill.className = "pill";
+  }
+}
+
+// === Review tab (WIP: task inbox) ==========================================
+async function loadReview() {
+  const list = document.getElementById("review-list");
+  try {
+    const { tasks } = await apiJson("/api/review-tasks?status=open&limit=100");
+    list.innerHTML = "";
+    if (!tasks.length) {
+      list.innerHTML =
+        '<li class="recent__empty">Inbox zero — nothing needs review.</li>';
+      return;
+    }
+    tasks.forEach((t) => {
+      const li = document.createElement("li");
+      li.innerHTML = `
+        <span class="evtype">${escapeHtml(t.category)}</span>
+        <span class="recent__prod"><b>${escapeHtml(t.product_title || t.sku || "")}</b> ${escapeHtml(t.detail)}</span>
+        <span class="recent__meta recent__when">${escapeHtml(fmtWhen(t.created_at))}</span>
+        <button class="recent__unassign" data-act="resolve">resolve</button>
+        <button class="recent__unassign" data-act="dismiss">dismiss</button>`;
+      const act = async (dismissed) => {
+        const operator = operatorEl.value;
+        if (!operator) {
+          alert("Pick who's scanning (top right) first.");
+          return;
+        }
+        try {
+          await postJson(`/api/review-tasks/${t.id}/resolve`, {
+            resolved_by: operator,
+            dismissed,
+          });
+          li.remove();
+        } catch (err) {
+          alert(err.message);
+        }
+      };
+      li.querySelector('[data-act="resolve"]').addEventListener("click", () => act(false));
+      li.querySelector('[data-act="dismiss"]').addEventListener("click", () => act(true));
+      list.append(li);
+    });
+  } catch (err) {
+    list.innerHTML =
+      '<li class="recent__empty">Could not load review tasks.</li>';
+  }
+}
+
+// === Audits tab (WIP: recommended checks pointer) ==========================
+async function loadAudits() {
+  const list = document.getElementById("audit-list");
+  try {
+    const { tasks } = await apiJson("/api/review-tasks?status=open&limit=100");
+    const checks = tasks.filter((t) => t.category === "inventory-check");
+    list.innerHTML = "";
+    if (!checks.length) {
+      list.innerHTML =
+        '<li class="recent__empty">No product checks recommended right now.</li>';
+      return;
+    }
+    checks.forEach((t) => {
+      const li = document.createElement("li");
+      li.innerHTML = `
+        <span class="evtype">check</span>
+        <span class="recent__prod"><b>${escapeHtml(t.product_title || t.sku || "")}</b> ${escapeHtml(t.detail)}</span>
+        <span class="recent__meta recent__when">${escapeHtml(fmtWhen(t.created_at))}</span>`;
+      list.append(li);
+    });
+  } catch (err) {
+    list.innerHTML = '<li class="recent__empty">Could not load.</li>';
+  }
+}
+
+// === History tab ============================================================
+let historyEvents = [];
+
+async function loadHistory() {
+  const body = document.getElementById("hist-body");
+  try {
+    const { events } = await apiJson("/api/history?limit=200");
+    historyEvents = events;
+    renderHistory();
+  } catch (err) {
+    body.innerHTML =
+      '<tr><td colspan="6" class="inventory__empty">Could not load history.</td></tr>';
+  }
+}
+
+function renderHistory() {
+  const body = document.getElementById("hist-body");
+  const q = document.getElementById("hist-search").value.trim().toLowerCase();
+  const rows = q
+    ? historyEvents.filter((e) =>
+        [e.type, e.worker, e.sku, e.title, e.detail]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(q))
+      )
+    : historyEvents;
+  if (!rows.length) {
+    body.innerHTML =
+      '<tr><td colspan="6" class="inventory__empty">No events yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows
+    .map(
+      (e) => `<tr>
+      <td class="recent__meta" style="white-space:nowrap">${escapeHtml(fmtWhen(e.at))}</td>
+      <td><span class="evtype">${escapeHtml(e.type)}</span></td>
+      <td>${escapeHtml(e.worker || "—")}</td>
+      <td class="mono">${escapeHtml(e.sku || "—")}</td>
+      <td>${escapeHtml(e.title || "—")}</td>
+      <td class="recent__meta">${escapeHtml(e.detail || "")}</td>
+    </tr>`
+    )
+    .join("");
+}
+
+let histSearchTimer;
+document.getElementById("hist-search").addEventListener("input", () => {
+  clearTimeout(histSearchTimer);
+  histSearchTimer = setTimeout(renderHistory, 150);
+});
 
 // Boot
 resetStation();

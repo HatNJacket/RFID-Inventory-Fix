@@ -35,7 +35,10 @@ from app.database import (
 from app.models import (
     BarcodeAlias,
     BarcodeChange,
+    Batch,
+    BatchItem,
     PrintJob,
+    ReviewTask,
     RfidAssignment,
     SerialPrefix,
 )
@@ -88,6 +91,25 @@ def _db_not_configured(request: Request, exc: DatabaseNotConfigured):
         content={"detail": "Database not configured. Set DATABASE_URL to "
                            "enable saving and listing assignments."},
     )
+
+
+def require_shopify_write(feature: str = "scan_station") -> None:
+    """Server-side Shopify write gate (config.SHOPIFY_WRITE_MODE). All
+    current write endpoints are the confirmed Scan Station flows; anything
+    new must call this with its own feature name and stays blocked until
+    the mode is promoted to 'production'."""
+    mode = config.SHOPIFY_WRITE_MODE
+    if mode == "disabled":
+        raise HTTPException(
+            403, "Shopify writes are disabled (SHOPIFY_WRITE_MODE=disabled)."
+        )
+    if mode != "production" and feature != "scan_station":
+        raise HTTPException(
+            403,
+            f"Shopify write '{feature}' is not enabled yet "
+            f"(SHOPIFY_WRITE_MODE={mode}). It only creates proposals for "
+            f"the Review tab until promoted.",
+        )
 
 
 # ---------------------------------------------------------------- schemas ---
@@ -511,12 +533,15 @@ def create_print_jobs(
 def list_print_jobs(
     status: str | None = None,
     ids: str | None = None,
+    batch_id: int | None = None,
     limit: int = 50,
     session: Session = Depends(get_session),
 ):
     stmt = select(PrintJob).order_by(PrintJob.id.desc())
     if status:
         stmt = stmt.where(PrintJob.status == status.strip())
+    if batch_id is not None:
+        stmt = stmt.where(PrintJob.batch_id == batch_id)
     if ids:
         try:
             id_list = [int(i) for i in ids.split(",") if i.strip()]
@@ -527,11 +552,30 @@ def list_print_jobs(
     return {"count": len(rows), "jobs": [j.as_dict() for j in rows]}
 
 
+# Print-agent heartbeat: the agent polls claim every ~10 s, so a recent
+# claim means the printer PC is up. In-memory is fine — after an app
+# restart the next poll repopulates it within seconds.
+_agent_last_seen: float | None = None
+
+
+@app.get("/api/print-agent/status", dependencies=[Depends(require_user)])
+def print_agent_status():
+    seen = _agent_last_seen
+    return {
+        "online": seen is not None and time.time() - seen < 35,
+        "last_seen_seconds": (
+            None if seen is None else int(time.time() - seen)
+        ),
+    }
+
+
 @app.post("/api/print-jobs/claim", dependencies=[Depends(require_agent_key)])
 def claim_print_jobs(
     limit: int = 5, session: Session = Depends(get_session)
 ):
     """Agent: take the oldest pending jobs and mark them printing."""
+    global _agent_last_seen
+    _agent_last_seen = time.time()
     rows = session.scalars(
         select(PrintJob)
         .where(PrintJob.status == "pending")
@@ -921,6 +965,7 @@ def overwrite_barcode(
         raise HTTPException(
             422, "Confirmation checkbox is required for barcode replacement."
         )
+    require_shopify_write("scan_station")
     if config.check_shopify_env():
         raise HTTPException(500, "Shopify credentials are not configured.")
 
@@ -998,6 +1043,7 @@ class BinUpdateIn(BaseModel):
     dependencies=[Depends(require_user)],
 )
 def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
+    require_shopify_write("scan_station")
     if config.check_shopify_env():
         raise HTTPException(500, "Shopify credentials are not configured.")
     # Shopify API resolution: the metafield write needs the variant GID.
@@ -1058,6 +1104,7 @@ def overwrite_sku(
         raise HTTPException(
             422, "Confirmation checkbox is required for SKU replacement."
         )
+    require_shopify_write("scan_station")
     if config.check_shopify_env():
         raise HTTPException(500, "Shopify credentials are not configured.")
 
@@ -1217,3 +1264,745 @@ def cancel_print_job(job_id: int, session: Session = Depends(get_session)):
     job.status = "canceled"
     session.commit()
     return job.as_dict()
+
+
+# ------------------------------------------------------------ bin batches ---
+# The warehouse walk-around workflow (Batch Tagging tab):
+#   collect (scan every box at a bin) -> prepare labels -> print (queue)
+#   -> pair (barcode selects product, EPC scans attach) -> verify -> done.
+# Batches only OBSERVE — no Shopify writes anywhere in this flow. Count and
+# bin mismatches become ReviewTasks at completion, never live edits.
+
+def _get_batch(session: Session, batch_id: int) -> Batch:
+    batch = session.get(Batch, batch_id)
+    if batch is None:
+        raise HTTPException(404, "No such batch.")
+    return batch
+
+
+def _batch_items(session: Session, batch_id: int) -> list[BatchItem]:
+    return session.scalars(
+        select(BatchItem)
+        .where(BatchItem.batch_id == batch_id)
+        .order_by(BatchItem.id)
+    ).all()
+
+
+def _mirror_qty(session: Session, sku: str | None) -> int | None:
+    """Shopify on-hand from the TELCAN mirror (best-effort; None elsewhere)."""
+    if not sku or session.get_bind().dialect.name != "mssql":
+        return None
+    try:
+        row = session.execute(
+            text(
+                "SELECT MAX(Variant_Inventory_Qty) AS qty "
+                "FROM dbo.Shopify_Variants WHERE Variant_SKU = :sku"
+            ),
+            {"sku": sku},
+        ).first()
+        return row.qty if row else None
+    except Exception as error:
+        logger.warning("mirror qty lookup failed for %s: %s", sku, error)
+        return None
+
+
+class BatchIn(BaseModel):
+    bin: str = Field(max_length=100)
+    created_by: str | None = Field(default=None, max_length=100)
+
+    @field_validator("bin")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/batches", status_code=201, dependencies=[Depends(require_user)]
+)
+def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
+    batch = Batch(bin_name=payload.bin, created_by=payload.created_by)
+    session.add(batch)
+    session.commit()
+    session.refresh(batch)
+    return batch.as_dict()
+
+
+@app.get("/api/batches", dependencies=[Depends(require_user)])
+def list_batches(
+    status: str | None = None,
+    limit: int = 20,
+    session: Session = Depends(get_session),
+):
+    stmt = select(Batch).order_by(Batch.id.desc())
+    if status == "open":
+        stmt = stmt.where(Batch.status.notin_(("done", "abandoned")))
+    elif status:
+        stmt = stmt.where(Batch.status == status.strip())
+    rows = session.scalars(stmt.limit(min(limit, 100))).all()
+    totals = {}
+    if rows:
+        for r in session.execute(
+            select(
+                BatchItem.batch_id,
+                func.count().label("products"),
+                func.sum(BatchItem.qty_scanned).label("boxes"),
+                func.sum(BatchItem.paired_count).label("paired"),
+            )
+            .where(BatchItem.batch_id.in_([b.id for b in rows]))
+            .group_by(BatchItem.batch_id)
+        ).all():
+            totals[r.batch_id] = r
+    batches = []
+    for b in rows:
+        d = b.as_dict()
+        t = totals.get(b.id)
+        d["products"] = t.products if t else 0
+        d["boxes"] = int(t.boxes or 0) if t else 0
+        d["paired"] = int(t.paired or 0) if t else 0
+        batches.append(d)
+    return {"count": len(batches), "batches": batches}
+
+
+@app.get("/api/batches/{batch_id}", dependencies=[Depends(require_user)])
+def get_batch(batch_id: int, session: Session = Depends(get_session)):
+    batch = _get_batch(session, batch_id)
+    items = _batch_items(session, batch_id)
+    return {"batch": batch.as_dict(), "items": [i.as_dict() for i in items]}
+
+
+class BatchScanIn(BaseModel):
+    code: str = Field(max_length=64)
+
+    @field_validator("code")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/batches/{batch_id}/scan",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def batch_scan(
+    batch_id: int, payload: BatchScanIn, session: Session = Depends(get_session)
+):
+    """One box scanned at the shelf. Resolves through the full Scan Station
+    chain (TELCAN -> Shopify -> alias -> serial prefix); repeated scans of
+    the same product bump its count. Unknown barcodes are kept as unresolved
+    rows so the physical count survives — they never block the batch."""
+    batch = _get_batch(session, batch_id)
+    if batch.status in ("done", "abandoned"):
+        raise HTTPException(409, f"This batch is {batch.status}.")
+
+    code = payload.code
+    product = None
+    try:
+        product = product_by_barcode(code)
+    except HTTPException as error:
+        if error.status_code != 404:
+            raise
+
+    items = _batch_items(session, batch_id)
+    item = None
+    if product is not None:
+        sku = product.get("sku")
+        barcode = product.get("barcode")
+        for i in items:
+            if i.resolved and (
+                (sku and i.sku == sku)
+                or (not sku and barcode and i.barcode == barcode)
+            ):
+                item = i
+                break
+    else:
+        for i in items:
+            if not i.resolved and i.scanned_code == code:
+                item = i
+                break
+
+    if item is None:
+        item = BatchItem(
+            batch_id=batch.id, scanned_code=code[:64], qty_scanned=0
+        )
+        if product is not None:
+            item.resolved = True
+            item.shopify_variant_id = product.get("shopify_variant_id")
+            item.shopify_product_id = product.get("shopify_product_id")
+            item.product_title = product.get("product_title")
+            item.variant_title = product.get("variant_title")
+            item.sku = product.get("sku")
+            item.barcode = product.get("barcode")
+            item.bin_location = product.get("bin_location")
+            item.serial_prefix = product.get("serial_prefix")
+            item.image_url = (product.get("image_url") or "")[:500] or None
+            # Label default mirrors the Scan Station: the operator's saved
+            # serial name when there is one, else the product title.
+            item.label_name = (
+                product.get("serial_label")
+                or product.get("product_title")
+                or ""
+            )[:255] or None
+            item.expected_qty = _mirror_qty(session, item.sku)
+        else:
+            item.resolved = False
+            item.product_title = f"Unresolved: {code}"
+        session.add(item)
+
+    item.qty_scanned += 1
+    session.commit()
+    session.refresh(item)
+
+    # Bin mismatch is informational: the operator decides at the shelf
+    # (keep saved bin / move it via the existing confirmed bin update).
+    saved_bin = item.bin_location
+    bin_mismatch = bool(
+        item.resolved
+        and saved_bin
+        and saved_bin not in MISSING_BIN_VALUES
+        and saved_bin.strip().lower() != batch.bin_name.strip().lower()
+    )
+    return {
+        "item": item.as_dict(),
+        "bin_mismatch": bin_mismatch,
+        "serial_note": (product or {}).get("serial_note"),
+    }
+
+
+class ItemQtyIn(BaseModel):
+    qty: int = Field(ge=0, le=500)
+
+
+@app.post(
+    "/api/batches/{batch_id}/items/{item_id}/qty",
+    dependencies=[Depends(require_user)],
+)
+def set_item_qty(
+    batch_id: int,
+    item_id: int,
+    payload: ItemQtyIn,
+    session: Session = Depends(get_session),
+):
+    _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    item.qty_scanned = payload.qty
+    session.commit()
+    return item.as_dict()
+
+
+class ItemLabelIn(BaseModel):
+    label_name: str = Field(max_length=255)
+
+    @field_validator("label_name")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.put(
+    "/api/batches/{batch_id}/items/{item_id}/label",
+    dependencies=[Depends(require_user)],
+)
+def set_item_label(
+    batch_id: int,
+    item_id: int,
+    payload: ItemLabelIn,
+    session: Session = Depends(get_session),
+):
+    _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    item.label_name = payload.label_name
+    # Serialized brands: saving here confirms the name exactly like the
+    # Scan Station's Save button, so future scans auto-print with it.
+    if item.serial_prefix:
+        sp = session.get(SerialPrefix, item.serial_prefix)
+        if sp is not None:
+            sp.label_name = payload.label_name
+    session.commit()
+    return item.as_dict()
+
+
+class BatchQueueIn(BaseModel):
+    requested_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/batches/{batch_id}/queue-labels",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def batch_queue_labels(
+    batch_id: int,
+    payload: BatchQueueIn,
+    session: Session = Depends(get_session),
+):
+    """One print job per scanned box. Labels carry the BATCH bin — that's
+    where the boxes physically are. Only from 'collecting' so a double-click
+    can't queue the whole batch twice; single reprints live in Print Queue."""
+    batch = _get_batch(session, batch_id)
+    if batch.status != "collecting":
+        raise HTTPException(
+            409,
+            f"Labels were already queued for this batch (status "
+            f"{batch.status}). Reprint individual labels from Print Queue.",
+        )
+    jobs = []
+    for item in _batch_items(session, batch_id):
+        if not item.resolved or not item.shopify_variant_id:
+            continue
+        for _ in range(item.qty_scanned):
+            jobs.append(
+                PrintJob(
+                    epc=_new_epc(),
+                    status="pending",
+                    batch_id=batch.id,
+                    shopify_variant_id=item.shopify_variant_id,
+                    shopify_product_id=item.shopify_product_id,
+                    product_title=item.product_title or "",
+                    variant_title=item.variant_title,
+                    sku=item.sku,
+                    barcode=item.barcode,
+                    bin_location=batch.bin_name,
+                    label_name=item.label_name,
+                    requested_by=payload.requested_by or batch.created_by,
+                )
+            )
+    if not jobs:
+        raise HTTPException(422, "No resolved products with boxes to label.")
+    session.add_all(jobs)
+    batch.status = "printing"
+    session.commit()
+    return {"count": len(jobs), "batch": batch.as_dict()}
+
+
+class PairIn(BaseModel):
+    epc: str = Field(max_length=128)
+    item_id: int
+    created_by: str | None = Field(default=None, max_length=100)
+
+    @field_validator("epc")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/batches/{batch_id}/pair",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def batch_pair(
+    batch_id: int, payload: PairIn, session: Session = Depends(get_session)
+):
+    """Attach one applied label's EPC to the active product. Duplicate EPCs
+    are rejected with what they're already assigned to; odd-looking EPCs
+    save but come back flagged suspect (same rules as the Scan Station)."""
+    batch = _get_batch(session, batch_id)
+    item = session.get(BatchItem, payload.item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    if not item.resolved:
+        raise HTTPException(422, "That item never resolved to a product.")
+
+    assignment = RfidAssignment(
+        rfid_id=payload.epc,
+        shopify_variant_id=item.shopify_variant_id,
+        shopify_product_id=item.shopify_product_id,
+        product_title=item.label_name or item.product_title or "",
+        variant_title=item.variant_title,
+        sku=item.sku,
+        barcode=item.barcode,
+        bin_location=batch.bin_name,
+        assigned_by=payload.created_by,
+    )
+    assignment.suspect = (
+        re.fullmatch(r"[0-9A-Fa-f]{24}", payload.epc) is None
+    )
+    session.add(assignment)
+    item.paired_count += 1
+    if batch.status == "printing":
+        batch.status = "pairing"
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        existing = session.scalar(
+            select(RfidAssignment).where(
+                RfidAssignment.rfid_id == payload.epc
+            )
+        )
+        raise HTTPException(
+            409,
+            f"Duplicate EPC — already assigned to "
+            f"{existing.product_title if existing else 'another product'}.",
+        )
+    session.refresh(assignment)
+    session.refresh(item)
+    return {"assignment": assignment.as_dict(), "item": item.as_dict()}
+
+
+class PairUndoIn(BaseModel):
+    epc: str = Field(max_length=128)
+    item_id: int
+
+
+@app.post(
+    "/api/batches/{batch_id}/pair/undo",
+    dependencies=[Depends(require_user)],
+)
+def batch_pair_undo(
+    batch_id: int, payload: PairUndoIn, session: Session = Depends(get_session)
+):
+    _get_batch(session, batch_id)
+    item = session.get(BatchItem, payload.item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    row = session.scalar(
+        select(RfidAssignment).where(
+            RfidAssignment.rfid_id == payload.epc.strip()
+        )
+    )
+    if row is None:
+        raise HTTPException(404, "No assignment for that EPC.")
+    session.delete(row)
+    item.paired_count = max(0, item.paired_count - 1)
+    session.commit()
+    return {"item": item.as_dict()}
+
+
+class VerifyIn(BaseModel):
+    epcs: list[str] = Field(max_length=2000)
+
+
+@app.post(
+    "/api/batches/{batch_id}/verify", dependencies=[Depends(require_user)]
+)
+def batch_verify(
+    batch_id: int, payload: VerifyIn, session: Session = Depends(get_session)
+):
+    """Final bin sweep: classify every detected EPC as ours-in-this-batch,
+    a known tag from another product, or unknown; report per-product
+    paired-vs-detected counts. Read-only — completion decides what becomes
+    a ReviewTask."""
+    batch = _get_batch(session, batch_id)
+    items = [i for i in _batch_items(session, batch_id) if i.resolved]
+    epcs = {e.strip().upper() for e in payload.epcs if e and e.strip()}
+
+    assignments = {}
+    if epcs:
+        rows = session.scalars(
+            select(RfidAssignment).where(
+                func.upper(RfidAssignment.rfid_id).in_(epcs)
+            )
+        ).all()
+        assignments = {r.rfid_id.upper(): r for r in rows}
+
+    batch_keys = {(i.sku, i.barcode) for i in items}
+    detected = {}  # (sku, barcode) -> count
+    foreign, unknown = [], []
+    for epc in sorted(epcs):
+        row = assignments.get(epc)
+        if row is None:
+            unknown.append(epc)
+        elif (row.sku, row.barcode) in batch_keys:
+            key = (row.sku, row.barcode)
+            detected[key] = detected.get(key, 0) + 1
+        else:
+            foreign.append(
+                {
+                    "epc": row.rfid_id,
+                    "product_title": row.product_title,
+                    "sku": row.sku,
+                    "bin_location": row.bin_location,
+                }
+            )
+
+    report = [
+        {
+            "item_id": i.id,
+            "sku": i.sku,
+            "product_title": i.label_name or i.product_title,
+            "qty_scanned": i.qty_scanned,
+            "paired_count": i.paired_count,
+            "detected": detected.get((i.sku, i.barcode), 0),
+        }
+        for i in items
+    ]
+    ok = (
+        not unknown
+        and not foreign
+        and all(r["detected"] >= r["paired_count"] for r in report)
+    )
+    return {
+        "bin": batch.bin_name,
+        "scanned_epcs": len(epcs),
+        "items": report,
+        "foreign": foreign,
+        "unknown_epcs": unknown,
+        "ok": ok,
+    }
+
+
+class CompleteIn(BaseModel):
+    created_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/batches/{batch_id}/complete", dependencies=[Depends(require_user)]
+)
+def batch_complete(
+    batch_id: int,
+    payload: CompleteIn,
+    session: Session = Depends(get_session),
+):
+    """Close the batch. Mismatches become Review tasks — recommendations
+    for a future product check, never automatic fixes."""
+    batch = _get_batch(session, batch_id)
+    if batch.status in ("done", "abandoned"):
+        raise HTTPException(409, f"This batch is already {batch.status}.")
+    tasks = []
+    for item in _batch_items(session, batch_id):
+        name = item.label_name or item.product_title
+        if not item.resolved:
+            tasks.append(ReviewTask(
+                category="unresolved-barcode",
+                detail=(
+                    f"Barcode {item.scanned_code} was scanned "
+                    f"{item.qty_scanned}x in bin {batch.bin_name} but never "
+                    f"resolved to a product. Link or fix it at the Scan "
+                    f"Station."
+                )[:500],
+                batch_id=batch.id,
+                created_by=payload.created_by,
+            ))
+            continue
+        if (
+            item.expected_qty is not None
+            and item.qty_scanned != item.expected_qty
+        ):
+            tasks.append(ReviewTask(
+                category="inventory-check",
+                sku=item.sku,
+                product_title=name,
+                detail=(
+                    f"Bin {batch.bin_name}: {item.qty_scanned} box(es) "
+                    f"scanned but Shopify on-hand is {item.expected_qty}. "
+                    f"Recommend a product-specific count."
+                )[:500],
+                batch_id=batch.id,
+                created_by=payload.created_by,
+            ))
+        if item.paired_count < item.qty_scanned:
+            tasks.append(ReviewTask(
+                category="pairing-incomplete",
+                sku=item.sku,
+                product_title=name,
+                detail=(
+                    f"Bin {batch.bin_name}: only {item.paired_count} of "
+                    f"{item.qty_scanned} RFID tags were paired. Finish "
+                    f"pairing at the Scan Station or re-check the shelf."
+                )[:500],
+                batch_id=batch.id,
+                created_by=payload.created_by,
+            ))
+    session.add_all(tasks)
+    batch.status = "done"
+    batch.completed_at = datetime.now(timezone.utc)
+    session.commit()
+    return {
+        "batch": batch.as_dict(),
+        "review_tasks": [t.as_dict() for t in tasks],
+    }
+
+
+@app.post(
+    "/api/batches/{batch_id}/abandon", dependencies=[Depends(require_user)]
+)
+def batch_abandon(batch_id: int, session: Session = Depends(get_session)):
+    batch = _get_batch(session, batch_id)
+    if batch.status == "done":
+        raise HTTPException(409, "This batch is already done.")
+    batch.status = "abandoned"
+    batch.completed_at = datetime.now(timezone.utc)
+    session.commit()
+    return batch.as_dict()
+
+
+# ------------------------------------------------------------ review tasks ---
+@app.get("/api/review-tasks", dependencies=[Depends(require_user)])
+def list_review_tasks(
+    status: str = "open",
+    limit: int = 100,
+    session: Session = Depends(get_session),
+):
+    stmt = select(ReviewTask).order_by(ReviewTask.id.desc())
+    if status != "all":
+        stmt = stmt.where(ReviewTask.status == status.strip())
+    rows = session.scalars(stmt.limit(min(limit, 500))).all()
+    return {"count": len(rows), "tasks": [t.as_dict() for t in rows]}
+
+
+class ResolveIn(BaseModel):
+    resolved_by: str | None = Field(default=None, max_length=100)
+    note: str | None = Field(default=None, max_length=255)
+    dismissed: bool = False
+
+
+@app.post(
+    "/api/review-tasks/{task_id}/resolve",
+    dependencies=[Depends(require_user)],
+)
+def resolve_review_task(
+    task_id: int, payload: ResolveIn, session: Session = Depends(get_session)
+):
+    task = session.get(ReviewTask, task_id)
+    if task is None:
+        raise HTTPException(404, "No such review task.")
+    if task.status != "open":
+        raise HTTPException(409, f"Task is already {task.status}.")
+    task.status = "dismissed" if payload.dismissed else "resolved"
+    task.resolved_by = payload.resolved_by
+    task.resolved_at = datetime.now(timezone.utc)
+    task.resolution_note = payload.note
+    session.commit()
+    return task.as_dict()
+
+
+# ---------------------------------------------------------------- history ---
+@app.get("/api/history", dependencies=[Depends(require_user)])
+def history(
+    limit: int = 200,
+    session: Session = Depends(get_session),
+):
+    """Unified append-only event feed across every app-owned table. Each
+    source keeps its own audit row; this endpoint just merges them into one
+    timeline (newest first). Nothing here is ever rewritten."""
+    limit = min(limit, 500)
+    events = []
+
+    def iso(dt):
+        return dt.isoformat() if dt else None
+
+    for a in session.scalars(
+        select(RfidAssignment)
+        .order_by(RfidAssignment.id.desc()).limit(limit)
+    ):
+        events.append({
+            "at": iso(a.assigned_at),
+            "type": "tag-assigned",
+            "worker": a.assigned_by,
+            "sku": a.sku,
+            "title": a.product_title,
+            "detail": f"EPC {a.rfid_id}"
+                      + (" · SUSPECT read" if a.suspect else "")
+                      + (f" · bin {a.bin_location}" if a.bin_location else ""),
+        })
+
+    change_types = {
+        "barcode": "barcode-replaced", "sku": "sku-updated",
+        "bin": "bin-updated",
+    }
+    for c in session.scalars(
+        select(BarcodeChange).order_by(BarcodeChange.id.desc()).limit(limit)
+    ):
+        events.append({
+            "at": iso(c.changed_at),
+            "type": change_types.get(c.changed_field, c.changed_field),
+            "worker": c.changed_by,
+            "sku": c.sku,
+            "title": c.product_title,
+            "detail": f"{c.old_barcode or '(none)'} → {c.new_barcode}",
+        })
+
+    job_types = {
+        "done": "label-printed", "error": "label-failed",
+        "canceled": "label-canceled", "pending": "label-queued",
+        "printing": "label-printing",
+    }
+    for j in session.scalars(
+        select(PrintJob).order_by(PrintJob.id.desc()).limit(limit)
+    ):
+        events.append({
+            "at": iso(j.printed_at or j.created_at),
+            "type": job_types.get(j.status, j.status),
+            "worker": j.requested_by,
+            "sku": j.sku,
+            "title": j.label_name or j.product_title,
+            "detail": f"EPC {j.epc}"
+                      + (f" · batch #{j.batch_id}" if j.batch_id else "")
+                      + (f" · {j.error}" if j.error else ""),
+        })
+
+    for al in session.scalars(
+        select(BarcodeAlias).order_by(BarcodeAlias.id.desc()).limit(limit)
+    ):
+        events.append({
+            "at": iso(al.created_at),
+            "type": "barcode-linked",
+            "worker": al.created_by,
+            "sku": al.sku,
+            "title": al.product_title,
+            "detail": f"{al.alias_barcode} → {al.barcode or al.sku}",
+        })
+
+    for b in session.scalars(
+        select(Batch).order_by(Batch.id.desc()).limit(limit)
+    ):
+        events.append({
+            "at": iso(b.created_at),
+            "type": "batch-started",
+            "worker": b.created_by,
+            "sku": None,
+            "title": f"Bin {b.bin_name}",
+            "detail": f"Batch #{b.id}",
+        })
+        if b.completed_at:
+            events.append({
+                "at": iso(b.completed_at),
+                "type": ("batch-abandoned" if b.status == "abandoned"
+                         else "batch-completed"),
+                "worker": b.created_by,
+                "sku": None,
+                "title": f"Bin {b.bin_name}",
+                "detail": f"Batch #{b.id}",
+            })
+
+    for t in session.scalars(
+        select(ReviewTask).order_by(ReviewTask.id.desc()).limit(limit)
+    ):
+        events.append({
+            "at": iso(t.created_at),
+            "type": "review-opened",
+            "worker": t.created_by,
+            "sku": t.sku,
+            "title": t.product_title,
+            "detail": f"[{t.category}] {t.detail}",
+        })
+        if t.resolved_at:
+            events.append({
+                "at": iso(t.resolved_at),
+                "type": f"review-{t.status}",
+                "worker": t.resolved_by,
+                "sku": t.sku,
+                "title": t.product_title,
+                "detail": f"[{t.category}]"
+                          + (f" {t.resolution_note}" if t.resolution_note
+                             else ""),
+            })
+
+    # ISO strings sort chronologically; string sort also avoids the
+    # naive-vs-aware datetime comparison trap across DB backends.
+    events.sort(key=lambda e: e["at"] or "", reverse=True)
+    return {"count": len(events[:limit]), "events": events[:limit]}

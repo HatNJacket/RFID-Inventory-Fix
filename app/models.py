@@ -11,7 +11,7 @@ authoritative and you can re-sync them later if a product is renamed.
 """
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import Boolean, DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -234,6 +234,10 @@ class PrintJob(Base):
     requested_by: Mapped[str | None] = mapped_column(String(100))
     error: Mapped[str | None] = mapped_column(String(500))
 
+    # Set when the job came from a bin batch (Batch Tagging tab); the Print
+    # Queue groups and reports per batch.
+    batch_id: Mapped[int | None] = mapped_column(Integer, index=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -244,6 +248,7 @@ class PrintJob(Base):
             "id": self.id,
             "epc": self.epc,
             "status": self.status,
+            "batch_id": self.batch_id,
             "barcode": self.barcode,
             "sku": self.sku,
             "product_title": self.product_title,
@@ -260,4 +265,148 @@ class PrintJob(Base):
             "printed_at": (
                 self.printed_at.isoformat() if self.printed_at else None
             ),
+        }
+
+
+class Batch(Base):
+    """One bin-tagging session (Batch Tagging tab): walk to a bin, scan every
+    box, print one label per box, apply them, pair each label's EPC, verify.
+
+    Lifecycle: collecting -> printing -> pairing -> done  (any -> abandoned)
+    Inventory/bin mismatches never block the batch — they become ReviewTasks
+    at completion instead of demanding fixes at the shelf."""
+
+    __tablename__ = "rfid_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bin_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), index=True, nullable=False, default="collecting"
+    )
+    created_by: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "bin_name": self.bin_name,
+            "status": self.status,
+            "created_by": self.created_by,
+            "created_at": (
+                self.created_at.isoformat() if self.created_at else None
+            ),
+            "completed_at": (
+                self.completed_at.isoformat() if self.completed_at else None
+            ),
+        }
+
+
+class BatchItem(Base):
+    """One unique product inside a batch: how many boxes were scanned, the
+    product snapshot for labels, and pairing progress. Unknown barcodes are
+    kept as unresolved rows so the physical count isn't lost."""
+
+    __tablename__ = "rfid_batch_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+
+    # What the scanner actually read the first time (serial, alias, barcode).
+    scanned_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    resolved: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
+
+    shopify_variant_id: Mapped[str | None] = mapped_column(String(64))
+    shopify_product_id: Mapped[str | None] = mapped_column(String(300))
+    product_title: Mapped[str | None] = mapped_column(String(255))
+    variant_title: Mapped[str | None] = mapped_column(String(255))
+    sku: Mapped[str | None] = mapped_column(String(100), index=True)
+    barcode: Mapped[str | None] = mapped_column(String(64))
+    # The product's SAVED bin at scan time (labels use the batch's bin).
+    bin_location: Mapped[str | None] = mapped_column(String(100))
+    serial_prefix: Mapped[str | None] = mapped_column(String(8))
+    label_name: Mapped[str | None] = mapped_column(String(255))
+    image_url: Mapped[str | None] = mapped_column(String(500))
+
+    qty_scanned: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # Shopify on-hand (TELCAN mirror) when first scanned; None when unknown.
+    expected_qty: Mapped[int | None] = mapped_column(Integer)
+    paired_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "batch_id": self.batch_id,
+            "scanned_code": self.scanned_code,
+            "resolved": self.resolved,
+            "shopify_variant_id": self.shopify_variant_id,
+            "shopify_product_id": self.shopify_product_id,
+            "product_title": self.product_title,
+            "variant_title": self.variant_title,
+            "sku": self.sku,
+            "barcode": self.barcode,
+            "bin_location": self.bin_location,
+            "serial_prefix": self.serial_prefix,
+            "label_name": self.label_name,
+            "image_url": self.image_url,
+            "qty_scanned": self.qty_scanned,
+            "expected_qty": self.expected_qty,
+            "paired_count": self.paired_count,
+        }
+
+
+class ReviewTask(Base):
+    """The system's task inbox (Review tab): anything the software noticed
+    but shouldn't fix on its own — inventory count mismatches, unresolved
+    barcodes, incomplete pairing. Created by batches (and later audits);
+    resolved or dismissed by an operator, never auto-closed."""
+
+    __tablename__ = "rfid_review_tasks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(40), nullable=False)
+    sku: Mapped[str | None] = mapped_column(String(100), index=True)
+    product_title: Mapped[str | None] = mapped_column(String(255))
+    detail: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), index=True, nullable=False, default="open"
+    )
+    batch_id: Mapped[int | None] = mapped_column(Integer)
+
+    created_by: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    resolved_by: Mapped[str | None] = mapped_column(String(100))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_note: Mapped[str | None] = mapped_column(String(255))
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "category": self.category,
+            "sku": self.sku,
+            "product_title": self.product_title,
+            "detail": self.detail,
+            "status": self.status,
+            "batch_id": self.batch_id,
+            "created_by": self.created_by,
+            "created_at": (
+                self.created_at.isoformat() if self.created_at else None
+            ),
+            "resolved_by": self.resolved_by,
+            "resolved_at": (
+                self.resolved_at.isoformat() if self.resolved_at else None
+            ),
+            "resolution_note": self.resolution_note,
         }

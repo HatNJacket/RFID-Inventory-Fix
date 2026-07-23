@@ -59,8 +59,13 @@
     </header>
 
     <nav class="tabs" role="tablist">
-      <button class="tabs__tab tabs__tab--active" id="tab-btn-scan" data-tab="scan" role="tab">Scan station</button>
-      <button class="tabs__tab" id="tab-btn-inventory" data-tab="inventory" role="tab">Inventory</button>
+      <button class="tabs__tab tabs__tab--active" data-tab="scan" role="tab">Scan station</button>
+      <button class="tabs__tab" data-tab="batch" role="tab">Batch tagging</button>
+      <button class="tabs__tab" data-tab="inventory" role="tab">Inventory</button>
+      <button class="tabs__tab" data-tab="queue" role="tab">Print queue</button>
+      <button class="tabs__tab" data-tab="review" role="tab">Review <span class="wip">WIP</span></button>
+      <button class="tabs__tab" data-tab="audits" role="tab">Audits <span class="wip">WIP</span></button>
+      <button class="tabs__tab" data-tab="history" role="tab">History</button>
     </nav>
 
     <main class="flow" id="tab-scan">
@@ -288,6 +293,203 @@
             </tr>
           </thead>
           <tbody id="inv-body">
+            <tr><td colspan="6" class="inventory__empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Batch tagging tab -->
+    <section class="batch" id="tab-batch" hidden>
+      <!-- Start / resume -->
+      <div class="linkbox serialbox" id="batch-start">
+        <div class="linkbox__title">Batch tagging — one bin at a time</div>
+        <p class="linkbox__text">
+          Walk to a bin with the iPad and the barcode scanner. Scan every box,
+          print one label per box on the warehouse PC, apply them, then pair
+          each label's RFID tag. Nothing here changes Shopify — count
+          mismatches just become Review tasks.
+        </p>
+        <div class="linkbox__form">
+          <input id="batch-bin" class="linkbox__input linkbox__short" type="text" maxlength="100"
+                 autocomplete="off" spellcheck="false" placeholder="Bin…" />
+          <button class="print__btn" id="batch-create" type="button">Start batch</button>
+        </div>
+        <div id="batch-resume-wrap" hidden>
+          <p class="linkbox__extra-label">Unfinished batches — click to resume:</p>
+          <ul class="setbox__list" id="batch-resume-list"></ul>
+        </div>
+      </div>
+
+      <!-- Active batch -->
+      <div id="batch-active" hidden>
+        <div class="batch__header">
+          <span class="inventory__bin" id="batch-bin-chip">—</span>
+          <div class="stages" id="batch-stages">
+            <span class="stage" data-stage="collect">1 Collect</span>
+            <span class="stage" data-stage="labels">2 Labels</span>
+            <span class="stage" data-stage="print">3 Print</span>
+            <span class="stage" data-stage="pair">4 Pair</span>
+            <span class="stage" data-stage="verify">5 Verify</span>
+          </div>
+          <button class="reset" id="batch-abandon" type="button">Abandon</button>
+        </div>
+        <div class="result" id="batch-result" role="status" aria-live="polite"></div>
+
+        <!-- Stage 1: collect -->
+        <div id="bstage-collect" hidden>
+          <section class="step step--active">
+            <div class="step__index">1</div>
+            <div class="step__body">
+              <label class="step__label" for="batch-scan">Scan every box in this bin</label>
+              <input id="batch-scan" class="scan" type="text" autocomplete="off"
+                     autocapitalize="off" spellcheck="false" placeholder="Waiting for barcode…" />
+              <p class="step__hint">Scanning the same product again adds to its count. Wrong scan? Fix the count with − / + on its row.</p>
+            </div>
+          </section>
+          <ul class="batch__items" id="batch-items"></ul>
+          <button class="print__btn" id="batch-to-labels" type="button">Done scanning → prepare labels</button>
+        </div>
+
+        <!-- Stage 2: labels -->
+        <div id="bstage-labels" hidden>
+          <div class="linkbox serialbox">
+            <div class="linkbox__title" id="blabel-count">Product</div>
+            <div class="linkbox__card">
+              <img class="linkbox__img" id="blabel-img" alt="" hidden />
+              <div class="linkbox__info">
+                <div class="linkbox__ptitle" id="blabel-title">—</div>
+                <dl class="product__grid">
+                  <div><dt>SKU</dt><dd id="blabel-sku">—</dd></div>
+                  <div><dt>Boxes scanned</dt><dd id="blabel-qty">—</dd></div>
+                  <div><dt>Shopify on-hand</dt><dd id="blabel-expected">—</dd></div>
+                </dl>
+              </div>
+            </div>
+            <p class="linkbox__extra-label">Label name — printed at the top of every label for this product:</p>
+            <div class="linkbox__form">
+              <input id="blabel-name" class="linkbox__input" type="text" maxlength="80"
+                     autocomplete="off" spellcheck="false" />
+              <button class="reset" id="blabel-save" type="button">Save name</button>
+            </div>
+            <div class="linkbox__actions">
+              <button class="reset" id="blabel-prev" type="button">&larr; Previous</button>
+              <button class="reset" id="blabel-next" type="button">Next &rarr;</button>
+              <button class="print__btn" id="batch-queue" type="button">Queue all labels to print</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stage 3: print -->
+        <div id="bstage-print" hidden>
+          <div class="linkbox serialbox">
+            <div class="linkbox__title">Printing labels</div>
+            <p class="linkbox__text" id="bprint-agent">Checking the printer agent…</p>
+            <p class="linkbox__text" id="bprint-status">—</p>
+            <p class="step__hint">Labels print on the warehouse PC in scan order. Damaged one? Reprint it from the Print queue tab. When the strip is printed and applied to the boxes, continue.</p>
+            <div class="linkbox__actions">
+              <button class="print__btn" id="batch-to-pair" type="button">Labels applied → start pairing</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stage 4: pair -->
+        <div id="bstage-pair" hidden>
+          <section class="step step--active">
+            <div class="step__index">4</div>
+            <div class="step__body">
+              <label class="step__label" for="batch-pair-input">Scan a product barcode, then its RFID tags</label>
+              <input id="batch-pair-input" class="scan" type="text" autocomplete="off"
+                     autocapitalize="off" spellcheck="false" placeholder="Barcode selects the product; tags attach to it…" />
+              <p class="step__hint">A barcode from this batch switches the active product. Anything else is treated as an RFID tag for the active product. Duplicates and bad reads don't count toward progress.</p>
+            </div>
+          </section>
+          <div class="linkbox serialbox" id="bpair-card" hidden>
+            <div class="linkbox__title">Active: <span id="bpair-active">—</span></div>
+            <p class="linkbox__text" id="bpair-progress">—</p>
+            <button class="reset" id="bpair-undo" type="button">Undo last tag</button>
+          </div>
+          <ul class="batch__items" id="bpair-items"></ul>
+          <button class="print__btn" id="batch-to-verify" type="button">All tags applied → verify bin</button>
+        </div>
+
+        <!-- Stage 5: verify -->
+        <div id="bstage-verify" hidden>
+          <section class="step step--active">
+            <div class="step__index">5</div>
+            <div class="step__body">
+              <label class="step__label" for="batch-verify-input">Sweep the bin with the RFID scanner</label>
+              <input id="batch-verify-input" class="scan" type="text" autocomplete="off"
+                     autocapitalize="off" spellcheck="false" placeholder="RFID reads land here — duplicates ignored…" />
+              <p class="step__hint" id="bverify-count">0 unique tags collected.</p>
+            </div>
+          </section>
+          <div class="linkbox__actions" style="margin-bottom:12px">
+            <button class="reset" id="bverify-check" type="button">Check bin</button>
+            <button class="print__btn" id="batch-complete" type="button">Complete batch</button>
+          </div>
+          <div id="bverify-report"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Print queue tab -->
+    <section class="inventory" id="tab-queue" hidden>
+      <div class="recent__head">
+        <h2>Print queue <span class="recent__note">(shared — the warehouse PC prints, every device can watch)</span></h2>
+        <span class="pill" id="agent-pill">Printer agent: checking…</span>
+      </div>
+      <div class="inventory__scroll">
+        <table class="inventory__table">
+          <thead>
+            <tr>
+              <th>Job</th><th>Product</th><th>SKU</th><th>Bin</th><th>Batch</th>
+              <th>By</th><th>Status</th><th>When</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="queue-body">
+            <tr><td colspan="9" class="inventory__empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Review tab (WIP: task inbox only) -->
+    <section class="inventory" id="tab-review" hidden>
+      <div class="recent__head">
+        <h2>Review — task inbox <span class="recent__note">(work in progress — resolution logic comes after real audit data)</span></h2>
+      </div>
+      <ul class="recent__list" id="review-list"></ul>
+    </section>
+
+    <!-- Audits tab (WIP placeholder) -->
+    <section class="inventory" id="tab-audits" hidden>
+      <div class="recent__head">
+        <h2>Audits <span class="recent__note">(work in progress)</span></h2>
+      </div>
+      <p class="linkbox__text" style="max-width:70ch">
+        Planned: pick a bin (or one product), sweep it with the C72, and compare
+        what's detected against the tags on file and Shopify on-hand — missing,
+        recovered, and mismatched stock become proposals in Review, never
+        automatic changes. The reconciliation rules get designed once batch
+        tagging has produced real scan data. For now, product checks recommended
+        by completed batches appear below (and in Review).
+      </p>
+      <ul class="recent__list" id="audit-list"></ul>
+    </section>
+
+    <!-- History tab -->
+    <section class="inventory" id="tab-history" hidden>
+      <div class="recent__head">
+        <h2>History <span class="recent__note">(append-only — every event, old and new values)</span></h2>
+        <input id="hist-search" class="recent__search" type="search" placeholder="Filter by SKU, product, worker, EPC…" autocomplete="off" />
+      </div>
+      <div class="inventory__scroll">
+        <table class="inventory__table">
+          <thead>
+            <tr><th>When</th><th>Event</th><th>Who</th><th>SKU</th><th>Product</th><th>Detail</th></tr>
+          </thead>
+          <tbody id="hist-body">
             <tr><td colspan="6" class="inventory__empty">Loading…</td></tr>
           </tbody>
         </table>
