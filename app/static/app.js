@@ -2359,7 +2359,7 @@ async function loadHistory() {
     renderHistory();
   } catch (err) {
     body.innerHTML =
-      '<tr><td colspan="6" class="inventory__empty">Could not load history.</td></tr>';
+      '<tr><td colspan="7" class="inventory__empty">Could not load history.</td></tr>';
   }
 }
 
@@ -2375,21 +2375,58 @@ function renderHistory() {
     : historyEvents;
   if (!rows.length) {
     body.innerHTML =
-      '<tr><td colspan="6" class="inventory__empty">No events yet.</td></tr>';
+      '<tr><td colspan="7" class="inventory__empty">No events yet.</td></tr>';
     return;
   }
   body.innerHTML = rows
     .map(
-      (e) => `<tr>
+      (e, i) => `<tr>
       <td class="recent__meta" style="white-space:nowrap">${escapeHtml(fmtWhen(e.at))}</td>
       <td><span class="evtype">${escapeHtml(e.type)}</span></td>
       <td>${escapeHtml(e.worker || "—")}</td>
       <td class="mono">${escapeHtml(e.sku || "—")}</td>
       <td>${escapeHtml(e.title || "—")}</td>
       <td class="recent__meta">${escapeHtml(e.detail || "")}</td>
+      <td>${
+        e.undo
+          ? `<button class="reset hist-undo" data-idx="${i}" type="button">Undo</button>`
+          : ""
+      }</td>
     </tr>`
     )
     .join("");
+  body.querySelectorAll(".hist-undo").forEach((btn) => {
+    btn.addEventListener("click", () => undoHistoryEvent(rows[+btn.dataset.idx], btn));
+  });
+}
+
+// Undoable events carry an `undo` descriptor from the server. Today that's
+// barcode links (alias rows are live, so deleting one IS the undo — the
+// scanned code simply stops resolving to that product).
+async function undoHistoryEvent(e, btn) {
+  if (!e || !e.undo) return;
+  if (e.undo.kind !== "barcode-alias") return;
+  const alias = e.undo.alias_barcode;
+  const target = e.sku || e.title || "that product";
+  if (
+    !confirm(
+      `Undo this barcode link?\n\n${alias} → ${target}\n\nThe scanned ` +
+        `barcode will stop resolving to this product. You can re-link it ` +
+        `(to the right product) at the Scan Station.`
+    )
+  )
+    return;
+  btn.disabled = true;
+  const res = await apiFetch(
+    `/api/barcode-aliases/${encodeURIComponent(alias)}`,
+    { method: "DELETE" }
+  );
+  if (res.ok || res.status === 404) {
+    await loadHistory();
+  } else {
+    btn.disabled = false;
+    alert("Could not undo that link — try again.");
+  }
 }
 
 let histSearchTimer;

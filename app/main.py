@@ -2197,6 +2197,13 @@ def history(
             "sku": al.sku,
             "title": al.product_title,
             "detail": f"{al.alias_barcode} → {al.barcode or al.sku}",
+            # Alias rows are live (this event exists because the link still
+            # does), so History can offer to undo it: DELETE the alias and
+            # the scanned code stops resolving to this product.
+            "undo": {
+                "kind": "barcode-alias",
+                "alias_barcode": al.alias_barcode,
+            },
         })
 
     for b in session.scalars(
