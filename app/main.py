@@ -1295,6 +1295,15 @@ def _rebuild_bin_map() -> None:
     try:
         entries = shopify.fetch_all_variant_bins()
         with Session(get_engine()) as session:
+            # Serialize rewrites across gunicorn workers: without this,
+            # two workers booting onto a stale map both insert and the
+            # table doubles.
+            if session.get_bind().dialect.name == "mssql":
+                session.execute(text(
+                    "EXEC sp_getapplock @Resource='rfid_bin_map_rebuild', "
+                    "@LockMode='Exclusive', @LockOwner='Transaction', "
+                    "@LockTimeout=120000"
+                ))
             session.query(BinMapEntry).delete()
             session.add_all(
                 BinMapEntry(
@@ -1429,8 +1438,13 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
             .where(func.lower(BinMapEntry.bin) == payload.bin.lower())
             .order_by(BinMapEntry.product_title, BinMapEntry.sku)
         ).all()
-        expected = [
-            {
+        seen_variants: set = set()
+        for r in rows:
+            key = r.sku or r.barcode or r.shopify_variant_id
+            if key in seen_variants:  # belt-and-braces vs duplicate rows
+                continue
+            seen_variants.add(key)
+            expected.append({
                 "shopify_variant_id": r.shopify_variant_id,
                 "shopify_product_id": r.shopify_product_id,
                 "product_title": r.product_title,
@@ -1439,9 +1453,7 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
                 "barcode": r.barcode,
                 "bin_location": r.bin,
                 "expected_qty": r.qty,
-            }
-            for r in rows
-        ]
+            })
     except Exception as error:
         logger.warning("bin pre-seed failed for %s: %s", payload.bin, error)
 
