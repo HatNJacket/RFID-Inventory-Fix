@@ -27,6 +27,7 @@ const el = {
   printBtn: document.getElementById("print-btn"),
   printStatus: document.getElementById("print-status"),
   result: document.getElementById("result"),
+  resultRfid: document.getElementById("result-rfid"),
   reset: document.getElementById("reset"),
   recentList: document.getElementById("recent-list"),
   search: document.getElementById("search"),
@@ -279,9 +280,15 @@ document.querySelectorAll(".tabs__tab").forEach((btn) => {
 // Current product awaiting an RFID tag. Null when we're on step 1.
 let pendingProduct = null;
 
-function setResult(message, kind) {
-  el.result.textContent = message;
-  el.result.className = "result" + (kind ? ` result--${kind}` : "");
+function setResult(message, kind, where = "barcode") {
+  // Two status slots — barcode/printer news up top, tag-assignment news by
+  // the RFID step — but never both at once.
+  const target = where === "rfid" ? el.resultRfid : el.result;
+  const other = where === "rfid" ? el.result : el.resultRfid;
+  target.textContent = message;
+  target.className = "result" + (kind ? ` result--${kind}` : "");
+  other.textContent = "";
+  other.className = "result";
 }
 
 function activate(step) {
@@ -968,7 +975,7 @@ el.rfid.addEventListener("keydown", async (event) => {
   const operator = requireOperator();
   if (!operator) return;
 
-  setResult("Saving assignment…", "busy");
+  setResult("Saving assignment…", "busy", "rfid");
   try {
     const payload = { rfid_id: rfid, ...pendingProduct, assigned_by: operator };
     // Serialized brands: store the operator's preferred name as the title
@@ -987,13 +994,13 @@ el.rfid.addEventListener("keydown", async (event) => {
       body: JSON.stringify(payload),
     });
     if (res.status === 409) {
-      setResult(`Tag ${rfid} is already assigned.`, "err");
+      setResult(`Tag ${rfid} is already assigned.`, "err", "rfid");
       el.rfid.select();
       return;
     }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      setResult(body.detail || "Save failed.", "err");
+      setResult(body.detail || "RFID tag save failed.", "err", "rfid");
       return;
     }
     const saved = await res.json();
@@ -1002,10 +1009,15 @@ el.rfid.addEventListener("keydown", async (event) => {
         `Saved, but tag ${saved.rfid_id} is ${saved.rfid_id.length} ` +
           `characters (tags are normally 24) — likely a bad read. ` +
           `Re-scan this tag into inventory to be safe.`,
-        "err"
+        "err",
+        "rfid"
       );
     } else {
-      setResult(`Assigned ${saved.rfid_id} → ${saved.product_title}`, "ok");
+      setResult(
+        `Assigned ${saved.rfid_id} → ${saved.product_title}`,
+        "ok",
+        "rfid"
+      );
     }
     prependRecent(saved);
     if (saved.suspect || !el.autoReset.checked) {
@@ -1019,7 +1031,7 @@ el.rfid.addEventListener("keydown", async (event) => {
       setTimeout(resetStation, 700);
     }
   } catch (err) {
-    setResult("Network error while saving.", "err");
+    setResult("Network error while saving the RFID tag.", "err", "rfid");
   }
 });
 
