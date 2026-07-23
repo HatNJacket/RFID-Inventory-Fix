@@ -1482,10 +1482,9 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
             barcode=p.get("barcode"),
             bin_location=p.get("bin_location"),
             serial_prefix=sp.prefix if sp else None,
-            label_name=(
-                (sp.label_name if sp and sp.label_name else None)
-                or (p.get("product_title") or "")[:255] or None
-            ),
+            # Batch labels use the standard store header + SKU; Astronomik
+            # item names are set in Scan Station, not here.
+            label_name=None,
             qty_scanned=0,
             expected_qty=p.get("expected_qty"),
         ))
@@ -1610,26 +1609,21 @@ def batch_scan(
             item.bin_location = product.get("bin_location")
             item.serial_prefix = product.get("serial_prefix")
             item.image_url = (product.get("image_url") or "")[:500] or None
-            # Label default mirrors the Scan Station: the operator's saved
-            # serial name when there is one, else the product title.
-            item.label_name = (
-                product.get("serial_label")
-                or product.get("product_title")
-                or ""
-            )[:255] or None
+            # Batch labels print the store header + SKU (Astronomik naming
+            # lives in Scan Station), so no per-item label name here.
+            item.label_name = None
             item.expected_qty = _mirror_qty(session, item.sku)
         else:
             item.resolved = False
             item.product_title = f"Unresolved: {code}"
         session.add(item)
 
-    # A pre-seeded row scanned via a brand serial learns its serial info on
-    # first contact (preferred label name, prefix for pairing).
+    # A pre-seeded row scanned via a brand serial learns its prefix on first
+    # contact — the pair stage needs it to tell barcodes from EPCs. The label
+    # name stays the store default; Astronomik naming is Scan Station only.
     if product is not None and product.get("serial_prefix"):
         if not item.serial_prefix:
             item.serial_prefix = product["serial_prefix"]
-        if product.get("serial_label_saved") and product.get("serial_label"):
-            item.label_name = product["serial_label"][:255]
 
     item.qty_scanned += 1
     session.commit()
@@ -1751,7 +1745,14 @@ def batch_queue_labels(
                     sku=item.sku,
                     barcode=item.barcode,
                     bin_location=batch.bin_name,
-                    label_name=item.label_name,
+                    # Store header + SKU unless the operator typed a real
+                    # custom name (the field defaults to the SKU, which is
+                    # not a header override).
+                    label_name=(
+                        item.label_name
+                        if item.label_name and item.label_name != item.sku
+                        else None
+                    ),
                     requested_by=payload.requested_by or batch.created_by,
                 )
             )

@@ -53,9 +53,10 @@ SHIFT_DOWN_DOTS = 31   # ^LT: + moves the whole image down (max 120)
 SHIFT_RIGHT_DOTS = 2   # ^LH x: + moves the whole image right
 
 # Layout (all centered): header / SKU / barcode / BIN. The header is the
-# store name normally, but Astronomik items swap it for the full product +
-# variant name (their labels identify serialized filters, so the name is
-# what the picker needs to see).
+# store name ("Telescopes Canada") unless the job carries an explicit
+# label_name — the Scan Station serial flow sets that for Astronomik filters
+# so their item name prints at the top. Batch labels never set it, so they
+# print the plain store header + SKU.
 LABEL_ZPL = """^XA
 {rfid_setup}^PW{pw}
 ^LL{ll}
@@ -69,8 +70,6 @@ LABEL_ZPL = """^XA
 """
 
 HEADER_STORE = "^CF0,34\n^FO0,10^FB{pw},1,0,C^FDTelescopes Canada^FS\n"
-# Two wrapped, centered lines of the product name in place of the store name.
-HEADER_PRODUCT = "^CF0,20\n^FO0,4^FB{pw},2,0,C^FD{name}^FS\n"
 
 # Mode A (automatic) makes the printer pick the densest Code 128 encoding,
 # which is what _code128_width_dots models — required for true centering.
@@ -137,18 +136,13 @@ def build_zpl(job: dict, encode_rfid: bool,
 
     pw, ll = label_dots(width_in, height_in)
 
-    title = clean(job.get("product_title"), fallback="")
     label = clean(job.get("label_name"), fallback="")
     if label:
-        # Operator-preferred name (e.g. what the physical Astronomik label
-        # says). Short names get a bigger face.
+        # Explicit operator-preferred name — set only by the Scan Station
+        # serial flow, so Astronomik filters print their item name at the
+        # top. Short names get a bigger face.
         size = 28 if len(label) <= 26 else 20
         header = f"^CF0,{size}\n^FO0,6^FB{pw},2,0,C^FD{label[:84]}^FS\n"
-    elif "astronomik" in title.lower():
-        name = title
-        if job.get("variant_title"):
-            name += f" ({clean(job['variant_title'])})"
-        header = HEADER_PRODUCT.format(pw=pw, name=name[:84])
     else:
         header = HEADER_STORE.format(pw=pw)
 

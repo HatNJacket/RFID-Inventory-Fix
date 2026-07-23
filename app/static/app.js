@@ -1836,7 +1836,10 @@ function renderLabelCard() {
   bEl.labelQty.textContent = `${item.qty_scanned} → ${item.qty_scanned} label(s)`;
   bEl.labelExpected.textContent =
     item.expected_qty != null ? String(item.expected_qty) : "—";
-  bEl.labelName.value = item.label_name || item.product_title || "";
+  // Batch labels print "Telescopes Canada" + SKU; the field defaults to the
+  // SKU. Type a real name only for a rare custom header (Astronomik item
+  // names are set in Scan Station).
+  bEl.labelName.value = item.label_name || item.sku || "";
   if (item.image_url) {
     bEl.labelImg.src = item.image_url;
     bEl.labelImg.hidden = false;
