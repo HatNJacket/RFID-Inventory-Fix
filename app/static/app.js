@@ -2028,6 +2028,25 @@ bEl.verifyInput.addEventListener("keydown", (event) => {
   bEl.verifyCount.textContent = `${verifyEpcs.size} unique tags collected.`;
 });
 
+// The C72 companion app sends its sweep to the server over Wi-Fi; this
+// pulls the most recent one into the verify set — no Bluetooth, no wedge.
+document.getElementById("bverify-pull").addEventListener("click", async () => {
+  try {
+    const cap = await apiJson("/api/epc-captures/latest");
+    const before = verifyEpcs.size;
+    cap.epcs.forEach((e) => verifyEpcs.add(String(e).toUpperCase()));
+    bEl.verifyCount.textContent = `${verifyEpcs.size} unique tags collected.`;
+    setBatchResult(
+      `Pulled sweep #${cap.id} from ${cap.device || "the C72"} ` +
+        `(${cap.epc_count} tags, ${fmtWhen(cap.created_at)}) — ` +
+        `${verifyEpcs.size - before} new.`,
+      "ok"
+    );
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+});
+
 bEl.verifyCheck.addEventListener("click", async () => {
   if (!batch) return;
   bEl.verifyCheck.disabled = true;
@@ -2238,12 +2257,9 @@ async function loadAudits() {
   try {
     const { tasks } = await apiJson("/api/review-tasks?status=open&limit=100");
     const checks = tasks.filter((t) => t.category === "inventory-check");
-    list.innerHTML = "";
-    if (!checks.length) {
-      list.innerHTML =
-        '<li class="recent__empty">No product checks recommended right now.</li>';
-      return;
-    }
+    list.innerHTML = checks.length
+      ? ""
+      : '<li class="recent__empty">No product checks recommended right now.</li>';
     checks.forEach((t) => {
       const li = document.createElement("li");
       li.innerHTML = `
@@ -2254,6 +2270,26 @@ async function loadAudits() {
     });
   } catch (err) {
     list.innerHTML = '<li class="recent__empty">Could not load.</li>';
+  }
+  const sweeps = document.getElementById("sweep-list");
+  try {
+    const { captures } = await apiJson("/api/epc-captures?limit=10");
+    sweeps.innerHTML = "";
+    if (!captures.length) {
+      sweeps.innerHTML =
+        '<li class="recent__empty">No sweeps from the C72 app yet.</li>';
+      return;
+    }
+    captures.forEach((c) => {
+      const li = document.createElement("li");
+      li.innerHTML = `
+        <span class="evtype">sweep #${c.id}</span>
+        <span class="recent__prod"><b>${c.epc_count} tags</b> from ${escapeHtml(c.device || "C72")}${c.note ? " — " + escapeHtml(c.note) : ""}</span>
+        <span class="recent__meta recent__when">${escapeHtml(fmtWhen(c.created_at))}</span>`;
+      sweeps.append(li);
+    });
+  } catch (err) {
+    sweeps.innerHTML = '<li class="recent__empty">Could not load sweeps.</li>';
   }
 }
 

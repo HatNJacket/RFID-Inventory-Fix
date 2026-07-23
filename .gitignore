@@ -11,3 +11,5 @@ __pycache__/
 print_agent_loop.cmd
 print_agent_hidden.vbs
 deploy.zip
+
+c72-app/build/

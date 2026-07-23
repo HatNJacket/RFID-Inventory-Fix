@@ -425,6 +425,7 @@
             </div>
           </section>
           <div class="linkbox__actions" style="margin-bottom:12px">
+            <button class="reset" id="bverify-pull" type="button" title="Load the sweep most recently sent from the C72 app">Pull latest C72 sweep</button>
             <button class="reset" id="bverify-check" type="button">Check bin</button>
             <button class="print__btn" id="batch-complete" type="button">Complete batch</button>
           </div>
@@ -476,6 +477,8 @@
         by completed batches appear below (and in Review).
       </p>
       <ul class="recent__list" id="audit-list"></ul>
+      <div class="recent__head" style="margin-top:24px"><h2>Recent C72 sweeps</h2></div>
+      <ul class="recent__list" id="sweep-list"></ul>
     </section>
 
     <!-- History tab -->

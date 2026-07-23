@@ -37,6 +37,7 @@ from app.models import (
     BarcodeChange,
     Batch,
     BatchItem,
+    EpcCapture,
     PrintJob,
     ReviewTask,
     RfidAssignment,
@@ -1878,6 +1879,69 @@ def resolve_review_task(
     task.resolution_note = payload.note
     session.commit()
     return task.as_dict()
+
+
+# ------------------------------------------------------------ EPC captures ---
+# Sweeps sent by the C72 companion app over Wi-Fi (scan anywhere, Send once
+# when done — no Bluetooth). The browser pulls the latest into batch verify.
+
+class CaptureIn(BaseModel):
+    epcs: list[str] = Field(min_length=1, max_length=20000)
+    device: str | None = Field(default=None, max_length=100)
+    note: str | None = Field(default=None, max_length=255)
+
+
+@app.post(
+    "/api/epc-captures",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def create_capture(payload: CaptureIn, session: Session = Depends(get_session)):
+    seen: set[str] = set()
+    epcs: list[str] = []
+    for raw in payload.epcs:
+        epc = (raw or "").strip().upper()
+        if epc and epc not in seen:
+            seen.add(epc)
+            epcs.append(epc)
+    if not epcs:
+        raise HTTPException(422, "No usable EPCs in the sweep.")
+    row = EpcCapture(
+        device=(payload.device or "").strip() or None,
+        note=(payload.note or "").strip() or None,
+        epc_count=len(epcs),
+        epcs="\n".join(epcs),
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row.as_dict()
+
+
+@app.get("/api/epc-captures", dependencies=[Depends(require_user)])
+def list_captures(limit: int = 20, session: Session = Depends(get_session)):
+    rows = session.scalars(
+        select(EpcCapture).order_by(EpcCapture.id.desc()).limit(min(limit, 100))
+    ).all()
+    return {"count": len(rows), "captures": [r.as_dict() for r in rows]}
+
+
+@app.get("/api/epc-captures/latest", dependencies=[Depends(require_user)])
+def latest_capture(session: Session = Depends(get_session)):
+    row = session.scalar(
+        select(EpcCapture).order_by(EpcCapture.id.desc()).limit(1)
+    )
+    if row is None:
+        raise HTTPException(404, "No sweeps received yet.")
+    return row.as_dict(with_epcs=True)
+
+
+@app.get("/api/epc-captures/{capture_id}", dependencies=[Depends(require_user)])
+def get_capture(capture_id: int, session: Session = Depends(get_session)):
+    row = session.get(EpcCapture, capture_id)
+    if row is None:
+        raise HTTPException(404, "No such sweep.")
+    return row.as_dict(with_epcs=True)
 
 
 # ---------------------------------------------------------------- history ---

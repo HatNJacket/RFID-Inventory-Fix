@@ -11,7 +11,7 @@ authoritative and you can re-sync them later if a product is renamed.
 """
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -363,6 +363,40 @@ class BatchItem(Base):
             "expected_qty": self.expected_qty,
             "paired_count": self.paired_count,
         }
+
+
+class EpcCapture(Base):
+    """One RFID sweep sent from the C72 companion app: the operator scans a
+    shelf freely (everything held on the device), then hits Send once —
+    Wi-Fi to Azure, no Bluetooth involved. The PC browser pulls the latest
+    capture into the batch-verify step (or future audits)."""
+
+    __tablename__ = "rfid_epc_captures"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device: Mapped[str | None] = mapped_column(String(100))
+    note: Mapped[str | None] = mapped_column(String(255))
+    epc_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Newline-joined unique EPCs. Text, not String: sweeps of a full rack
+    # can be thousands of tags.
+    epcs: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def as_dict(self, with_epcs: bool = False) -> dict:
+        d = {
+            "id": self.id,
+            "device": self.device,
+            "note": self.note,
+            "epc_count": self.epc_count,
+            "created_at": (
+                self.created_at.isoformat() if self.created_at else None
+            ),
+        }
+        if with_epcs:
+            d["epcs"] = self.epcs.split("\n") if self.epcs else []
+        return d
 
 
 class ReviewTask(Base):
