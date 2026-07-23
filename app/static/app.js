@@ -54,9 +54,14 @@ const el = {
   overwriteAck: document.getElementById("overwrite-ack"),
   overwriteGo: document.getElementById("overwrite-go"),
   serialPanel: document.getElementById("serial-panel"),
+  serialNote: document.getElementById("serial-note"),
   serialSheetName: document.getElementById("serial-sheet-name"),
   serialLabelInput: document.getElementById("serial-label-input"),
   serialLabelSave: document.getElementById("serial-label-save"),
+  prefixNote: document.getElementById("prefix-note"),
+  prefixReco: document.getElementById("prefix-reco"),
+  prefixRecoText: document.getElementById("prefix-reco-text"),
+  prefixRecoApply: document.getElementById("prefix-reco-apply"),
   autoPrint: document.getElementById("auto-print"),
   autoReset: document.getElementById("auto-reset"),
   requireBin: document.getElementById("require-bin"),
@@ -348,6 +353,12 @@ function showSerialPanel(p) {
     serialLoadedLabel = null;
     return;
   }
+  if (p.serial_note) {
+    el.serialNote.textContent = `⚠ ${p.serial_note}`;
+    el.serialNote.hidden = false;
+  } else {
+    el.serialNote.hidden = true;
+  }
   el.serialSheetName.textContent =
     `${p.serial_brand} sheet name: ${p.serial_item_name || "—"}`;
   el.serialLabelInput.value = p.serial_label || "";
@@ -419,7 +430,46 @@ function hideLinkboxExtras() {
   el.skuSection.hidden = true;
   el.skuAck.checked = false;
   el.skuSave.disabled = true;
+  el.prefixNote.value = "";
+  el.prefixReco.hidden = true;
 }
+
+// Recommended SKU: whenever a 4-digit prefix is entered, consult the loaded
+// manufacturer sheet and surface its SKU when it differs from the product's.
+let prefixRecoTimer;
+el.prefixInput.addEventListener("input", () => {
+  clearTimeout(prefixRecoTimer);
+  el.prefixReco.hidden = true;
+  const p = el.prefixInput.value.trim();
+  if (!/^\d{4}$/.test(p)) return;
+  prefixRecoTimer = setTimeout(async () => {
+    try {
+      const res = await apiFetch(
+        `/api/serial-prefixes/${encodeURIComponent(p)}`
+      );
+      if (!res.ok) return;
+      const row = await res.json();
+      const currentSku = aliasPreviewProduct && aliasPreviewProduct.sku;
+      if (row.sku && row.sku !== currentSku) {
+        el.prefixRecoText.textContent =
+          `Astronomik sheet: prefix ${p} → SKU ${row.sku}` +
+          (row.item_name ? ` · ${row.item_name}` : "");
+        el.prefixReco.hidden = false;
+      }
+    } catch (err) {
+      /* recommendation is best-effort */
+    }
+  }, 250);
+});
+
+el.prefixRecoApply.addEventListener("click", () => {
+  const text = el.prefixRecoText.textContent;
+  const match = text.match(/SKU (\S+)/);
+  if (!match) return;
+  el.newSkuInput.value = match[1];
+  el.skuSection.hidden = false;
+  el.newSkuInput.focus();
+});
 
 // Re-run the original scan after a fix (new prefix, updated SKU) so the
 // normal flow — serial recognition, name panel, auto-print — takes over.
@@ -530,6 +580,7 @@ function openEditbox() {
   el.aliasUnlink.hidden = true;
   hideOverwrite();
   el.prefixInput.value = pendingProduct.serial_prefix || "";
+  el.prefixNote.value = pendingProduct.serial_note || "";
   el.prefixSection.hidden = false;
   el.newSkuInput.value = pendingProduct.sku || "";
   el.skuSection.hidden = false;
@@ -679,6 +730,7 @@ el.prefixSave.addEventListener("click", async () => {
       body: JSON.stringify({
         prefix,
         target: el.aliasTarget.value.trim(),
+        scan_note: el.prefixNote.value.trim() || null,
         created_by: operator,
       }),
     });

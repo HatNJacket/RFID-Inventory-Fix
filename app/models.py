@@ -134,6 +134,10 @@ class SerialPrefix(Base):
     # time); once an operator saves one it sticks — the xlsx loader never
     # writes this column, so sheet reloads can't clobber it.
     label_name: Mapped[str | None] = mapped_column(String(255))
+    # Optional operator note shown loudly whenever this prefix is scanned
+    # (e.g. "part of a 3-filter set — ONE tag per set"). Loader never
+    # touches it.
+    scan_note: Mapped[str | None] = mapped_column(String(255))
 
     def as_dict(self) -> dict:
         return {
@@ -142,6 +146,7 @@ class SerialPrefix(Base):
             "sku": self.sku,
             "item_name": self.item_name,
             "label_name": self.label_name,
+            "scan_note": self.scan_note,
         }
 
 

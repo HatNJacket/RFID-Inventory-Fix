@@ -115,6 +115,11 @@
           <span class="linkbox__extra-label">New Astronomik serial prefix — future serials starting with these 4 digits will resolve to this product:</span>
           <input id="prefix-input" class="linkbox__input linkbox__short" type="text" maxlength="4" inputmode="numeric" autocomplete="off" />
           <button class="reset" id="prefix-save" type="button">Save prefix &rarr; this product</button>
+          <input id="prefix-note" class="linkbox__input" type="text" maxlength="255" autocomplete="off" spellcheck="false" placeholder="Scan note (optional) — shown loudly on every scan of this prefix, e.g. 'set of 3, ONE tag per set'…" />
+          <div class="prefix-reco" id="prefix-reco" hidden>
+            <span id="prefix-reco-text"></span>
+            <button class="reset" id="prefix-reco-apply" type="button">Apply recommended SKU</button>
+          </div>
         </div>
 
         <!-- Update the product's SKU in Shopify (outdated store SKUs) -->
@@ -187,6 +192,7 @@
 
       <!-- Serialized-brand label name (Astronomik) -->
       <section class="linkbox serialbox" id="serial-panel" hidden>
+        <p class="serial-note" id="serial-note" hidden></p>
         <div class="linkbox__title">Astronomik label name</div>
         <p class="linkbox__text" id="serial-sheet-name"></p>
         <div class="linkbox__form">

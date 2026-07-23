@@ -276,6 +276,8 @@ def product_by_barcode(barcode: str):
                     # True only when an operator has saved the name — the
                     # UI's auto-print trusts confirmed names, not defaults.
                     product["serial_label_saved"] = sp.label_name is not None
+                    if sp.scan_note:
+                        product["serial_note"] = sp.scan_note
                     return product
                 # Structured detail: the UI prefills its SKU-update flow
                 # with the manufacturer's current SKU for this prefix.
@@ -696,6 +698,7 @@ class SerialPrefixIn(BaseModel):
 
     prefix: str = Field(min_length=4, max_length=4)
     target: str = Field(max_length=100)  # known barcode or SKU
+    scan_note: str | None = Field(default=None, max_length=255)
     created_by: str | None = Field(default=None, max_length=100)
 
     @field_validator("prefix")
@@ -712,6 +715,19 @@ class SerialPrefixIn(BaseModel):
         if not v or not v.strip():
             raise ValueError("must not be blank")
         return v.strip()
+
+
+@app.get(
+    "/api/serial-prefixes/{prefix}",
+    dependencies=[Depends(require_user)],
+)
+def get_serial_prefix(prefix: str, session: Session = Depends(get_session)):
+    """Peek at a prefix — the UI uses the manufacturer sheet's SKU as a
+    recommendation when operators fix products."""
+    row = session.get(SerialPrefix, prefix.strip())
+    if row is None:
+        raise HTTPException(404, "No such serial prefix.")
+    return row.as_dict()
 
 
 @app.post(
@@ -737,6 +753,7 @@ def create_serial_prefix(
         session.add(row)
     row.sku = product.get("sku")
     row.item_name = name[:255]  # label_name untouched if one was saved
+    row.scan_note = (payload.scan_note or "").strip() or None
     session.commit()
     return {"serial_prefix": row.as_dict(), "product": product}
 
