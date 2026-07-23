@@ -758,6 +758,107 @@ def create_serial_prefix(
     return {"serial_prefix": row.as_dict(), "product": product}
 
 
+# ---------------------------------------------------------- filter sets ---
+_FILTER_SET_SQL = text(
+    """
+    SELECT v.Variant_SKU, v.Variant_Barcode, v.Option1_Value,
+           p.Title AS Product_Title
+    FROM dbo.Shopify_Variants v
+    JOIN dbo.Shopify_Products p ON p.Handle_ID = v.Handle_ID
+    WHERE p.Title LIKE '%Astronomik%'
+      AND (p.Title LIKE '%RGB%' OR p.Title LIKE '%set%'
+           OR p.Title LIKE '%LRGB%' OR p.Title LIKE '%SHO%')
+    ORDER BY p.Title, v.Option1_Value
+    """
+)
+
+
+@app.get("/api/filter-sets", dependencies=[Depends(require_user)])
+def list_filter_sets(session: Session = Depends(get_session)):
+    """Candidate multi-filter set products, for the set-registration window
+    ("which set might these three filters belong to?")."""
+    try:
+        rows = session.execute(_FILTER_SET_SQL).all()
+    except Exception as error:
+        logger.warning("filter-set candidates failed: %s", error)
+        return {"count": 0, "sets": []}
+    sets = [
+        {
+            "sku": r.Variant_SKU,
+            "barcode": r.Variant_Barcode,
+            "variant": r.Option1_Value,
+            "title": r.Product_Title,
+        }
+        for r in rows
+    ]
+    return {"count": len(sets), "sets": sets}
+
+
+class FilterSetIn(BaseModel):
+    """Register a 3-box filter set: three component serials (Red, Green,
+    Blue order) all mapped to one set product."""
+
+    serials: list[str] = Field(min_length=3, max_length=3)
+    target: str = Field(max_length=100)  # the set's SKU or barcode
+    created_by: str | None = Field(default=None, max_length=100)
+
+    @field_validator("serials")
+    @classmethod
+    def serial_shaped(cls, v: list[str]) -> list[str]:
+        v = [s.strip() for s in v]
+        for s in v:
+            if not (s.isdigit() and 5 <= len(s) <= 12):
+                raise ValueError(f"'{s}' doesn't look like a serial number")
+        if len({s[:4] for s in v}) != 3:
+            raise ValueError(
+                "the three serials must have three different prefixes — "
+                "was the same filter scanned twice?"
+            )
+        return v
+
+    @field_validator("target")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/filter-sets/register",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def register_filter_set(
+    payload: FilterSetIn, session: Session = Depends(get_session)
+):
+    db_ok = database_configured()
+    api_ok = not config.check_shopify_env()
+    product = _resolve(payload.target, config.BARCODE_LOOKUP, db_ok, api_ok)
+    if product is None:
+        raise HTTPException(404, "No product found for that barcode or SKU.")
+
+    name = product.get("product_title") or ""
+    if product.get("variant_title"):
+        name += f" ({product['variant_title']})"
+    prefixes = [s[:4] for s in payload.serials]
+    note = (
+        f"Part of the SET: {name} — 3 boxes "
+        f"(R={prefixes[0]}, G={prefixes[1]}, B={prefixes[2]}). "
+        f"Apply ONE tag to the set, not one per filter."
+    )[:255]
+    for prefix, color in zip(prefixes, ("Red", "Green", "Blue")):
+        row = session.get(SerialPrefix, prefix)
+        if row is None:
+            row = SerialPrefix(prefix=prefix, brand="Astronomik")
+            session.add(row)
+        row.sku = product.get("sku")
+        row.item_name = f"{name} ({color} component)"[:255]
+        row.scan_note = note
+    session.commit()
+    return {"product": product, "prefixes": prefixes}
+
+
 # -------------------------------------------------------- serial labels ---
 class SerialLabelIn(BaseModel):
     label_name: str = Field(max_length=255)

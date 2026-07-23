@@ -88,6 +88,38 @@
            without scrolling -->
       <div class="result" id="result" role="status" aria-live="polite"></div>
 
+      <!-- Multi-box filter set registration -->
+      <section class="linkbox setbox" id="setbox" hidden>
+        <div class="linkbox__title">Possible filter set</div>
+        <p class="linkbox__text">
+          This serial isn't in the system. If it's one filter from a
+          multi-box set (like the Deep-Sky RGB sets), scan all three
+          filters below, then pick which set they belong to. Otherwise
+          it's just an unrecognized single product.
+        </p>
+        <div class="setbox__slots">
+          <div class="setslot setslot--red" id="set-slot-0"><b>Red</b><span>—</span></div>
+          <div class="setslot setslot--green" id="set-slot-1"><b>Green</b><span>—</span></div>
+          <div class="setslot setslot--blue" id="set-slot-2"><b>Blue</b><span>—</span></div>
+        </div>
+        <input id="set-scan-input" class="linkbox__input" type="text"
+               autocomplete="off" spellcheck="false"
+               placeholder="Scan the highlighted filter's barcode…" />
+        <div class="setbox__choose" id="setbox-choose" hidden>
+          <p class="linkbox__extra-label">Which set are these from? Click one, or type its SKU:</p>
+          <ul class="setbox__list" id="set-candidates"></ul>
+          <div class="linkbox__form">
+            <input id="set-sku-input" class="linkbox__input" type="text" maxlength="100"
+                   autocomplete="off" spellcheck="false" placeholder="Set SKU…" />
+            <button class="print__btn" id="set-confirm" type="button">Confirm set</button>
+          </div>
+        </div>
+        <div class="linkbox__actions">
+          <button class="reset" id="set-single" type="button">It's a single product</button>
+          <button class="reset" id="set-cancel" type="button">Cancel</button>
+        </div>
+      </section>
+
       <!-- Foreign-barcode linking / confirmation -->
       <section class="linkbox" id="linkbox" hidden>
         <div class="linkbox__title" id="linkbox-title">Unknown barcode</div>

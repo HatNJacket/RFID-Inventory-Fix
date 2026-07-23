@@ -74,6 +74,14 @@ const el = {
   skuSave: document.getElementById("sku-save"),
   binInput: document.getElementById("bin-input"),
   productEdit: document.getElementById("product-edit"),
+  setbox: document.getElementById("setbox"),
+  setScanInput: document.getElementById("set-scan-input"),
+  setboxChoose: document.getElementById("setbox-choose"),
+  setCandidates: document.getElementById("set-candidates"),
+  setSkuInput: document.getElementById("set-sku-input"),
+  setConfirm: document.getElementById("set-confirm"),
+  setSingle: document.getElementById("set-single"),
+  setCancel: document.getElementById("set-cancel"),
 };
 
 // --- Click-to-edit bin: chip -> empty text box -> Enter saves to Shopify ---
@@ -245,6 +253,7 @@ function resetStation() {
   el.serialPanel.hidden = true;
   serialLoadedLabel = null;
   closeLinkbox();
+  closeSetbox();
   setResult("", null);
   activate("barcode");
 }
@@ -262,10 +271,16 @@ el.barcode.addEventListener("keydown", async (event) => {
     );
     if (res.status === 404) {
       const body = await res.json().catch(() => ({}));
-      openLinkbox(
-        barcode,
-        body.detail && typeof body.detail === "object" ? body.detail : null
-      );
+      const info =
+        body.detail && typeof body.detail === "object" ? body.detail : null;
+      // Unknown serial-shaped scans might be one filter of a multi-box
+      // set — offer the set flow first (one click bails to the normal
+      // unknown-barcode window). Known-prefix problems keep their window.
+      if (!info && /^\d{5,12}$/.test(barcode)) {
+        openSetbox(barcode);
+      } else {
+        openLinkbox(barcode, info);
+      }
       return;
     }
     if (!res.ok) {
@@ -555,6 +570,153 @@ function closeLinkbox() {
   aliasPreviewProduct = null;
   linkboxEditMode = false;
 }
+
+// --- Multi-box filter sets --------------------------------------------------
+// Three component serials (R/G/B slots) -> one set product. Confirming
+// registers all three prefixes with a ONE-TAG-PER-SET scan note, then
+// re-runs the original scan so the normal serial flow takes over.
+let setSerials = [];
+let setSelectedSku = null;
+
+function setSlotEls() {
+  return [0, 1, 2].map((i) => document.getElementById(`set-slot-${i}`));
+}
+
+function renderSetSlots() {
+  setSlotEls().forEach((slot, i) => {
+    const val = setSerials[i];
+    slot.querySelector("span").textContent = val || "—";
+    slot.classList.toggle("setslot--filled", !!val);
+    slot.classList.toggle("setslot--active", i === setSerials.length);
+  });
+  const full = setSerials.length >= 3;
+  el.setScanInput.disabled = full;
+  el.setboxChoose.hidden = !full;
+  if (full) loadSetCandidates();
+}
+
+function openSetbox(seedSerial) {
+  closeLinkbox();
+  el.flow.classList.add("flow--side");
+  setSerials = [seedSerial];
+  setSelectedSku = null;
+  el.setSkuInput.value = "";
+  el.setCandidates.innerHTML = "";
+  el.setbox.hidden = false;
+  renderSetSlots();
+  setResult(
+    "Serial not recognized — set flow opened. Scan the remaining filters, " +
+      "or mark it a single product.",
+    null
+  );
+  el.setScanInput.value = "";
+  el.setScanInput.focus();
+}
+
+function closeSetbox() {
+  el.setbox.hidden = true;
+  el.flow.classList.remove("flow--side");
+  setSerials = [];
+  setSelectedSku = null;
+}
+
+el.setScanInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  const code = el.setScanInput.value.trim();
+  el.setScanInput.value = "";
+  if (!code) return;
+  if (!/^\d{5,12}$/.test(code)) {
+    setResult("That doesn't look like a filter serial number.", "err");
+    return;
+  }
+  if (setSerials.some((s) => s.slice(0, 4) === code.slice(0, 4))) {
+    setResult(
+      "That filter's prefix is already in a slot — scan a different one.",
+      "err"
+    );
+    return;
+  }
+  setSerials.push(code);
+  setResult("", null);
+  renderSetSlots();
+  if (setSerials.length < 3) el.setScanInput.focus();
+});
+
+async function loadSetCandidates() {
+  if (el.setCandidates.childElementCount) return; // already loaded
+  try {
+    const res = await apiFetch("/api/filter-sets");
+    if (!res.ok) return;
+    const { sets } = await res.json();
+    el.setCandidates.innerHTML = "";
+    sets.forEach((s) => {
+      const li = document.createElement("li");
+      li.innerHTML = `${escapeHtml(s.title)} — ${escapeHtml(s.variant || "")}
+        <span class="mono">(SKU ${escapeHtml(s.sku || "?")})</span>`;
+      li.addEventListener("click", () => {
+        setSelectedSku = s.sku;
+        el.setSkuInput.value = s.sku || "";
+        el.setCandidates
+          .querySelectorAll("li")
+          .forEach((x) => x.classList.toggle("selected", x === li));
+      });
+      el.setCandidates.append(li);
+    });
+  } catch (err) {
+    /* candidate list is best-effort; the SKU box still works */
+  }
+}
+
+el.setConfirm.addEventListener("click", async () => {
+  const target = el.setSkuInput.value.trim();
+  if (setSerials.length < 3 || !target) {
+    setResult("Scan all three filters and pick or type the set SKU.", "err");
+    return;
+  }
+  const operator = requireOperator();
+  if (!operator) return;
+  el.setConfirm.disabled = true;
+  try {
+    const res = await apiFetch("/api/filter-sets/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        serials: setSerials,
+        target,
+        created_by: operator,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setResult(
+        typeof body.detail === "string" ? body.detail : "Set registration failed.",
+        "err"
+      );
+      return;
+    }
+    const seed = setSerials[0];
+    closeSetbox();
+    setResult("Filter set registered — rescanning…", "ok");
+    retryLookup(seed);
+  } catch (err) {
+    setResult("Network error during set registration.", "err");
+  } finally {
+    el.setConfirm.disabled = false;
+  }
+});
+
+el.setSingle.addEventListener("click", () => {
+  const seed = setSerials[0];
+  closeSetbox();
+  openLinkbox(seed);
+});
+
+el.setCancel.addEventListener("click", () => {
+  closeSetbox();
+  el.barcode.value = "";
+  setResult("", null);
+  activate("barcode");
+});
 
 // Edit mode: the same window, opened from a loaded product's Edit button —
 // no unknown scan involved. Offers the serial-prefix and SKU tools wired
