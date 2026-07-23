@@ -306,10 +306,13 @@ function maybeAutoPrint() {
   }
   if (!pendingProduct.serial_label_saved) {
     setResult(
-      "Auto-print skipped: the label name isn't confirmed yet — press " +
-        "Save name (or print once) to confirm it.",
+      "Auto-print skipped: the label name isn't confirmed yet — check the " +
+        "name below and press Enter to confirm it.",
       "err"
     );
+    // Put the operator right where the fix happens.
+    el.serialLabelInput.focus();
+    el.serialLabelInput.select();
     return;
   }
   const bin = pendingProduct.bin_location;
@@ -543,6 +546,17 @@ el.aliasCheck.addEventListener("click", checkAliasTarget);
 el.aliasTarget.addEventListener("keydown", (event) => {
   if (event.key === "Enter") checkAliasTarget();
 });
+// Any edit to the target invalidates the previewed product — otherwise a
+// stale preview from the previous lookup could get linked to the wrong
+// scan. Check product again to re-enable the actions.
+el.aliasTarget.addEventListener("input", () => {
+  aliasPreviewProduct = null;
+  el.aliasPreview.hidden = true;
+  el.aliasAccept.hidden = true;
+  el.aliasOverwrite.hidden = true;
+  hideOverwrite();
+  hideLinkboxExtras();
+});
 
 el.aliasAccept.addEventListener("click", async () => {
   if (!aliasPreviewProduct) return;
@@ -765,7 +779,12 @@ async function loadTags(p) {
       data.assignments.forEach((a) => {
         const li = document.createElement("li");
         li.innerHTML = `
-          <span class="recent__epc">${escapeHtml(a.rfid_id)}</span>
+          <span class="recent__epc">${escapeHtml(a.rfid_id)}</span>${
+            a.suspect
+              ? '<span class="suspect" title="Probably a bad read — ' +
+                're-scan this tag.">⚠</span>'
+              : ""
+          }
           <span class="recent__meta">${escapeHtml(
             (a.assigned_at || "").slice(0, 10)
           )} · ${escapeHtml(a.assigned_by || "")}</span>`;
@@ -845,7 +864,15 @@ async function watchPrintJobs(ids) {
           : waiting
           ? `Printing… ${done}/${jobs.length}`
           : `Printed ${done}/${jobs.length} ✓`;
+        // Mirror the final outcome to the top status line, where the
+        // operator is actually looking.
         if (!waiting) {
+          setResult(
+            failed.length
+              ? `Label FAILED: ${failed[0].error || "printer error"}`
+              : `Label printed ✓ — scan the RFID tag.`,
+            failed.length ? "err" : "ok"
+          );
           if (pendingProduct) loadTags(pendingProduct);
           loadRecent();
           return;
@@ -896,16 +923,26 @@ el.rfid.addEventListener("keydown", async (event) => {
       return;
     }
     const saved = await res.json();
-    setResult(`Assigned ${saved.rfid_id} → ${saved.product_title}`, "ok");
-    prependRecent(saved);
-    if (el.autoReset.checked) {
-      // One tag per product: brief confirmation, then back to the barcode.
-      setTimeout(resetStation, 700);
+    if (saved.suspect) {
+      setResult(
+        `Saved, but tag ${saved.rfid_id} is ${saved.rfid_id.length} ` +
+          `characters (tags are normally 24) — likely a bad read. ` +
+          `Re-scan this tag into inventory to be safe.`,
+        "err"
+      );
     } else {
-      // Bulk tagging: stay on this product and keep scanning tags.
+      setResult(`Assigned ${saved.rfid_id} → ${saved.product_title}`, "ok");
+    }
+    prependRecent(saved);
+    if (saved.suspect || !el.autoReset.checked) {
+      // Keep the product loaded (bulk mode, or so a flagged tag can be
+      // re-scanned immediately).
       el.rfid.value = "";
       el.rfid.focus();
       loadTags(pendingProduct);
+    } else {
+      // One tag per product: brief confirmation, then back to the barcode.
+      setTimeout(resetStation, 700);
     }
   } catch (err) {
     setResult("Network error while saving.", "err");
@@ -923,7 +960,13 @@ function recentRow(a) {
       })
     : "—";
   li.innerHTML = `
-    <span class="recent__epc">${escapeHtml(a.rfid_id)}</span>
+    <span class="recent__epc">${escapeHtml(a.rfid_id)}</span>${
+      a.suspect
+        ? '<span class="suspect" title="Tag doesn\'t look like a normal ' +
+          '24-character EPC — probably a bad read. Re-scan this tag into ' +
+          'inventory.">⚠</span>'
+        : ""
+    }
     <span class="recent__prod">${escapeHtml(a.product_title || "")}${
       a.variant_title ? " (" + escapeHtml(a.variant_title) + ")" : ""
     }</span>

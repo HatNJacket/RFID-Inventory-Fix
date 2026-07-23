@@ -378,6 +378,12 @@ def create_assignment(
     payload: AssignmentIn, session: Session = Depends(get_session)
 ):
     assignment = RfidAssignment(**payload.model_dump())
+    # Every real tag is a 96-bit EPC = 24 hex chars. Anything else is
+    # probably a mangled read (e.g. Bluetooth relay dropping characters):
+    # save it anyway, but flag it for a re-scan.
+    assignment.suspect = (
+        re.fullmatch(r"[0-9A-Fa-f]{24}", payload.rfid_id) is None
+    )
     session.add(assignment)
     try:
         session.commit()

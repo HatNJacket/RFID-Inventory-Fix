@@ -11,7 +11,7 @@ authoritative and you can re-sync them later if a product is renamed.
 """
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import Boolean, DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -48,9 +48,16 @@ class RfidAssignment(Base):
     )
     assigned_by: Mapped[str | None] = mapped_column(String(100))
 
+    # True when the scanned EPC doesn't look like a normal tag (every real
+    # tag is 24 hex chars) — probably a bad read; re-scan recommended.
+    suspect: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+
     def as_dict(self) -> dict:
         return {
             "id": self.id,
+            "suspect": self.suspect,
             "rfid_id": self.rfid_id,
             "shopify_variant_id": self.shopify_variant_id,
             "shopify_product_id": self.shopify_product_id,

@@ -83,6 +83,11 @@
         </div>
       </section>
 
+      <!-- Status line: right under the scan field so every outcome
+           (found / auto-print skipped / printed / failed) is visible
+           without scrolling -->
+      <div class="result" id="result" role="status" aria-live="polite"></div>
+
       <!-- Foreign-barcode linking / confirmation -->
       <section class="linkbox" id="linkbox" hidden>
         <div class="linkbox__title" id="linkbox-title">Unknown barcode</div>
@@ -205,9 +210,6 @@
           <p class="step__hint">One tag per package — keep scanning tags for this product. Reset (Esc) to switch products.</p>
         </div>
       </section>
-
-      <!-- Result line -->
-      <div class="result" id="result" role="status" aria-live="polite"></div>
 
       <button class="reset" id="reset" type="button">Reset / new package (Esc)</button>
     </main>
