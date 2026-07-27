@@ -225,6 +225,9 @@ public class MainActivity extends Activity {
     private int editIdx = 0;
     // wrong-bin warnings dismissed for this batch only
     private final java.util.Set<Integer> ignoredBins = new java.util.HashSet<>();
+    // held-trigger sweep (unreadable-label rescue)
+    private boolean sweepArmed = false;
+    private volatile boolean sweepRunning = false;
 
     private JSONObject stationProduct = null;
     private int stationTags = 0;
@@ -460,7 +463,7 @@ public class MainActivity extends Activity {
         batchBtnRow.addView(undo, weight());
         Button sweepBtn = smallBtn("SWEEP");
         sweepBtn.setOnClickListener(x -> {
-            if (step == STEP_PAIR) sweepForUnlinked();
+            if (step == STEP_PAIR) armSweep();
             else undoAllPairing();
         });
         batchBtnRow.addView(sweepBtn, weight());
@@ -1268,15 +1271,36 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static boolean isTriggerKey(int keyCode) {
+        for (int k : TRIGGER_KEYS) if (keyCode == k) return true;
+        return false;
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        for (int k : TRIGGER_KEYS) {
-            if (keyCode == k) {
-                if (event.getRepeatCount() == 0) onTrigger();
-                return true;
+        if (isTriggerKey(keyCode)) {
+            if (event.getRepeatCount() == 0) {
+                // Armed sweep runs for exactly as long as the trigger is
+                // held; everything else is a single pull.
+                if (sweepArmed && activeTab == TAB_BATCH
+                        && inBatch() && step == STEP_PAIR) {
+                    startHeldSweep();
+                } else {
+                    onTrigger();
+                }
             }
+            return true;
         }
         return super.onKeyDown(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (isTriggerKey(keyCode)) {
+            if (sweepRunning) stopHeldSweep();
+            return true;
+        }
+        return super.onKeyUp(keyCode, event);
     }
 
     private void onTrigger() {
@@ -1628,88 +1652,93 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    // The unreadable-label rescue: sweep the shelf, find tags nothing owns,
-    // and tie them to the product you're pairing.
-    private void sweepForUnlinked() {
+    // The unreadable-label rescue: hold the trigger, sweep the boxes, and
+    // every tag nobody owns yet goes onto the product you're pairing.
+    // Arming is a separate tap so a normal trigger pull still reads ONE
+    // tag — a sweep that fired by accident would grab a shelf's worth.
+    private void armSweep() {
         if (pairActive == null) {
             beep(SOUND_ERR);
-            status.setText("Scan the product's barcode first, then sweep.");
+            status.setText("Scan the product's barcode first, then SWEEP.");
             return;
         }
         if (!readerReady) {
+            beep(SOUND_ERR);
             status.setText("RFID reader not ready.");
             return;
         }
-        final BItem target = pairActive;
-        status.setText("Sweeping for unlinked tags… hold near the boxes");
+        sweepArmed = true;
+        beep(SOUND_OTHER);
+        status.setText("SWEEP ARMED — HOLD the trigger over "
+                + pairActive.name() + "'s boxes, release to assign.");
+    }
+
+    private void startHeldSweep() {
+        if (pairActive == null || !readerReady) return;
         synchronized (tags) { tags.clear(); }
         if (!reader.startInventoryTag()) {
+            sweepArmed = false;
             status.setText("Could not start the sweep.");
             return;
         }
         scanning = true;
-        ui.postDelayed(() -> {
-            try {
-                reader.stopInventory();
-            } catch (Exception ignored) {
-            }
-            scanning = false;
-            final List<String> swept = new ArrayList<>();
-            synchronized (tags) { swept.addAll(tags.keySet()); }
-            if (swept.isEmpty()) {
-                beep(SOUND_ERR);
-                status.setText("Swept nothing — get closer and try again.");
-                return;
-            }
-            status.setText("Checking " + swept.size() + " tag(s)…");
-            new Thread(() -> {
-                try {
-                    JSONObject body = new JSONObject()
-                            .put("epcs", new JSONArray(swept));
-                    JSONObject resp = api("POST", "/api/batches/" + batchId
-                            + "/unlinked", body);
-                    JSONArray un = resp.getJSONArray("unlinked");
-                    final List<String> orphans = new ArrayList<>();
-                    for (int i = 0; i < un.length(); i++) {
-                        orphans.add(un.getString(i));
-                    }
-                    ui.post(() -> showUnlinkedDialog(orphans, target));
-                } catch (Exception e) {
-                    ui.post(() -> status.setText(e.getMessage()));
-                }
-            }).start();
-        }, 4000);
+        sweepRunning = true;
+        status.setText("Sweeping… 0 tag(s) — release the trigger to stop.");
     }
 
-    private void showUnlinkedDialog(List<String> orphans, BItem target) {
-        if (orphans.isEmpty()) {
-            beep(SOUND_OTHER);
-            status.setText("Every tag swept is already linked — nothing "
-                    + "orphaned here.");
+    private void stopHeldSweep() {
+        sweepRunning = false;
+        sweepArmed = false;
+        try {
+            reader.stopInventory();
+        } catch (Exception ignored) {
+        }
+        scanning = false;
+        final BItem target = pairActive;
+        final List<String> swept = new ArrayList<>();
+        synchronized (tags) { swept.addAll(tags.keySet()); }
+        if (target == null) return;
+        if (swept.isEmpty()) {
+            beep(SOUND_ERR);
+            status.setText("Swept nothing — hold the trigger longer, or "
+                    + "raise PWR.");
             return;
         }
-        final boolean[] picked = new boolean[orphans.size()];
-        String[] labels = new String[orphans.size()];
-        for (int i = 0; i < orphans.size(); i++) {
-            String e = orphans.get(i);
-            labels[i] = "…" + e.substring(Math.max(0, e.length() - 8));
-            picked[i] = orphans.size() == 1; // lone orphan: pre-ticked
-        }
-        beep(SOUND_OK);
-        new AlertDialog.Builder(this)
-                .setTitle(orphans.size() + " unlinked tag(s) nearby")
-                .setMultiChoiceItems(labels, picked,
-                        (d, which, isChecked) -> picked[which] = isChecked)
-                .setPositiveButton("Assign ticked to " + target.name(),
-                        (d, w) -> {
-                            List<String> chosen = new ArrayList<>();
-                            for (int i = 0; i < picked.length; i++) {
-                                if (picked[i]) chosen.add(orphans.get(i));
-                            }
-                            assignEpcs(chosen, target);
-                        })
-                .setNegativeButton("Cancel", null)
-                .show();
+        status.setText("Checking " + swept.size() + " swept tag(s)…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("epcs", new JSONArray(swept));
+                JSONObject resp = api("POST", "/api/batches/" + batchId
+                        + "/unlinked", body);
+                JSONArray un = resp.getJSONArray("unlinked");
+                final List<String> orphans = new ArrayList<>();
+                for (int i = 0; i < un.length(); i++) {
+                    orphans.add(un.getString(i));
+                }
+                final int already = swept.size() - orphans.size();
+                ui.post(() -> {
+                    if (orphans.isEmpty()) {
+                        beep(SOUND_OTHER);
+                        status.setText("All " + swept.size() + " tag(s) "
+                                + "swept are already linked — nothing "
+                                + "orphaned here.");
+                        return;
+                    }
+                    // Everything unowned belongs to the active product.
+                    status.setText("Assigning " + orphans.size()
+                            + " unlinked tag(s) to " + target.name()
+                            + (already > 0 ? "  (" + already + " already "
+                              + "linked, skipped)" : "") + "…");
+                    assignEpcs(orphans, target);
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText(e.getMessage());
+                });
+            }
+        }).start();
     }
 
     private void assignEpcs(List<String> epcs, BItem target) {
@@ -2701,6 +2730,12 @@ public class MainActivity extends Activity {
         if (listDirty) {
             listDirty = false;
             if (activeTab == TAB_SWEEP) refreshSweepList();
+            if (sweepRunning) {
+                int n;
+                synchronized (tags) { n = tags.size(); }
+                status.setText("Sweeping… " + n + " tag(s) — release the "
+                        + "trigger to stop.");
+            }
         }
         ui.postDelayed(this::refreshTick, 400);
     }
