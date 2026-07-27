@@ -34,6 +34,7 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.rscja.barcode.Barcode2DSHardwareInfo;
 import com.rscja.barcode.BarcodeDecoder;
 import com.rscja.barcode.BarcodeFactory;
 import com.rscja.deviceapi.RFIDWithUHFUART;
@@ -74,6 +75,7 @@ public class MainActivity extends Activity {
     private BarcodeDecoder decoder;
     private volatile boolean decoderReady = false;
     private volatile boolean decoderOpening = false;
+    private volatile String engineInfo = "engine unknown";
     private boolean barcodeMode = false;
 
     private final LinkedHashMap<String, Integer> tags = new LinkedHashMap<>();
@@ -338,6 +340,15 @@ public class MainActivity extends Activity {
         decoderOpening = true;
         status.setText("Starting the barcode engine…");
         new Thread(() -> {
+            // What imager does the SDK think this unit has? Shown on screen
+            // so a failed test tells us hardware-vs-software immediately.
+            try {
+                Barcode2DSHardwareInfo hw = Barcode2DSHardwareInfo.getInstance();
+                engineInfo = (hw.getManufactor() + " " + hw.getEngineName())
+                        .trim();
+            } catch (Exception e) {
+                engineInfo = "engine lookup failed";
+            }
             boolean ok = false;
             try {
                 decoder = BarcodeFactory.getInstance().getBarcodeDecoder();
@@ -359,10 +370,12 @@ public class MainActivity extends Activity {
                 decoderReady = ready;
                 if (barcodeMode) {
                     status.setText(ready
-                            ? "Barcode mode — pull the trigger to scan"
-                            : "Barcode engine FAILED to open — turn off "
-                              + "KeyboardEmulator's barcode/scan mode too, "
-                              + "then reopen this app.");
+                            ? "Barcode mode (" + engineInfo + ") — pull "
+                              + "the trigger to scan"
+                            : "Barcode engine FAILED to open ("
+                              + engineInfo + ") — force-stop "
+                              + "KeyboardEmulator (Settings > Apps), "
+                              + "reboot, reopen this app.");
                 }
             });
         }).start();
@@ -374,6 +387,10 @@ public class MainActivity extends Activity {
             return;
         }
         status.setText("Scanning… aim at the barcode");
+        try {
+            decoder.stopScan(); // clear any stuck session first
+        } catch (Exception ignored) {
+        }
         try {
             decoder.startScan();
         } catch (Exception e) {
@@ -395,9 +412,16 @@ public class MainActivity extends Activity {
         } else if (resultCode == BarcodeDecoder.DECODE_TIMEOUT) {
             beep(false);
             status.setText("No barcode read — try again");
+        } else if (resultCode == BarcodeDecoder.DECODE_FAILURE) {
+            beep(false);
+            status.setText("Decode FAILED (-2, " + engineInfo + "). If the "
+                    + "aimer light never comes on, another app holds the "
+                    + "imager: force-stop KeyboardEmulator (Settings > "
+                    + "Apps > force stop), reboot, try again.");
         } else if (resultCode != BarcodeDecoder.DECODE_CANCEL) {
             beep(false);
-            status.setText("Scan error (code " + resultCode + ")");
+            status.setText("Scan error (code " + resultCode + ", "
+                    + engineInfo + ")");
         }
     }
 
