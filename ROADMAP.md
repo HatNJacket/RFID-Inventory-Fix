@@ -98,6 +98,12 @@ next bin.
 
 ## 🔜 Next up (the revamp — after the C72 barcode test)
 
+- ✅ SHIPPED 2026-07-27: ambiguous-barcode Check step (web + C72 v2.4).
+  Batch flow is now linear Collect → Check → Pair on both surfaces; the
+  Check step flags shared barcodes (candidate arrows, main listing
+  default), count mismatches, unconfirmed serial names, unknown
+  barcodes. Preferred names gained a placement toggle (store header vs
+  SKU line) + ✕-to-clear. Field test pending.
 - ✅ SHIPPED 2026-07-27: web batch UI mirrors the C72 (cards with
   image/SKU/Barcode/tracker, green/red glow, ding/other-ding/buzz
   sounds, clickable stage chips) and C72 v2.2 drawer (slide-in over
