@@ -1295,6 +1295,26 @@ def _rebuild_bin_map() -> None:
     try:
         entries = shopify.fetch_all_variant_bins()
         with Session(get_engine()) as session:
+            # Expected counts must be ON-HAND, not Shopify's "available"
+            # (available = on-hand minus committed, so an oversold item
+            # reads -1 at the shelf where the truth is 0 boxes).
+            on_hand: dict = {}
+            if session.get_bind().dialect.name == "mssql":
+                try:
+                    on_hand = {
+                        r.Variant_SKU: int(r.oh)
+                        for r in session.execute(text(
+                            "SELECT Variant_SKU, MAX(On_Hand_Current) AS oh "
+                            "FROM dbo.Shopify_Inventory "
+                            "WHERE On_Hand_Current IS NOT NULL "
+                            "GROUP BY Variant_SKU"
+                        ))
+                    }
+                except Exception as error:
+                    logger.warning("on-hand map load failed: %s", error)
+            for e in entries:
+                if e["sku"] in on_hand:
+                    e["qty"] = on_hand[e["sku"]]
             # Serialize rewrites across gunicorn workers: without this,
             # two workers booting onto a stale map both insert and the
             # table doubles.
@@ -1389,18 +1409,27 @@ def _batch_items(session: Session, batch_id: int) -> list[BatchItem]:
 
 
 def _mirror_qty(session: Session, sku: str | None) -> int | None:
-    """Shopify on-hand from the TELCAN mirror (best-effort; None elsewhere)."""
+    """True ON-HAND from the TELCAN mirror (falls back to the variant's
+    "available" figure only when the inventory row is missing). Available
+    goes negative on oversells; the shelf count compares against on-hand."""
     if not sku or session.get_bind().dialect.name != "mssql":
         return None
     try:
         row = session.execute(
             text(
-                "SELECT MAX(Variant_Inventory_Qty) AS qty "
-                "FROM dbo.Shopify_Variants WHERE Variant_SKU = :sku"
+                "SELECT MAX(i.On_Hand_Current) AS oh, "
+                "       MAX(v.Variant_Inventory_Qty) AS avail "
+                "FROM dbo.Shopify_Variants v "
+                "LEFT JOIN dbo.Shopify_Inventory i "
+                "  ON i.Handle_ID = v.Handle_ID "
+                " AND i.Variant_SKU = v.Variant_SKU "
+                "WHERE v.Variant_SKU = :sku"
             ),
             {"sku": sku},
         ).first()
-        return row.qty if row else None
+        if row is None:
+            return None
+        return row.oh if row.oh is not None else row.avail
     except Exception as error:
         logger.warning("mirror qty lookup failed for %s: %s", sku, error)
         return None
