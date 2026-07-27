@@ -1557,6 +1557,39 @@ async function loadBinBoard() {
 }
 
 let showHiddenBins = false;
+let binSort = "products";
+
+// Eye / crossed-out eye, drawn inline so there's no icon dependency.
+const ICON_EYE =
+  '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" ' +
+  'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>' +
+  '<circle cx="12" cy="12" r="3.2"/></svg>';
+const ICON_EYE_OFF =
+  '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" ' +
+  'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+  'stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>' +
+  '<circle cx="12" cy="12" r="3.2"/>' +
+  '<line x1="2.5" y1="2.5" x2="21.5" y2="21.5"/></svg>';
+
+function sortBins(rows) {
+  const byName = (a, b) =>
+    a.bin.localeCompare(b.bin, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+  const copy = [...rows];
+  if (binSort === "name") copy.sort(byName);
+  else if (binSort === "name-desc") copy.sort((a, b) => byName(b, a));
+  else if (binSort === "fewest")
+    copy.sort((a, b) => a.products - b.products || byName(a, b));
+  else copy.sort((a, b) => b.products - a.products || byName(a, b));
+  // Bins already being worked stay at the top whatever the sort.
+  copy.sort((a, b) => (a.open_batch_id ? 0 : 1) - (b.open_batch_id ? 0 : 1));
+  return copy;
+}
 
 function renderBinBoard() {
   const list = document.getElementById("binboard-list");
@@ -1567,18 +1600,27 @@ function renderBinBoard() {
     .getElementById("binboard-filter")
     .value.trim()
     .toLowerCase();
-  const rows = binBoard.todo.filter(
-    (b) =>
-      (showHiddenBins || !b.hidden) &&
-      (!q || b.bin.toLowerCase().includes(q))
+  const rows = sortBins(
+    binBoard.todo.filter(
+      (b) =>
+        (showHiddenBins || !b.hidden) &&
+        (!q || b.bin.toLowerCase().includes(q))
+    )
   );
   countEl.textContent =
     `(${binBoard.todo_count} of ${binBoard.total_bins} left · ` +
     `${binBoard.done_bins} done` +
-    `${binBoard.hidden_count ? ` · ${binBoard.hidden_count} hidden` : ""})`;
-  hideBtn.textContent = showHiddenBins
-    ? "Hide ignored bins"
-    : `Show hidden${binBoard.hidden_count ? ` (${binBoard.hidden_count})` : ""}`;
+    `${binBoard.hidden_count ? ` · ${binBoard.hidden_count} hidden` : ""}` +
+    `${
+      binBoard.malformed_count
+        ? ` · ${binBoard.malformed_count} odd name(s)`
+        : ""
+    })`;
+  hideBtn.innerHTML = showHiddenBins
+    ? `${ICON_EYE_OFF}<span>Hide ignored</span>`
+    : `${ICON_EYE}<span>Show hidden${
+        binBoard.hidden_count ? ` (${binBoard.hidden_count})` : ""
+      }</span>`;
   list.innerHTML = "";
   if (!rows.length) {
     list.innerHTML = `<li class="recent__empty">${
@@ -1594,11 +1636,19 @@ function renderBinBoard() {
     const li = document.createElement("li");
     if (b.open_batch_id) li.classList.add("binlist--open");
     if (b.hidden) li.classList.add("binlist--hidden");
+    if (b.malformed) li.classList.add("binlist--odd");
     li.innerHTML =
-      `<input class="binlist__tick" type="checkbox" title="Hide this bin from the list"${
-        b.hidden ? " checked" : ""
-      } />` +
+      `<button class="binlist__eye" type="button" title="${
+        b.hidden ? "Show bin" : "Hide bin"
+      }" aria-label="${b.hidden ? "Show bin" : "Hide bin"}">${
+        b.hidden ? ICON_EYE : ICON_EYE_OFF
+      }</button>` +
       `<span class="binlist__name">${escapeHtml(b.bin)}</span>` +
+      `${
+        b.malformed
+          ? `<span class="binlist__odd" title="Bin name doesn't match the A1-2 format (one letter, then 1-99, dash, 1-99). Usually means one product's stock is split across shelves — worth fixing in Shopify before tagging this bin.">⚠ odd name</span>`
+          : ""
+      }` +
       `<span class="binlist__count">${b.products} product(s)${
         b.open_batch_id ? " · in progress" : ""
       }${b.hidden ? " · hidden" : ""}</span>` +
@@ -1618,8 +1668,9 @@ function renderBinBoard() {
         startBatch();
       }
     });
-    li.querySelector(".binlist__tick").addEventListener("change", async (ev) => {
-      const hidden = ev.target.checked;
+    li.querySelector(".binlist__eye").addEventListener("click", async (ev) => {
+      const hidden = !b.hidden;
+      ev.currentTarget.disabled = true;
       try {
         await apiJson(`/api/bins/${encodeURIComponent(b.bin)}/hidden`, {
           method: "PUT",
@@ -1634,7 +1685,7 @@ function renderBinBoard() {
         binBoard.hidden_count += hidden ? 1 : -1;
         renderBinBoard();
       } catch (err) {
-        ev.target.checked = !hidden;
+        ev.currentTarget.disabled = false;
         setBatchResult(err.message, "err");
       }
     });
@@ -1644,6 +1695,11 @@ function renderBinBoard() {
 
 document.getElementById("binboard-showhidden").addEventListener("click", () => {
   showHiddenBins = !showHiddenBins;
+  renderBinBoard();
+});
+
+document.getElementById("binboard-sort").addEventListener("change", (e) => {
+  binSort = e.target.value;
   renderBinBoard();
 });
 

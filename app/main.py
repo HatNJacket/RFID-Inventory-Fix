@@ -1429,6 +1429,13 @@ def _maybe_refresh_bin_map(force: bool = False) -> bool:
     return True
 
 
+# A well-formed bin is one letter + 1-99, a dash, then 1-99 (D2-2, E14-3).
+# Anything else — extra letters like "B19B-2", missing parts, stray text —
+# usually means one product's stock is split across shelves, which needs
+# sorting out in Shopify before that bin can be tagged cleanly.
+_BIN_NAME_RE = re.compile(r"[A-Za-z](?:[1-9]|[1-9][0-9])-(?:[1-9]|[1-9][0-9])")
+
+
 @app.get("/api/bins/overview", dependencies=[Depends(require_user)])
 def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
     """Every bin in the store (from the Shopify bin map) split into
@@ -1479,10 +1486,14 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
 
     todo = []
     done_bins = 0
+    malformed_total = 0
     for name, products in counts:
         key = (name or "").strip().lower()
         if not key:
             continue
+        odd_name = _BIN_NAME_RE.fullmatch((name or "").strip()) is None
+        if odd_name:
+            malformed_total += 1
         if key in last_done:
             done_bins += 1
             continue
@@ -1492,6 +1503,7 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
             "products": products,
             "open_batch_id": openb.id if openb else None,
             "hidden": key in hidden,
+            "malformed": odd_name,
         })
     # Bins already in progress first, then the biggest jobs.
     todo.sort(key=lambda b: (b["open_batch_id"] is None, -b["products"],
@@ -1502,6 +1514,7 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
         "done_bins": done_bins,
         "todo_count": sum(1 for b in todo if not b["hidden"]),
         "hidden_count": sum(1 for b in todo if b["hidden"]),
+        "malformed_count": malformed_total,
         "todo": todo,
         "recent": [
             {

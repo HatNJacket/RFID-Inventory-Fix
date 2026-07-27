@@ -959,8 +959,38 @@ a { color: var(--accent); }
 .binlist__go:hover { border-color: var(--accent); color: var(--accent); }
 .binlist li.binlist--open { background: var(--accent-soft); }
 .binlist li.binlist--hidden { opacity: 0.55; }
-.binlist__tick { flex: none; cursor: pointer; }
-#binboard-showhidden { padding: 4px 10px; font-size: 12px; }
+.binlist__eye {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border: none;
+  background: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  border-radius: 6px;
+}
+.binlist__eye:hover { color: var(--accent); background: var(--card-2); }
+.binlist__eye:disabled { opacity: 0.4; cursor: default; }
+.binlist__odd {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn-ink);
+  background: var(--warn-bg);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  cursor: help;
+}
+.binlist li.binlist--odd .binlist__name { color: var(--warn-ink); }
+#binboard-showhidden {
+  padding: 4px 10px;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+#binboard-sort { padding: 4px 8px; font-size: 12px; }
 .binlist--recent li { display: block; }
 .binlist--recent .binlist__name { cursor: default; }
 .binlist--recent .binlist__name:hover { color: inherit; }

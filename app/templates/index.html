@@ -326,6 +326,12 @@
         <div class="binboard__todo linkbox serialbox">
           <div class="recent__head">
             <h2>Bins to do <span class="recent__note" id="binboard-count"></span></h2>
+            <select id="binboard-sort" class="reset" title="Sort the bin list">
+              <option value="products">Most products</option>
+              <option value="fewest">Fewest products</option>
+              <option value="name">Bin name A→Z</option>
+              <option value="name-desc">Bin name Z→A</option>
+            </select>
             <button class="reset" id="binboard-showhidden" type="button">Show hidden</button>
             <input id="binboard-filter" class="recent__search" type="search" placeholder="Filter bins…" autocomplete="off" />
           </div>
