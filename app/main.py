@@ -2473,6 +2473,10 @@ def batch_verify(
 
 class CompleteIn(BaseModel):
     created_by: str | None = Field(default=None, max_length=100)
+    # Closing a bin is a deliberate sign-off made on a full screen, where
+    # the counts and mismatches are readable. Only the web terminal sends
+    # this; a scanner's "finish" hands the batch over instead.
+    finalize: bool = False
 
 
 @app.post(
@@ -2484,10 +2488,28 @@ def batch_complete(
     session: Session = Depends(get_session),
 ):
     """Close the batch. Mismatches become Review tasks — recommendations
-    for a future product check, never automatic fixes."""
+    for a future product check, never automatic fixes.
+
+    A finish from the shelf (no `finalize`) doesn't close anything: it
+    parks the batch as awaiting-verify so the counts get checked on a web
+    terminal first."""
     batch = _get_batch(session, batch_id)
     if batch.status in ("done", "abandoned"):
         raise HTTPException(409, f"This batch is already {batch.status}.")
+    if not payload.finalize:
+        if batch.status != "awaiting-verify":
+            batch.status = "awaiting-verify"
+            # Point every terminal at the step that has to happen next.
+            batch.ui_step = "verify"
+            session.commit()
+        raise HTTPException(
+            409,
+            f"Bin {batch.bin_name} is ready to close, but bins are closed "
+            f"from a web terminal so the counts can be checked on a full "
+            f"screen. Open Batch tagging on the PC or iPad — this bin is "
+            f"waiting under unfinished batches — run Verify, then Complete "
+            f"batch.",
+        )
     tasks = []
     for item in _batch_items(session, batch_id):
         name = item.label_name or item.product_title

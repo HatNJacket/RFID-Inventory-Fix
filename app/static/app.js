@@ -1778,6 +1778,9 @@ const STAGE_FOR_STATUS = {
   collecting: "collect",
   printing: "print",
   pairing: "pair",
+  // The scanner finished at the shelf and handed the bin over for
+  // sign-off — land on Verify.
+  "awaiting-verify": "verify",
 };
 
 // The batch's shared "which step are we on" signal. Status can't carry it
@@ -1826,7 +1829,9 @@ async function pullBatch(announce) {
     const stepTarget = STEP_TO_STAGE[batch.ui_step || ""];
     const statusTarget =
       batch.status !== prevStatus ? STAGE_FOR_STATUS[batch.status] : null;
-    const target = stepTarget || statusTarget;
+    // A status change is the stronger signal — the published step can be
+    // stale (nobody republishes it when the server moves the batch on).
+    const target = statusTarget || stepTarget;
     if (target && target !== batchStage) {
       applyingRemoteStep = true;
       lastPublishedStep = batch.ui_step || null;
@@ -3214,11 +3219,19 @@ bEl.complete.addEventListener("click", async () => {
       `Are you sure you want to finish? The missing ones will be filed ` +
       `in Review as incomplete pairing.`;
   }
+  // Closing a bin without ever sweeping it means the tags were never
+  // checked against the shelf — worth one more question.
+  if (!batch.verified_at) {
+    msg =
+      `This bin has never been verified — no RFID sweep has been checked ` +
+      `against it.\n\n${msg}`;
+  }
   if (!confirm(msg)) return;
   bEl.complete.disabled = true;
   try {
     const data = await postJson(`/api/batches/${batch.id}/complete`, {
       created_by: operatorEl.value || null,
+      finalize: true,
     });
     const n = data.review_tasks.length;
     batch = null;
