@@ -303,6 +303,11 @@ class Batch(Base):
     verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    # Which step whoever's driving is on (collect/check/print/pair/verify).
+    # Status alone can't carry this — collect and check are both
+    # "collecting" — so terminals watching the same batch use this to
+    # follow along.
+    ui_step: Mapped[str | None] = mapped_column(String(20))
 
     def as_dict(self) -> dict:
         return {
@@ -319,6 +324,7 @@ class Batch(Base):
             "verified_at": (
                 self.verified_at.isoformat() if self.verified_at else None
             ),
+            "ui_step": self.ui_step,
         }
 
 

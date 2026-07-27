@@ -2468,6 +2468,24 @@ def batch_unpair_all(batch_id: int, session: Session = Depends(get_session)):
     return _unpair_batch(session, batch)
 
 
+class StepIn(BaseModel):
+    step: str = Field(pattern="^(collect|check|print|pair|verify)$")
+
+
+@app.post(
+    "/api/batches/{batch_id}/step", dependencies=[Depends(require_user)]
+)
+def batch_set_step(
+    batch_id: int, payload: StepIn, session: Session = Depends(get_session)
+):
+    """Record which step the operator is on so other terminals watching
+    this batch can follow. Purely a UI signal — nothing else reads it."""
+    batch = _get_batch(session, batch_id)
+    batch.ui_step = payload.step
+    session.commit()
+    return {"id": batch.id, "ui_step": batch.ui_step}
+
+
 @app.post(
     "/api/batches/{batch_id}/skip-print",
     dependencies=[Depends(require_user)],

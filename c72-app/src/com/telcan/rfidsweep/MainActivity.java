@@ -1921,8 +1921,28 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    // Tell the server which step this device is on so the PC/iPad watching
+    // the same batch can follow along (status alone can't say it — collect
+    // and check are both "collecting").
+    private void publishStep() {
+        if (!inBatch()) return;
+        final String name = step == STEP_COLLECT ? "collect"
+                : step == STEP_CHECK ? "check" : "pair";
+        final int id = batchId;
+        new Thread(() -> {
+            try {
+                api("POST", "/api/batches/" + id + "/step",
+                        new JSONObject().put("step", name));
+            } catch (Exception ignored) {
+                // Best-effort: a missed signal only costs the other screen
+                // a manual tap.
+            }
+        }).start();
+    }
+
     private void applyBatchUi() {
         boolean in = inBatch();
+        if (in) publishStep();
         binChip.setText(in ? "Bin " + batchBin : "No batch");
         phaseChip.setText(in
                 ? STEP_NAMES[step] + "  " + (step + 1) + "/3" : "PICK");

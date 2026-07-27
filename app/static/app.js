@@ -1566,6 +1566,38 @@ const STAGE_FOR_STATUS = {
   pairing: "pair",
 };
 
+// The batch's shared "which step are we on" signal. Status can't carry it
+// (collect and check are both "collecting"), so terminals publish the step
+// they're on and everyone else follows. "check" is this page's "labels".
+const STEP_TO_STAGE = {
+  collect: "collect",
+  check: "labels",
+  print: "print",
+  pair: "pair",
+  verify: "verify",
+};
+const STAGE_TO_STEP = {
+  collect: "collect",
+  labels: "check",
+  print: "print",
+  pair: "pair",
+  verify: "verify",
+};
+// Set while applying a step that came FROM the server, so following a
+// change doesn't immediately publish it back.
+let applyingRemoteStep = false;
+let lastPublishedStep = null;
+
+function publishBatchStep(stage) {
+  if (!batch || applyingRemoteStep) return;
+  const step = STAGE_TO_STEP[stage];
+  if (!step || step === lastPublishedStep) return;
+  lastPublishedStep = step;
+  postJson(`/api/batches/${batch.id}/step`, { step }).catch(() => {
+    lastPublishedStep = null; // let a later attempt retry
+  });
+}
+
 async function pullBatch(announce) {
   if (!batch) return;
   try {
@@ -1573,18 +1605,26 @@ async function pullBatch(announce) {
     const data = await apiJson(`/api/batches/${batch.id}`);
     batch = data.batch;
     batchItems = data.items;
-    // The C72 (or another browser) moved the batch on — follow it, so this
-    // screen doesn't sit on "1 Collect" while the scanner is pairing.
-    if (batch.status !== prevStatus) {
-      const target = STAGE_FOR_STATUS[batch.status];
-      if (target && target !== batchStage) {
-        showBatchStage(target);
-        setBatchResult(
-          `Followed the scanner to the ${target} step.`,
-          "ok"
-        );
-        return;
-      }
+    // The C72 (or another browser) moved on — follow it, so this screen
+    // doesn't sit on "1 Collect" while the scanner is checking or pairing.
+    // The published step is the precise signal; status is the fallback for
+    // moves made before this existed.
+    const stepTarget = STEP_TO_STAGE[batch.ui_step || ""];
+    const statusTarget =
+      batch.status !== prevStatus ? STAGE_FOR_STATUS[batch.status] : null;
+    const target = stepTarget || statusTarget;
+    if (target && target !== batchStage) {
+      applyingRemoteStep = true;
+      lastPublishedStep = batch.ui_step || null;
+      showBatchStage(target);
+      applyingRemoteStep = false;
+      setBatchResult(
+        `Followed the scanner to the ${
+          target === "labels" ? "check" : target
+        } step.`,
+        "ok"
+      );
+      return;
     }
     if (batchStage === "collect") renderBatchItems();
     else if (batchStage === "pair") {
@@ -1700,6 +1740,7 @@ function showBatchStage(stage) {
     bEl.verifyReport.innerHTML = "";
     bEl.verifyInput.focus();
   }
+  publishBatchStep(stage);
 }
 
 function stopBatchPrintPoll() {
