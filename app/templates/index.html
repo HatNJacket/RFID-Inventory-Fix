@@ -483,23 +483,27 @@
       <ul class="recent__list" id="sweep-list"></ul>
     </section>
 
-    <!-- History tab -->
-    <section class="inventory" id="tab-history" hidden>
-      <div class="recent__head">
-        <h2>History <span class="recent__note">(append-only — every event, old and new values)</span></h2>
-        <input id="hist-search" class="recent__search" type="search" placeholder="Filter by SKU, product, worker, EPC…" autocomplete="off" />
-      </div>
-      <div class="linkbox__form" style="margin-bottom:12px">
-        <input id="phist-term" class="linkbox__input" type="text" placeholder="Product history — enter a SKU or barcode (or click a SKU below)" autocomplete="off" />
-        <button class="reset" id="phist-open" type="button">Open product</button>
-      </div>
-      <section class="linkbox serialbox" id="phist-panel" hidden>
+    <!-- Product panel: opened from History OR Print queue (modal) -->
+    <div class="phist-overlay" id="phist-overlay" hidden>
+      <section class="linkbox serialbox phist-modal" id="phist-panel">
         <div class="linkbox__product" style="margin-bottom:8px">
           <img class="linkbox__img" id="phist-img" alt="" hidden />
           <div>
             <div class="linkbox__ptitle" id="phist-title">—</div>
             <p class="linkbox__text" id="phist-meta"></p>
           </div>
+        </div>
+        <div id="phist-serial" hidden>
+          <p class="linkbox__extra-label">Preferred label name — printed at the top of this product's labels. Keep it short; very long names print smaller to fit two lines:</p>
+          <div class="linkbox__form">
+            <input id="phist-label-input" class="linkbox__input" type="text" maxlength="76" autocomplete="off" spellcheck="false" />
+            <button class="reset" id="phist-label-save" type="button">Save name</button>
+          </div>
+        </div>
+        <div class="linkbox__form" style="margin:10px 0">
+          <input id="phist-qty" class="linkbox__input" type="number" min="1" max="50" value="1" style="max-width:90px" />
+          <button class="print__btn" id="phist-print" type="button">Print label(s)</button>
+          <span class="linkbox__text" id="phist-msg"></span>
         </div>
         <div class="inventory__scroll">
           <table class="inventory__table">
@@ -511,6 +515,18 @@
           <button class="reset" id="phist-close" type="button">Close</button>
         </div>
       </section>
+    </div>
+
+    <!-- History tab -->
+    <section class="inventory" id="tab-history" hidden>
+      <div class="recent__head">
+        <h2>History <span class="recent__note">(append-only — every event, old and new values)</span></h2>
+        <input id="hist-search" class="recent__search" type="search" placeholder="Filter by SKU, product, worker, EPC…" autocomplete="off" />
+      </div>
+      <div class="linkbox__form" style="margin-bottom:12px">
+        <input id="phist-term" class="linkbox__input" type="text" placeholder="Product history — enter a SKU or barcode (or click a SKU below)" autocomplete="off" />
+        <button class="reset" id="phist-open" type="button">Open product</button>
+      </div>
       <div class="inventory__scroll">
         <table class="inventory__table">
           <thead>

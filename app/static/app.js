@@ -2354,7 +2354,11 @@ async function loadQueue() {
         <td>${escapeHtml(j.label_name || j.product_title || "")}${
           j.variant_title ? ` <span class="inventory__variant">(${escapeHtml(j.variant_title)})</span>` : ""
         }</td>
-        <td class="mono">${escapeHtml(j.sku || "—")}</td>
+        <td class="mono">${
+          j.sku
+            ? `<a href="#" class="queue-sku">${escapeHtml(j.sku)}</a>`
+            : "—"
+        }</td>
         <td>${escapeHtml(j.bin_location || "—")}</td>
         <td class="mono">${j.batch_id ? "#" + j.batch_id : "—"}</td>
         <td>${escapeHtml(j.requested_by || "—")}</td>
@@ -2365,6 +2369,12 @@ async function loadQueue() {
         <td>${canCancel ? '<button class="recent__unassign" data-act="cancel">cancel</button>' : ""}${
           canReprint ? '<button class="recent__unassign" data-act="reprint">reprint</button>' : ""
         }</td>`;
+      const skuLink = tr.querySelector(".queue-sku");
+      if (skuLink)
+        skuLink.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          openProductHistory(j.sku);
+        });
       const cancelBtn = tr.querySelector('[data-act="cancel"]');
       if (cancelBtn)
         cancelBtn.addEventListener("click", async () => {
@@ -2558,20 +2568,34 @@ function renderHistory() {
 
 // --- Per-product history: the full paper trail for one SKU/barcode, each
 // event marked whether it touched Shopify or only this system. Counts are
-// observations — nothing here writes stock numbers anywhere.
+// observations — nothing here writes stock numbers anywhere. Opens as a
+// modal so it works from History AND Print queue; serialized products can
+// edit their preferred label name here, and any product can print labels.
+let phistData = null;
+
 async function openProductHistory(term) {
-  const panel = document.getElementById("phist-panel");
+  const overlay = document.getElementById("phist-overlay");
   const body = document.getElementById("phist-body");
-  document.getElementById("phist-term").value = term;
-  panel.hidden = false;
+  const termBox = document.getElementById("phist-term");
+  if (termBox) termBox.value = term;
+  overlay.hidden = false;
+  phistData = null;
+  document.getElementById("phist-msg").textContent = "";
+  document.getElementById("phist-serial").hidden = true;
   body.innerHTML =
     '<tr><td colspan="5" class="inventory__empty">Loading…</td></tr>';
-  panel.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
     const data = await apiJson(
       `/api/product-history?term=${encodeURIComponent(term)}`
     );
+    phistData = data;
     const p = data.product;
+    if (data.serial_prefix) {
+      document.getElementById("phist-serial").hidden = false;
+      document.getElementById("phist-label-input").value =
+        data.serial_label || "";
+    }
+    document.getElementById("phist-print").disabled = !p;
     document.getElementById("phist-title").textContent = p
       ? p.product_title + (p.variant_title ? ` (${p.variant_title})` : "")
       : `(not in the catalog) ${term}`;
@@ -2624,7 +2648,85 @@ document.getElementById("phist-term").addEventListener("keydown", (e) => {
   }
 });
 document.getElementById("phist-close").addEventListener("click", () => {
-  document.getElementById("phist-panel").hidden = true;
+  document.getElementById("phist-overlay").hidden = true;
+});
+document.getElementById("phist-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "phist-overlay")
+    document.getElementById("phist-overlay").hidden = true;
+});
+
+// Preferred label name save — writes through to the serial-prefix record,
+// exactly like the Scan Station's Save button (future prints use it).
+document.getElementById("phist-label-save").addEventListener("click", async () => {
+  if (!phistData || !phistData.serial_prefix) return;
+  const name = document.getElementById("phist-label-input").value.trim();
+  const msg = document.getElementById("phist-msg");
+  if (!name) return;
+  try {
+    await apiJson(
+      `/api/serial-prefixes/${encodeURIComponent(phistData.serial_prefix)}/label`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label_name: name }),
+      }
+    );
+    phistData.serial_label = name;
+    phistData.serial_label_saved = true;
+    msg.textContent = "Name saved ✓ — new prints use it.";
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+// Print fresh labels for this product right from the panel (each gets a
+// new EPC; they land in the Print queue like any other job).
+document.getElementById("phist-print").addEventListener("click", async () => {
+  const msg = document.getElementById("phist-msg");
+  if (!phistData || !phistData.product) return;
+  const operator = requireOperator();
+  if (!operator) {
+    msg.textContent = "Pick who's scanning (top right) first.";
+    return;
+  }
+  const qty = Math.max(
+    1,
+    Math.min(50, Number(document.getElementById("phist-qty").value) || 1)
+  );
+  const p = phistData.product;
+  const btn = document.getElementById("phist-print");
+  btn.disabled = true;
+  msg.textContent = "Queueing…";
+  try {
+    const res = await apiFetch("/api/print-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        quantity: qty,
+        shopify_variant_id: p.shopify_variant_id,
+        shopify_product_id: p.shopify_product_id,
+        product_title: p.product_title,
+        variant_title: p.variant_title,
+        sku: p.sku,
+        barcode: p.barcode,
+        bin_location: p.bin_location,
+        label_name: phistData.serial_label_saved
+          ? phistData.serial_label
+          : null,
+        requested_by: operator,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      msg.textContent = body.detail || "Queueing failed.";
+    } else {
+      msg.textContent = `${qty} label(s) queued ✓ — collect at the printer (Print queue tab tracks them).`;
+    }
+  } catch (err) {
+    msg.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 // Undoable events carry an `undo` descriptor from the server. Today that's

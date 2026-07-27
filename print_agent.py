@@ -140,9 +140,16 @@ def build_zpl(job: dict, encode_rfid: bool,
     if label:
         # Explicit operator-preferred name — set only by the Scan Station
         # serial flow, so Astronomik filters print their item name at the
-        # top. Short names get a bigger face.
-        size = 28 if len(label) <= 26 else 20
-        header = f"^CF0,{size}\n^FO0,6^FB{pw},2,0,C^FD{label[:84]}^FS\n"
+        # top. Font steps DOWN with length: ZPL's ^FB does NOT clip text
+        # past its max line count — it overprints the last line — so the
+        # name must genuinely fit in two lines at the chosen size.
+        if len(label) <= 26:
+            size = 28
+        elif len(label) <= 56:
+            size = 20
+        else:
+            size = 16
+        header = f"^CF0,{size}\n^FO0,4^FB{pw},2,0,C^FD{label[:76]}^FS\n"
     else:
         header = HEADER_STORE.format(pw=pw)
 

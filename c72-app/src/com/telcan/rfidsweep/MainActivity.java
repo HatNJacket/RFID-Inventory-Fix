@@ -415,6 +415,9 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         batchBtnRow = new LinearLayout(this);
+        Button print = smallBtn("PRINT");
+        print.setOnClickListener(x -> queueLabels());
+        batchBtnRow.addView(print, weight());
         Button undo = smallBtn("UNDO");
         undo.setOnClickListener(x -> undoPair());
         batchBtnRow.addView(undo, weight());
@@ -1339,6 +1342,51 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    // Queue the batch's label run straight from the shelf — one label per
+    // scanned box, printed by the warehouse laptop's agent. The server
+    // only allows this once per batch (status guard), so a double-tap
+    // can't print the bin twice; singles are reprinted from Print Queue.
+    private void queueLabels() {
+        if (!inBatch()) return;
+        int total = 0;
+        for (BItem b : bItems) if (b.resolved) total += b.qty;
+        if (total == 0) {
+            beep(SOUND_ERR);
+            status.setText("Nothing to print — scan boxes first.");
+            return;
+        }
+        final int n = total;
+        new AlertDialog.Builder(this)
+                .setTitle("Print labels for bin " + batchBin + "?")
+                .setMessage(n + " label(s) — one per scanned box — will "
+                        + "print at the warehouse printer. Collect them "
+                        + "there, stick them on, then PAIR.")
+                .setPositiveButton("Queue " + n + " label(s)",
+                        (d, w) -> new Thread(() -> {
+                    try {
+                        JSONObject body = new JSONObject().put(
+                                "requested_by",
+                                prefs.getString("device", "C72"));
+                        JSONObject resp = api("POST", "/api/batches/"
+                                + batchId + "/queue-labels", body);
+                        final int queued = resp.optInt("count");
+                        ui.post(() -> {
+                            beep(SOUND_OK);
+                            status.setText(queued + " label(s) queued ✓ — "
+                                    + "printing at the warehouse laptop. "
+                                    + "Switch to PAIR when they're on.");
+                        });
+                    } catch (Exception e) {
+                        ui.post(() -> {
+                            beep(SOUND_ERR);
+                            status.setText(e.getMessage());
+                        });
+                    }
+                }).start())
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void undoPair() {

@@ -2294,6 +2294,13 @@ def product_history(term: str, session: Session = Depends(get_session)):
         image_url = session.scalar(
             select(BinMapEntry.image_url).where(BinMapEntry.sku == sku)
         )
+    # Serialized brands: surface the preferred label name so the panel can
+    # edit it (looking up by SKU — the serial fields on `product` only
+    # populate when the scanned term was itself a serial).
+    sp = session.scalar(
+        select(SerialPrefix).where(SerialPrefix.sku == sku)
+        .order_by(SerialPrefix.prefix)
+    )
     return {
         "product": product,
         "sku": sku,
@@ -2301,6 +2308,12 @@ def product_history(term: str, session: Session = Depends(get_session)):
         "image_url": image_url,
         "tag_count": tag_count,
         "on_hand": _mirror_qty(session, sku),
+        "serial_prefix": sp.prefix if sp else None,
+        "serial_label": (
+            (sp.label_name or _default_serial_label(sp.item_name))
+            if sp else None
+        ),
+        "serial_label_saved": bool(sp and sp.label_name),
         "count": len(events),
         "events": events,
     }

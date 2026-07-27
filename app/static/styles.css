@@ -856,6 +856,30 @@ body {
 }
 .bcell--warn { border-left: 3px solid var(--warn-ink); }
 
+/* Links follow the theme's accent — the browser-default blue is
+   unreadable on the dark background. */
+a { color: var(--accent); }
+
+/* Product panel as a modal (opened from History or Print queue) */
+.phist-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 4vh 12px;
+  overflow: auto;
+}
+.phist-overlay[hidden] { display: none; }
+.phist-modal {
+  width: 100%;
+  max-width: 900px;
+  max-height: 88vh;
+  overflow: auto;
+}
+
 /* status + event chips (print queue, history) */
 .chip-status {
   font-size: 11px;
