@@ -85,9 +85,11 @@ public class MainActivity extends Activity {
     private static final int TAB_BATCH = 0;
     private static final int TAB_STATION = 1;
     private static final int TAB_SWEEP = 2;
-    private static final int TAB_LOCATE = 3;
+    private static final int TAB_FIND = 3;
+    private static final int TAB_LOCATE = 4;
     private static final String[] TAB_NAMES =
-            {"BATCH", "STATION", "SWEEP", "LOCATE"};
+            {"BATCH", "STATION", "SWEEP", "FIND BIN", "LOCATE"};
+    private static final int TAB_COUNT = 5;
 
     // ------------------------------------------------------------ colors ----
     private static final int C_BG = Color.parseColor("#f1f2f4");
@@ -107,7 +109,7 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
 
     // ------------------------------------------------------------ widgets ---
-    private final Button[] tabBtns = new Button[4];
+    private final Button[] tabBtns = new Button[TAB_COUNT];
     private Button gearBtn;
     private FrameLayout drawerScrim;
     private LinearLayout drawerPanel;
@@ -115,7 +117,7 @@ public class MainActivity extends Activity {
     private int activeTab = TAB_BATCH;
     private EditText btInput;
     private TextView status;
-    private final View[] tabViews = new View[4];
+    private final View[] tabViews = new View[TAB_COUNT];
 
     // batch widgets
     private TextView binChip;
@@ -157,6 +159,7 @@ public class MainActivity extends Activity {
         String serialPrefix;
         String imageUrl;
         String variantId;
+        String binLocation;
         boolean resolved;
         int qty;
         Integer expected;
@@ -179,6 +182,8 @@ public class MainActivity extends Activity {
                     : o.optString("image_url");
             b.variantId = o.isNull("shopify_variant_id") ? null
                     : o.optString("shopify_variant_id");
+            b.binLocation = o.isNull("bin_location") ? null
+                    : o.optString("bin_location");
             b.resolved = o.optBoolean("resolved", false);
             b.qty = o.optInt("qty_scanned", 0);
             b.expected = o.isNull("expected_qty") ? null
@@ -218,6 +223,8 @@ public class MainActivity extends Activity {
     // check-item editor state
     private CheckEntry editEntry = null;
     private int editIdx = 0;
+    // wrong-bin warnings dismissed for this batch only
+    private final java.util.Set<Integer> ignoredBins = new java.util.HashSet<>();
 
     private JSONObject stationProduct = null;
     private int stationTags = 0;
@@ -313,6 +320,7 @@ public class MainActivity extends Activity {
         tabViews[TAB_BATCH] = buildBatchView();
         tabViews[TAB_STATION] = buildStationView();
         tabViews[TAB_SWEEP] = buildSweepView();
+        tabViews[TAB_FIND] = buildFindView();
         tabViews[TAB_LOCATE] = buildLocateView();
         for (View v : tabViews) content.addView(v);
         root.addView(content, new LinearLayout.LayoutParams(
@@ -339,7 +347,7 @@ public class MainActivity extends Activity {
         dTitle.setTextColor(C_TEXT);
         dTitle.setPadding(dp(6), 0, 0, dp(10));
         drawerPanel.addView(dTitle);
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < TAB_COUNT; i++) {
             final int tab = i;
             Button b = smallBtn(TAB_NAMES[i]);
             b.setTextSize(15);
@@ -445,7 +453,17 @@ public class MainActivity extends Activity {
         batchBtnRow.addView(next, weight());
         Button undo = smallBtn("UNDO");
         undo.setOnClickListener(x -> undoPair());
+        undo.setOnLongClickListener(x -> {
+            undoAllPairing();
+            return true;
+        });
         batchBtnRow.addView(undo, weight());
+        Button sweepBtn = smallBtn("SWEEP");
+        sweepBtn.setOnClickListener(x -> {
+            if (step == STEP_PAIR) sweepForUnlinked();
+            else undoAllPairing();
+        });
+        batchBtnRow.addView(sweepBtn, weight());
         Button exit = smallBtn("EXIT");
         exit.setOnClickListener(x -> exitBatch(false));
         batchBtnRow.addView(exit, weight());
@@ -540,6 +558,78 @@ public class MainActivity extends Activity {
         v.addView(list, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         return v;
+    }
+
+    // FIND BIN: scan anything, see where it's supposed to live.
+    private TextView findResult;
+    private ImageView findImg;
+
+    private View buildFindView() {
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        TextView t = new TextView(this);
+        t.setText("Where does this live?");
+        t.setTextSize(17);
+        t.setTypeface(null, Typeface.BOLD);
+        t.setTextColor(C_TEXT);
+        v.addView(t);
+        TextView hint = new TextView(this);
+        hint.setText("Scan a barcode or SKU — the bin comes back.");
+        hint.setTextSize(13);
+        hint.setTextColor(C_MUTED);
+        hint.setPadding(0, 0, 0, dp(8));
+        v.addView(hint);
+        findImg = new ImageView(this);
+        findImg.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        findImg.setBackgroundColor(C_BG);
+        v.addView(findImg, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(120)));
+        findResult = new TextView(this);
+        findResult.setTextSize(15);
+        findResult.setTextColor(C_TEXT);
+        findResult.setPadding(0, dp(8), 0, 0);
+        v.addView(findResult, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        return v;
+    }
+
+    private void findLookup(String code) {
+        status.setText("Looking up " + code + "…");
+        new Thread(() -> {
+            try {
+                JSONObject p = api("GET", "/api/products/by-barcode/"
+                        + URLEncoder.encode(code, "UTF-8"), null);
+                final String bin = p.optString("bin_location", "");
+                final String title = p.optString("product_title", "(unknown)");
+                final String variant = p.isNull("variant_title") ? ""
+                        : p.optString("variant_title");
+                final String sku = p.isNull("sku") ? "—" : p.optString("sku");
+                final String img = p.isNull("image_url") ? null
+                        : p.optString("image_url");
+                ui.post(() -> {
+                    boolean has = !bin.isEmpty()
+                            && !bin.equalsIgnoreCase("No bin assigned");
+                    beep(has ? SOUND_OK : SOUND_OTHER);
+                    findResult.setText(
+                            (has ? "BIN  " + bin : "NO BIN ASSIGNED")
+                            + "\n\n" + title
+                            + (variant.isEmpty() ? "" : " (" + variant + ")")
+                            + "\nSKU: " + sku);
+                    findResult.setTextSize(has ? 20 : 16);
+                    loadImage(img, findImg);
+                    status.setText(has ? "Found ✓" : "This product has no "
+                            + "bin set in Shopify.");
+                    btInput.requestFocus();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    findResult.setText("Not found:\n" + e.getMessage());
+                    loadImage(null, findImg);
+                    btInput.requestFocus();
+                });
+            }
+        }).start();
     }
 
     private View buildLocateView() {
@@ -640,6 +730,12 @@ public class MainActivity extends Activity {
     private EditText editNameIn;
     private TextView editQty;
     private TextView editMsg;
+    private LinearLayout editBinRow;
+    private TextView editBinText;
+    private LinearLayout editLabelRow;
+    private Button editLabelMode;
+    private EditText editLabelText;
+    private Button editDropBtn;
 
     private void buildItemEditor(FrameLayout outer) {
         editScrim = new FrameLayout(this);
@@ -705,6 +801,60 @@ public class MainActivity extends Activity {
         editNameRow.addView(saveName, new LinearLayout.LayoutParams(dp(70),
                 LinearLayout.LayoutParams.WRAP_CONTENT));
         mid.addView(editNameRow);
+
+        // Wrong shelf: move it, drop it, or ignore for this batch.
+        editBinRow = new LinearLayout(this);
+        editBinRow.setOrientation(LinearLayout.VERTICAL);
+        editBinText = new TextView(this);
+        editBinText.setTextSize(13);
+        editBinText.setTextColor(Color.parseColor("#8a6116"));
+        editBinRow.addView(editBinText);
+        LinearLayout binBtns = new LinearLayout(this);
+        Button bDrop = smallBtn("Belongs elsewhere");
+        bDrop.setOnClickListener(v -> dropItemFromBatch(false));
+        binBtns.addView(bDrop, weight());
+        Button bMove = smallBtn("Move to " + "this bin");
+        bMove.setOnClickListener(v -> moveItemBinToBatch());
+        binBtns.addView(bMove, weight());
+        Button bIgnore = smallBtn("Ignore");
+        bIgnore.setOnClickListener(v -> {
+            if (editEntry != null) ignoredBins.add(editEntry.item.id);
+            closeItemEditor();
+            status.setText("Ignored for this batch.");
+            fetchReview();
+        });
+        binBtns.addView(bIgnore, weight());
+        editBinRow.addView(binBtns);
+        mid.addView(editBinRow);
+
+        // Label format: Change Name / Change SKU / Change Both.
+        editLabelRow = new LinearLayout(this);
+        editLabelRow.setOrientation(LinearLayout.VERTICAL);
+        TextView lblHint = new TextView(this);
+        lblHint.setText("Label format:");
+        lblHint.setTextSize(12);
+        lblHint.setTextColor(C_MUTED);
+        editLabelRow.addView(lblHint);
+        LinearLayout lblRow = new LinearLayout(this);
+        editLabelMode = smallBtn("Change Name");
+        editLabelMode.setOnClickListener(v -> cycleLabelMode());
+        lblRow.addView(editLabelMode, new LinearLayout.LayoutParams(
+                dp(104), LinearLayout.LayoutParams.WRAP_CONTENT));
+        editLabelText = new EditText(this);
+        editLabelText.setHint("blank = standard label");
+        editLabelText.setTextSize(13);
+        lblRow.addView(editLabelText, weight());
+        Button lblSave = smallBtn("SAVE");
+        lblSave.setOnClickListener(v -> saveLabelFormat());
+        lblRow.addView(lblSave, new LinearLayout.LayoutParams(dp(64),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        editLabelRow.addView(lblRow);
+        mid.addView(editLabelRow);
+
+        editDropBtn = smallBtn("REMOVE THIS SCAN");
+        editDropBtn.setOnClickListener(v -> dropItemFromBatch(true));
+        mid.addView(editDropBtn);
+
         LinearLayout qtyRow = new LinearLayout(this);
         qtyRow.setGravity(Gravity.CENTER_VERTICAL);
         Button minus = smallBtn("−");
@@ -825,8 +975,111 @@ public class MainActivity extends Activity {
         editNameRow.setVisibility(
                 editEntry.flags.contains("unconfirmed-name")
                         ? View.VISIBLE : View.GONE);
+        boolean wrongBin = editEntry.flags.contains("wrong-bin");
+        editBinRow.setVisibility(wrongBin ? View.VISIBLE : View.GONE);
+        if (wrongBin) {
+            editBinText.setText("On this shelf (" + batchBin + ") but the "
+                    + "system has it in " + it.binLocation + ".");
+        }
+        editLabelRow.setVisibility(it.resolved ? View.VISIBLE : View.GONE);
+        editDropBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
         editQty.setText(String.valueOf(it.qty)
                 + (it.expected != null ? " / " + it.expected : ""));
+    }
+
+    private static final String[] LABEL_MODES = {"header", "sku", "both"};
+    private String labelMode = "header";
+
+    private void cycleLabelMode() {
+        int i = 0;
+        for (int j = 0; j < LABEL_MODES.length; j++) {
+            if (LABEL_MODES[j].equals(labelMode)) i = j;
+        }
+        labelMode = LABEL_MODES[(i + 1) % LABEL_MODES.length];
+        editLabelMode.setText("header".equals(labelMode) ? "Change Name"
+                : "sku".equals(labelMode) ? "Change SKU" : "Change Both");
+    }
+
+    private void saveLabelFormat() {
+        if (editEntry == null || editEntry.item.sku == null) return;
+        final String sku = editEntry.item.sku;
+        final String name = editLabelText.getText().toString().trim();
+        final String mode = labelMode;
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("label_name", name)
+                        .put("placement", mode)
+                        .put("updated_by", prefs.getString("device", "C72"));
+                api("PUT", "/api/label-names/"
+                        + URLEncoder.encode(sku, "UTF-8"), body);
+                ui.post(() -> editMsg.setText(name.isEmpty()
+                        ? "Cleared ✓ — standard label."
+                        : "Saved ✓ — prints as the "
+                          + ("both".equals(mode) ? "name and SKU"
+                             : "sku".equals(mode) ? "SKU line" : "name")));
+            } catch (Exception e) {
+                ui.post(() -> editMsg.setText(e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void dropItemFromBatch(boolean unresolved) {
+        if (editEntry == null) return;
+        final int itemId = editEntry.item.id;
+        final String what = unresolved
+                ? "Remove this unresolved scan from the list?\n\nNothing "
+                  + "permanent changes — scanning it again brings it back."
+                : "Drop this product from the batch?\n\nIts boxes stop "
+                  + "counting here and no labels print for it.";
+        new AlertDialog.Builder(this)
+                .setMessage(what)
+                .setPositiveButton("Remove", (d, w) -> new Thread(() -> {
+                    try {
+                        api("DELETE", "/api/batches/" + batchId + "/items/"
+                                + itemId, null);
+                        ui.post(() -> {
+                            beep(SOUND_OK);
+                            closeItemEditor();
+                            status.setText("Removed from the batch.");
+                            reloadBatchAndReview();
+                        });
+                    } catch (Exception e) {
+                        ui.post(() -> editMsg.setText(e.getMessage()));
+                    }
+                }).start())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void moveItemBinToBatch() {
+        if (editEntry == null) return;
+        final BItem it = editEntry.item;
+        new AlertDialog.Builder(this)
+                .setMessage("Update this product's bin in Shopify from "
+                        + it.binLocation + " to " + batchBin + "?")
+                .setPositiveButton("Move it", (d, w) -> new Thread(() -> {
+                    try {
+                        JSONObject body = new JSONObject()
+                                .put("target", it.sku != null ? it.sku
+                                        : it.barcode)
+                                .put("new_bin", batchBin)
+                                .put("changed_by",
+                                        prefs.getString("device", "C72"));
+                        api("POST", "/api/bin-updates", body);
+                        ui.post(() -> {
+                            beep(SOUND_OK);
+                            closeItemEditor();
+                            status.setText("Bin updated to " + batchBin
+                                    + " in Shopify.");
+                            reloadBatchAndReview();
+                        });
+                    } catch (Exception e) {
+                        ui.post(() -> editMsg.setText(e.getMessage()));
+                    }
+                }).start())
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private String flagText(List<String> flags) {
@@ -840,6 +1093,8 @@ public class MainActivity extends Activity {
             else if ("unconfirmed-name".equals(f)) sb.append("serial name "
                     + "not confirmed");
             else if ("unresolved".equals(f)) sb.append("unknown barcode");
+            else if ("wrong-bin".equals(f)) sb.append("saved bin is a "
+                    + "different shelf");
             else sb.append(f);
         }
         return sb.toString();
@@ -939,7 +1194,7 @@ public class MainActivity extends Activity {
             closeDrawer();
             return;
         }
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < TAB_COUNT; i++) {
             tabBtns[i].setVisibility(tabVisible(i) ? View.VISIBLE : View.GONE);
             tabBtns[i].setBackgroundColor(i == activeTab ? C_BLUE : C_CHIP);
             tabBtns[i].setTextColor(i == activeTab ? Color.WHITE : C_TEXT);
@@ -958,10 +1213,11 @@ public class MainActivity extends Activity {
 
     private void selectTab(int tab) {
         activeTab = tab;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < TAB_COUNT; i++) {
             tabViews[i].setVisibility(i == tab ? View.VISIBLE : View.GONE);
         }
-        boolean needsInput = tab == TAB_BATCH || tab == TAB_STATION;
+        boolean needsInput = tab == TAB_BATCH || tab == TAB_STATION
+                || tab == TAB_FIND;
         btInput.setVisibility(needsInput ? View.VISIBLE : View.GONE);
         tabTitle.setVisibility(needsInput ? View.GONE : View.VISIBLE);
         tabTitle.setText(TAB_NAMES[tab]);
@@ -983,7 +1239,8 @@ public class MainActivity extends Activity {
     private boolean tabVisible(int tab) {
         if (tab == TAB_BATCH) return true;
         String key = tab == TAB_STATION ? "tab_station"
-                : tab == TAB_SWEEP ? "tab_sweep" : "tab_locate";
+                : tab == TAB_SWEEP ? "tab_sweep"
+                : tab == TAB_FIND ? "tab_find" : "tab_locate";
         return prefs.getBoolean(key, true);
     }
 
@@ -1003,9 +1260,11 @@ public class MainActivity extends Activity {
             } else batchScan(code);
         } else if (activeTab == TAB_STATION) {
             stationLookup(code);
+        } else if (activeTab == TAB_FIND) {
+            findLookup(code);
         } else {
-            status.setText("Scanned " + code + " — switch to BATCH or "
-                    + "STATION to use barcodes.");
+            status.setText("Scanned " + code + " — switch to BATCH, "
+                    + "STATION or FIND BIN to use barcodes.");
         }
     }
 
@@ -1277,10 +1536,212 @@ public class MainActivity extends Activity {
             fetchReview();
             applyBatchUi();
         } else if (step == STEP_CHECK) {
-            queueLabels(); // advances to PAIR on success / already-queued
+            // Print, or jump straight to pairing when the labels already
+            // exist (re-pairing a shelf shouldn't reprint 34 stickers).
+            new AlertDialog.Builder(this)
+                    .setTitle("Labels")
+                    .setMessage("Print labels for this bin, or skip "
+                            + "printing and go straight to pairing?")
+                    .setPositiveButton("Print labels",
+                            (d, w) -> queueLabels())
+                    .setNeutralButton("Skip → pair", (d, w) -> skipPrint())
+                    .setNegativeButton("Cancel", null)
+                    .show();
         } else {
             finishBatch();
         }
+    }
+
+    private void skipPrint() {
+        new Thread(() -> {
+            try {
+                api("POST", "/api/batches/" + batchId + "/skip-print",
+                        new JSONObject());
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    step = STEP_PAIR;
+                    applyBatchUi();
+                    status.setText("Straight to pairing — no labels queued.");
+                });
+            } catch (Exception e) {
+                ui.post(() -> status.setText(e.getMessage()));
+            }
+        }).start();
+    }
+
+    // Release every tie this batch made so a shelf can be re-paired without
+    // reprinting anything.
+    private void undoAllPairing() {
+        int paired = 0;
+        for (BItem b : bItems) paired += b.paired;
+        if (paired == 0) {
+            status.setText("Nothing paired in this batch yet.");
+            return;
+        }
+        final int n = paired;
+        new AlertDialog.Builder(this)
+                .setTitle("Undo ALL pairing?")
+                .setMessage("Release all " + n + " tag(s) tied in this "
+                        + "batch?\n\nThe printed labels stay valid — you "
+                        + "just re-scan them onto their products. Nothing "
+                        + "in Shopify changes.")
+                .setPositiveButton("Release " + n, (d, w) -> new Thread(() -> {
+                    try {
+                        JSONObject resp = api("POST", "/api/batches/"
+                                + batchId + "/unpair-all", new JSONObject());
+                        final int removed = resp.optInt("removed");
+                        ui.post(() -> {
+                            beep(SOUND_OK);
+                            pairActive = null;
+                            pairHistory.clear();
+                            status.setText(removed + " tie(s) released — "
+                                    + "pair the shelf again.");
+                            reloadBatchOnly();
+                        });
+                    } catch (Exception e) {
+                        ui.post(() -> status.setText(e.getMessage()));
+                    }
+                }).start())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void reloadBatchOnly() {
+        new Thread(() -> {
+            try {
+                JSONObject resp = api("GET", "/api/batches/" + batchId, null);
+                JSONArray items = resp.getJSONArray("items");
+                final List<BItem> loaded = new ArrayList<>();
+                for (int i = 0; i < items.length(); i++) {
+                    loaded.add(BItem.from(items.getJSONObject(i)));
+                }
+                ui.post(() -> {
+                    bItems.clear();
+                    bItems.addAll(loaded);
+                    previewItem = null;
+                    refreshBatchList();
+                    updateBatchCard();
+                });
+            } catch (Exception e) {
+                ui.post(() -> status.setText(e.getMessage()));
+            }
+        }).start();
+    }
+
+    // The unreadable-label rescue: sweep the shelf, find tags nothing owns,
+    // and tie them to the product you're pairing.
+    private void sweepForUnlinked() {
+        if (pairActive == null) {
+            beep(SOUND_ERR);
+            status.setText("Scan the product's barcode first, then sweep.");
+            return;
+        }
+        if (!readerReady) {
+            status.setText("RFID reader not ready.");
+            return;
+        }
+        final BItem target = pairActive;
+        status.setText("Sweeping for unlinked tags… hold near the boxes");
+        synchronized (tags) { tags.clear(); }
+        if (!reader.startInventoryTag()) {
+            status.setText("Could not start the sweep.");
+            return;
+        }
+        scanning = true;
+        ui.postDelayed(() -> {
+            try {
+                reader.stopInventory();
+            } catch (Exception ignored) {
+            }
+            scanning = false;
+            final List<String> swept = new ArrayList<>();
+            synchronized (tags) { swept.addAll(tags.keySet()); }
+            if (swept.isEmpty()) {
+                beep(SOUND_ERR);
+                status.setText("Swept nothing — get closer and try again.");
+                return;
+            }
+            status.setText("Checking " + swept.size() + " tag(s)…");
+            new Thread(() -> {
+                try {
+                    JSONObject body = new JSONObject()
+                            .put("epcs", new JSONArray(swept));
+                    JSONObject resp = api("POST", "/api/batches/" + batchId
+                            + "/unlinked", body);
+                    JSONArray un = resp.getJSONArray("unlinked");
+                    final List<String> orphans = new ArrayList<>();
+                    for (int i = 0; i < un.length(); i++) {
+                        orphans.add(un.getString(i));
+                    }
+                    ui.post(() -> showUnlinkedDialog(orphans, target));
+                } catch (Exception e) {
+                    ui.post(() -> status.setText(e.getMessage()));
+                }
+            }).start();
+        }, 4000);
+    }
+
+    private void showUnlinkedDialog(List<String> orphans, BItem target) {
+        if (orphans.isEmpty()) {
+            beep(SOUND_OTHER);
+            status.setText("Every tag swept is already linked — nothing "
+                    + "orphaned here.");
+            return;
+        }
+        final boolean[] picked = new boolean[orphans.size()];
+        String[] labels = new String[orphans.size()];
+        for (int i = 0; i < orphans.size(); i++) {
+            String e = orphans.get(i);
+            labels[i] = "…" + e.substring(Math.max(0, e.length() - 8));
+            picked[i] = orphans.size() == 1; // lone orphan: pre-ticked
+        }
+        beep(SOUND_OK);
+        new AlertDialog.Builder(this)
+                .setTitle(orphans.size() + " unlinked tag(s) nearby")
+                .setMultiChoiceItems(labels, picked,
+                        (d, which, isChecked) -> picked[which] = isChecked)
+                .setPositiveButton("Assign ticked to " + target.name(),
+                        (d, w) -> {
+                            List<String> chosen = new ArrayList<>();
+                            for (int i = 0; i < picked.length; i++) {
+                                if (picked[i]) chosen.add(orphans.get(i));
+                            }
+                            assignEpcs(chosen, target);
+                        })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void assignEpcs(List<String> epcs, BItem target) {
+        if (epcs.isEmpty()) return;
+        new Thread(() -> {
+            int ok = 0;
+            String err = null;
+            for (String epc : epcs) {
+                try {
+                    JSONObject body = new JSONObject()
+                            .put("epc", epc)
+                            .put("item_id", target.id)
+                            .put("created_by",
+                                    prefs.getString("device", "C72"));
+                    api("POST", "/api/batches/" + batchId + "/pair", body);
+                    pairHistory.push(new String[]{epc,
+                            String.valueOf(target.id)});
+                    ok++;
+                } catch (Exception e) {
+                    err = e.getMessage();
+                }
+            }
+            final int done = ok;
+            final String problem = err;
+            ui.post(() -> {
+                beep(done > 0 ? SOUND_OK : SOUND_ERR);
+                status.setText(done + " tag(s) assigned to "
+                        + target.name()
+                        + (problem != null ? " · " + problem : ""));
+                reloadBatchOnly();
+            });
+        }).start();
     }
 
     private void fetchReview() {
@@ -1300,8 +1761,15 @@ public class MainActivity extends Activity {
                     e.item = BItem.from(o.getJSONObject("item"));
                     JSONArray fl = o.getJSONArray("flags");
                     for (int j = 0; j < fl.length(); j++) {
-                        e.flags.add(fl.getString(j));
+                        String flag = fl.getString(j);
+                        // "Ignore for this batch" hides only that warning.
+                        if ("wrong-bin".equals(flag)
+                                && ignoredBins.contains(e.item.id)) {
+                            continue;
+                        }
+                        e.flags.add(flag);
                     }
+                    if (e.flags.isEmpty()) continue;
                     JSONArray cs = o.getJSONArray("candidates");
                     for (int j = 0; j < cs.length(); j++) {
                         e.candidates.add(cs.getJSONObject(j));
@@ -2272,6 +2740,10 @@ public class MainActivity extends Activity {
         cbSweep.setText("Sweep");
         cbSweep.setChecked(prefs.getBoolean("tab_sweep", true));
         box.addView(cbSweep);
+        final CheckBox cbFind = new CheckBox(this);
+        cbFind.setText("Find bin");
+        cbFind.setChecked(prefs.getBoolean("tab_find", true));
+        box.addView(cbFind);
         final CheckBox cbLocate = new CheckBox(this);
         cbLocate.setText("Locate (WIP)");
         cbLocate.setChecked(prefs.getBoolean("tab_locate", true));
@@ -2300,6 +2772,7 @@ public class MainActivity extends Activity {
                                     deviceIn.getText().toString().trim())
                             .putBoolean("tab_station", cbStation.isChecked())
                             .putBoolean("tab_sweep", cbSweep.isChecked())
+                            .putBoolean("tab_find", cbFind.isChecked())
                             .putBoolean("tab_locate", cbLocate.isChecked())
                             .apply();
                     if (!tabVisible(activeTab)) activeTab = TAB_BATCH;
