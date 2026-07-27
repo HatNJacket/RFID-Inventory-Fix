@@ -72,8 +72,13 @@ next bin.
 
 ## 🔶 In progress / blocked
 
-- **C72 barcode field test** — BLOCKED on device charging. One trigger
-  pull in BARCODE mode decides the input path for everything below.
+- **C72 barcode input = Bluetooth scanner** (2026-07-26): the built-in
+  imager test failed (no aimer light, instant DECODE_FAILURE — the unit
+  appears to lack the paid imager option). App v1.4 adds a BT-scanner
+  capture field in barcode mode (scanner pairs to the C72 as a keyboard).
+  ACTION (Steve): pair the barcode scanner to the C72 and test; report
+  the engine name v1.3+ shows in parentheses to fully close the imager
+  question.
 - **Print agent update on warehouse laptop** — ACTION (Steve): copy the
   repo's updated print_agent.py to the laptop and restart the agent
   (removes the old auto-Astronomik header rule).
