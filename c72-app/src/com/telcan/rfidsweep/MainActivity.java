@@ -31,8 +31,10 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
+import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -106,6 +108,9 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------ widgets ---
     private final Button[] tabBtns = new Button[4];
+    private Button collapseBtn;
+    private Button gearBtn;
+    private boolean tabsCollapsed = false;
     private int activeTab = TAB_BATCH;
     private EditText btInput;
     private TextView status;
@@ -122,7 +127,8 @@ public class MainActivity extends Activity {
     private TextView batchSku;
     private TextView batchTracker;
     private ListView batchListView;
-    private ArrayAdapter<String> batchAdapter;
+    private BatchAdapter batchAdapter;
+    private final List<BItem> displayItems = new ArrayList<>();
     private LinearLayout batchBtnRow;
 
     // station widgets
@@ -146,6 +152,7 @@ public class MainActivity extends Activity {
         String variant;
         String sku;
         String barcode;
+        String scannedCode;
         String serialPrefix;
         String imageUrl;
         boolean resolved;
@@ -162,6 +169,8 @@ public class MainActivity extends Activity {
                     : o.optString("variant_title");
             b.sku = o.isNull("sku") ? null : o.optString("sku");
             b.barcode = o.isNull("barcode") ? null : o.optString("barcode");
+            b.scannedCode = o.isNull("scanned_code") ? null
+                    : o.optString("scanned_code");
             b.serialPrefix = o.isNull("serial_prefix") ? null
                     : o.optString("serial_prefix");
             b.imageUrl = o.isNull("image_url") ? null
@@ -214,8 +223,16 @@ public class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
         root.setBackgroundColor(C_BG);
 
-        // ---- tab row -------------------------------------------------------
+        // ---- tab row (collapsible like a sidebar) --------------------------
         LinearLayout tabRow = new LinearLayout(this);
+        collapseBtn = smallBtn("≡");
+        collapseBtn.setOnClickListener(v -> {
+            tabsCollapsed = !tabsCollapsed;
+            prefs.edit().putBoolean("tabs_collapsed", tabsCollapsed).apply();
+            applyTabBar();
+        });
+        tabRow.addView(collapseBtn, new LinearLayout.LayoutParams(dp(44),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
         for (int i = 0; i < 4; i++) {
             final int tab = i;
             Button b = smallBtn(TAB_NAMES[i]);
@@ -223,11 +240,12 @@ public class MainActivity extends Activity {
             tabBtns[i] = b;
             tabRow.addView(b, weight());
         }
-        Button gear = smallBtn("⚙");
-        gear.setOnClickListener(v -> showSettings());
-        tabRow.addView(gear, new LinearLayout.LayoutParams(dp(40),
+        gearBtn = smallBtn("⚙");
+        gearBtn.setOnClickListener(v -> showSettings());
+        tabRow.addView(gearBtn, new LinearLayout.LayoutParams(dp(40),
                 LinearLayout.LayoutParams.WRAP_CONTENT));
         root.addView(tabRow);
+        tabsCollapsed = prefs.getBoolean("tabs_collapsed", false);
 
         // ---- shared scanner input + status --------------------------------
         btInput = new EditText(this);
@@ -336,9 +354,10 @@ public class MainActivity extends Activity {
         v.addView(batchCard);
 
         batchListView = new ListView(this);
-        batchAdapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_list_item_1);
+        batchAdapter = new BatchAdapter();
         batchListView.setAdapter(batchAdapter);
+        batchListView.setDivider(null);
+        batchListView.setDividerHeight(0);
         v.addView(batchListView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
@@ -547,13 +566,23 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------- tabs -----
+    // The ≡ button collapses the tab bar to a single square so the working
+    // list gets the room (state remembered across launches).
+    private void applyTabBar() {
+        collapseBtn.setText(tabsCollapsed ? "»" : "≡");
+        for (int i = 0; i < 4; i++) {
+            boolean shown = !tabsCollapsed && tabVisible(i);
+            tabBtns[i].setVisibility(shown ? View.VISIBLE : View.GONE);
+            tabBtns[i].setBackgroundColor(i == activeTab ? C_BLUE : C_CHIP);
+            tabBtns[i].setTextColor(i == activeTab ? Color.WHITE : C_TEXT);
+        }
+        gearBtn.setVisibility(tabsCollapsed ? View.GONE : View.VISIBLE);
+    }
+
     private void selectTab(int tab) {
         activeTab = tab;
+        applyTabBar();
         for (int i = 0; i < 4; i++) {
-            boolean shown = tabVisible(i);
-            tabBtns[i].setVisibility(shown ? View.VISIBLE : View.GONE);
-            tabBtns[i].setBackgroundColor(i == tab ? C_BLUE : C_CHIP);
-            tabBtns[i].setTextColor(i == tab ? Color.WHITE : C_TEXT);
             tabViews[i].setVisibility(i == tab ? View.VISIBLE : View.GONE);
         }
         boolean needsInput = tab == TAB_BATCH || tab == TAB_STATION;
@@ -943,10 +972,8 @@ public class MainActivity extends Activity {
         }
         batchCard.setVisibility(View.VISIBLE);
         batchName.setText(it.name());
-        batchSku.setText((it.sku == null ? "no SKU" : it.sku)
-                + (pairPhase ? "  ·  " + it.paired + " tag(s)" : ""));
-        batchTracker.setText(it.expected != null
-                ? it.qty + "/" + it.expected : String.valueOf(it.qty));
+        batchSku.setText(it.sku != null ? "SKU: " + it.sku : "no SKU");
+        batchTracker.setText(trackerText(it));
         loadImage(it.imageUrl, batchImg);
     }
 
@@ -956,33 +983,129 @@ public class MainActivity extends Activity {
     }
 
     private void refreshBatchList() {
-        int boxes = 0, started = 0, expected = 0, paired = 0;
-        List<String> rows = new ArrayList<>();
-        List<BItem> sorted = new ArrayList<>();
-        for (BItem b : bItems) if (b.qty > 0 || b.paired > 0) sorted.add(b);
-        for (BItem b : bItems) if (b.qty == 0 && b.paired == 0) sorted.add(b);
-        for (BItem b : bItems) {
-            boxes += b.qty;
-            paired += b.paired;
-            if (b.expected != null) {
-                expected++;
-                if (b.qty > 0) started++;
+        displayItems.clear();
+        for (BItem b : bItems) if (b.qty > 0 || b.paired > 0) displayItems.add(b);
+        for (BItem b : bItems) if (b.qty == 0 && b.paired == 0) displayItems.add(b);
+        batchAdapter.notifyDataSetChanged();
+    }
+
+    // Tracker = two numbers only: scanned/expected while collecting,
+    // paired/scanned while pairing.
+    private String trackerText(BItem b) {
+        if (pairPhase) return b.paired + "/" + Math.max(b.qty, b.paired);
+        return b.expected != null ? b.qty + "/" + b.expected
+                : String.valueOf(b.qty);
+    }
+
+    // Inventory cells modeled on the EasyScan-style card: image, bold name
+    // with the room, labeled SKU/Barcode lines, tracker top-right.
+    private class BatchAdapter extends BaseAdapter {
+        @Override
+        public int getCount() {
+            return displayItems.size();
+        }
+
+        @Override
+        public BItem getItem(int i) {
+            return displayItems.get(i);
+        }
+
+        @Override
+        public long getItemId(int i) {
+            return displayItems.get(i).id;
+        }
+
+        @Override
+        public View getView(int pos, View convert, ViewGroup parent) {
+            CellHolder h;
+            if (convert == null) {
+                h = new CellHolder();
+                LinearLayout wrap = new LinearLayout(MainActivity.this);
+                wrap.setOrientation(LinearLayout.VERTICAL);
+                wrap.setPadding(0, 0, 0, dp(6));
+
+                FrameLayout card = new FrameLayout(MainActivity.this);
+                card.setPadding(dp(8), dp(8), dp(8), dp(8));
+                h.card = card;
+
+                LinearLayout row = new LinearLayout(MainActivity.this);
+                ImageView iv = new ImageView(MainActivity.this);
+                iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                iv.setBackgroundColor(C_BG);
+                LinearLayout.LayoutParams il =
+                        new LinearLayout.LayoutParams(dp(56), dp(56));
+                il.rightMargin = dp(8);
+                row.addView(iv, il);
+                h.img = iv;
+
+                LinearLayout col = new LinearLayout(MainActivity.this);
+                col.setOrientation(LinearLayout.VERTICAL);
+                TextView nm = new TextView(MainActivity.this);
+                nm.setTextSize(15);
+                nm.setTypeface(null, Typeface.BOLD);
+                nm.setTextColor(C_TEXT);
+                nm.setPadding(0, 0, dp(50), 0); // clear of the tracker
+                col.addView(nm);
+                h.name = nm;
+                TextView skuLine = new TextView(MainActivity.this);
+                skuLine.setTextSize(13);
+                skuLine.setTextColor(C_MUTED);
+                col.addView(skuLine);
+                h.sku = skuLine;
+                TextView bcLine = new TextView(MainActivity.this);
+                bcLine.setTextSize(13);
+                bcLine.setTextColor(C_MUTED);
+                col.addView(bcLine);
+                h.bc = bcLine;
+                row.addView(col, weight());
+                card.addView(row);
+
+                TextView tr = new TextView(MainActivity.this);
+                tr.setTextSize(17);
+                tr.setTypeface(null, Typeface.BOLD);
+                tr.setTextColor(C_BLUE);
+                FrameLayout.LayoutParams tl = new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        Gravity.TOP | Gravity.END);
+                tl.topMargin = dp(4);
+                tl.rightMargin = dp(6);
+                card.addView(tr, tl);
+                h.tracker = tr;
+
+                wrap.addView(card);
+                convert = wrap;
+                convert.setTag(h);
+            } else {
+                h = (CellHolder) convert.getTag();
             }
+
+            BItem b = getItem(pos);
+            h.card.setBackgroundColor(b == pairActive
+                    ? Color.parseColor("#dbe9ff") : Color.WHITE);
+            h.name.setText(b.name());
+            h.sku.setText(b.sku != null ? "SKU: " + b.sku
+                    : (b.resolved ? "no SKU" : "⚠ unknown barcode"));
+            String bc = b.barcode != null ? b.barcode : b.scannedCode;
+            if (bc != null && !bc.isEmpty()) {
+                h.bc.setVisibility(View.VISIBLE);
+                h.bc.setText("Barcode: " + bc);
+            } else {
+                h.bc.setVisibility(View.GONE);
+            }
+            h.tracker.setText(trackerText(b));
+            loadImage(b.imageUrl, h.img);
+            return convert;
         }
-        for (BItem b : sorted) {
-            String line2 = (b.sku == null ? "" : b.sku + "   ")
-                    + b.qty + (b.expected != null ? "/" + b.expected : "")
-                    + " boxes · " + b.paired + " tags"
-                    + (b == pairActive ? "   ◀ PAIRING" : "")
-                    + (b.resolved ? "" : "   ⚠ unknown");
-            rows.add(b.name() + "\n" + line2);
-        }
-        if (inBatch()) {
-            binChip.setText("Bin " + batchBin + "  ·  " + boxes + " boxes"
-                    + (expected > 0 ? " · " + started + "/" + expected : ""));
-        }
-        batchAdapter.clear();
-        batchAdapter.addAll(rows);
+    }
+
+    private static class CellHolder {
+        FrameLayout card;
+        ImageView img;
+        TextView name;
+        TextView sku;
+        TextView bc;
+        TextView tracker;
     }
 
     private void batchScan(String code) {
@@ -1306,7 +1429,7 @@ public class MainActivity extends Activity {
                     }
                     stationName.setText(name);
                     stationSku.setText((p.isNull("sku") ? "no SKU"
-                            : p.optString("sku"))
+                            : "SKU: " + p.optString("sku"))
                             + "  ·  bin " + p.optString("bin_location", "—"));
                     stationTracker.setText(String.valueOf(tagsOnFile));
                     loadImage(p.isNull("image_url") ? null
