@@ -251,6 +251,31 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // A crash while building the UI used to mean an app that simply
+        // wouldn't open, with nothing to go on. Show the fault instead.
+        try {
+            buildUi(savedInstanceState);
+        } catch (Throwable t) {
+            showStartupFailure(t);
+        }
+    }
+
+    private void showStartupFailure(Throwable t) {
+        StringBuilder sb = new StringBuilder("TC RFID Sweep failed to "
+                + "start.\n\n").append(t.toString()).append("\n");
+        StackTraceElement[] trace = t.getStackTrace();
+        for (int i = 0; i < Math.min(6, trace.length); i++) {
+            sb.append("\n  at ").append(trace[i].toString());
+        }
+        TextView view = new TextView(this);
+        view.setText(sb.toString());
+        view.setTextSize(12);
+        view.setPadding(dp(12), dp(12), dp(12), dp(12));
+        view.setTextIsSelectable(true);
+        setContentView(view);
+    }
+
+    private void buildUi(Bundle savedInstanceState) {
         prefs = getSharedPreferences("sweep", MODE_PRIVATE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         // Alarm stream: audible regardless of the device's media volume —
@@ -461,9 +486,9 @@ public class MainActivity extends Activity {
         Button back = smallBtn("← BACK");
         back.setOnClickListener(x -> stepBack());
         batchBtnRow.addView(back, weight());
-        Button next = smallBtn("NEXT →");
-        next.setOnClickListener(x -> stepNext());
-        batchBtnRow.addView(next, weight());
+        btnNext = smallBtn("NEXT →");
+        btnNext.setOnClickListener(x -> stepNext());
+        batchBtnRow.addView(btnNext, weight());
         btnUndo = smallBtn("UNDO");
         btnUndo.setOnClickListener(x -> {
             if (step == STEP_VERIFY) clearVerifySweep();
