@@ -1556,35 +1556,52 @@ async function loadBinBoard() {
   }
 }
 
+let showHiddenBins = false;
+
 function renderBinBoard() {
   const list = document.getElementById("binboard-list");
   const countEl = document.getElementById("binboard-count");
+  const hideBtn = document.getElementById("binboard-showhidden");
   if (!binBoard) return;
   const q = document
     .getElementById("binboard-filter")
     .value.trim()
     .toLowerCase();
-  const rows = q
-    ? binBoard.todo.filter((b) => b.bin.toLowerCase().includes(q))
-    : binBoard.todo;
+  const rows = binBoard.todo.filter(
+    (b) =>
+      (showHiddenBins || !b.hidden) &&
+      (!q || b.bin.toLowerCase().includes(q))
+  );
   countEl.textContent =
     `(${binBoard.todo_count} of ${binBoard.total_bins} left · ` +
-    `${binBoard.done_bins} done)`;
+    `${binBoard.done_bins} done` +
+    `${binBoard.hidden_count ? ` · ${binBoard.hidden_count} hidden` : ""})`;
+  hideBtn.textContent = showHiddenBins
+    ? "Hide ignored bins"
+    : `Show hidden${binBoard.hidden_count ? ` (${binBoard.hidden_count})` : ""}`;
   list.innerHTML = "";
   if (!rows.length) {
     list.innerHTML = `<li class="recent__empty">${
-      q ? "No bins match that." : "Every bin has been done ✓"
+      q
+        ? "No bins match that."
+        : binBoard.hidden_count && !showHiddenBins
+          ? `Nothing left to do — ${binBoard.hidden_count} bin(s) are hidden.`
+          : "Every bin has been done ✓"
     }</li>`;
     return;
   }
   rows.forEach((b) => {
     const li = document.createElement("li");
     if (b.open_batch_id) li.classList.add("binlist--open");
+    if (b.hidden) li.classList.add("binlist--hidden");
     li.innerHTML =
+      `<input class="binlist__tick" type="checkbox" title="Hide this bin from the list"${
+        b.hidden ? " checked" : ""
+      } />` +
       `<span class="binlist__name">${escapeHtml(b.bin)}</span>` +
       `<span class="binlist__count">${b.products} product(s)${
         b.open_batch_id ? " · in progress" : ""
-      }</span>` +
+      }${b.hidden ? " · hidden" : ""}</span>` +
       `<button class="binlist__go" type="button">${
         b.open_batch_id ? "Resume" : "Start batch"
       }</button>`;
@@ -1601,9 +1618,34 @@ function renderBinBoard() {
         startBatch();
       }
     });
+    li.querySelector(".binlist__tick").addEventListener("change", async (ev) => {
+      const hidden = ev.target.checked;
+      try {
+        await apiJson(`/api/bins/${encodeURIComponent(b.bin)}/hidden`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            hidden,
+            hidden_by: operatorEl.value || null,
+          }),
+        });
+        b.hidden = hidden;
+        binBoard.todo_count += hidden ? -1 : 1;
+        binBoard.hidden_count += hidden ? 1 : -1;
+        renderBinBoard();
+      } catch (err) {
+        ev.target.checked = !hidden;
+        setBatchResult(err.message, "err");
+      }
+    });
     list.append(li);
   });
 }
+
+document.getElementById("binboard-showhidden").addEventListener("click", () => {
+  showHiddenBins = !showHiddenBins;
+  renderBinBoard();
+});
 
 let binFilterTimer;
 document.getElementById("binboard-filter").addEventListener("input", () => {

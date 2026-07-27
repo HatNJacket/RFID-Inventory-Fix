@@ -39,6 +39,7 @@ from app.models import (
     BatchItem,
     BinMapEntry,
     EpcCapture,
+    HiddenBin,
     LabelName,
     PrintJob,
     ReviewTask,
@@ -1471,6 +1472,11 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
         ):
             totals[r.batch_id] = r
 
+    hidden = {
+        (h.bin or "").strip().lower()
+        for h in session.scalars(select(HiddenBin))
+    }
+
     todo = []
     done_bins = 0
     for name, products in counts:
@@ -1485,6 +1491,7 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
             "bin": name,
             "products": products,
             "open_batch_id": openb.id if openb else None,
+            "hidden": key in hidden,
         })
     # Bins already in progress first, then the biggest jobs.
     todo.sort(key=lambda b: (b["open_batch_id"] is None, -b["products"],
@@ -1493,7 +1500,8 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
     return {
         "total_bins": len(counts),
         "done_bins": done_bins,
-        "todo_count": len(todo),
+        "todo_count": sum(1 for b in todo if not b["hidden"]),
+        "hidden_count": sum(1 for b in todo if b["hidden"]),
         "todo": todo,
         "recent": [
             {
@@ -1510,6 +1518,34 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
             for b in recent_batches
         ],
     }
+
+
+class HideBinIn(BaseModel):
+    hidden: bool = True
+    hidden_by: str | None = Field(default=None, max_length=100)
+
+
+@app.put(
+    "/api/bins/{bin_name}/hidden", dependencies=[Depends(require_user)]
+)
+def set_bin_hidden(
+    bin_name: str,
+    payload: HideBinIn,
+    session: Session = Depends(get_session),
+):
+    """Tick a bin off the work list (or put it back). Local only — the bin
+    and its products are untouched, it just stops nagging."""
+    name = bin_name.strip()
+    if not name:
+        raise HTTPException(422, "Bin required.")
+    row = session.get(HiddenBin, name)
+    if payload.hidden:
+        if row is None:
+            session.add(HiddenBin(bin=name, hidden_by=payload.hidden_by))
+    elif row is not None:
+        session.delete(row)
+    session.commit()
+    return {"bin": name, "hidden": payload.hidden}
 
 
 @app.get(

@@ -958,6 +958,9 @@ a { color: var(--accent); }
 }
 .binlist__go:hover { border-color: var(--accent); color: var(--accent); }
 .binlist li.binlist--open { background: var(--accent-soft); }
+.binlist li.binlist--hidden { opacity: 0.55; }
+.binlist__tick { flex: none; cursor: pointer; }
+#binboard-showhidden { padding: 4px 10px; font-size: 12px; }
 .binlist--recent li { display: block; }
 .binlist--recent .binlist__name { cursor: default; }
 .binlist--recent .binlist__name:hover { color: inherit; }

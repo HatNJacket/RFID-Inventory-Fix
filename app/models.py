@@ -430,6 +430,20 @@ class LabelName(Base):
     )
 
 
+class HiddenBin(Base):
+    """Bins the operator ticked off the work list — empty shelves, bins
+    someone else handles, anything not worth tagging. Hidden, never
+    deleted: the board can show them again on demand."""
+
+    __tablename__ = "rfid_hidden_bins"
+
+    bin: Mapped[str] = mapped_column(String(100), primary_key=True)
+    hidden_by: Mapped[str | None] = mapped_column(String(100))
+    hidden_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class EpcCapture(Base):
     """One RFID sweep sent from the C72 companion app: the operator scans a
     shelf freely (everything held on the device), then hits Send once —
