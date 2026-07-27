@@ -234,10 +234,6 @@ public class MainActivity extends Activity {
     // held-trigger sweep (unreadable-label rescue)
     private boolean sweepArmed = false;
     private volatile boolean sweepRunning = false;
-    // VERIFY step: detected-tag counts per batch item, from the last check
-    private final java.util.HashMap<Integer, Integer> verifyDetected =
-            new java.util.HashMap<>();
-    private boolean verifyChecked = false;
 
     private JSONObject stationProduct = null;
     private int stationTags = 0;
@@ -502,7 +498,7 @@ public class MainActivity extends Activity {
         btnSweep = smallBtn("SWEEP");
         btnSweep.setOnClickListener(x -> {
             if (step == STEP_PAIR) armSweep();
-            else if (step == STEP_VERIFY) verifyCheckBin();
+            else if (step == STEP_VERIFY) sendVerifySweep();
             else undoAllPairing();
         });
         batchBtnRow.addView(btnSweep, weight());
@@ -1756,23 +1752,22 @@ public class MainActivity extends Activity {
             scanning = false;
         }
         synchronized (tags) { tags.clear(); }
-        verifyDetected.clear();
-        verifyChecked = false;
         pairActive = null;
         previewItem = null;
     }
 
     private void clearVerifySweep() {
         synchronized (tags) { tags.clear(); }
-        verifyDetected.clear();
-        verifyChecked = false;
         beep(SOUND_OTHER);
         status.setText("Sweep cleared — pull the trigger to scan the bin "
                 + "again.");
         refreshBatchList();
     }
 
-    private void verifyCheckBin() {
+    // Send the bin sweep to the server. The web terminal watching this
+    // batch picks it up on its own and shows the verification there — the
+    // reading and deciding happen on a screen big enough for it.
+    private void sendVerifySweep() {
         if (scanning) {
             try {
                 reader.stopInventory();
@@ -1788,58 +1783,28 @@ public class MainActivity extends Activity {
                     + "the bin first.");
             return;
         }
-        status.setText("Checking " + epcs.size() + " tag(s) against the "
-                + "bin…");
+        status.setText("Sending " + epcs.size() + " tag(s)…");
         new Thread(() -> {
             try {
                 JSONObject body = new JSONObject()
+                        .put("device", prefs.getString("device", "C72"))
+                        .put("batch_id", batchId)
+                        .put("note", "Bin " + batchBin + " verify sweep")
                         .put("epcs", new JSONArray(epcs));
-                JSONObject resp = api("POST", "/api/batches/" + batchId
-                        + "/verify", body);
-                JSONArray items = resp.getJSONArray("items");
-                final java.util.HashMap<Integer, Integer> found =
-                        new java.util.HashMap<>();
-                int short_ = 0;
-                for (int i = 0; i < items.length(); i++) {
-                    JSONObject r = items.getJSONObject(i);
-                    found.put(r.optInt("item_id"), r.optInt("detected"));
-                    if (r.optInt("detected") < r.optInt("paired_count")) {
-                        short_++;
-                    }
-                }
-                final int missing = short_;
-                final int foreign = resp.getJSONArray("foreign").length();
-                final int unknown = resp.getJSONArray("unknown_epcs").length();
-                final boolean ok = resp.optBoolean("ok");
+                JSONObject resp = api("POST", "/api/epc-captures", body);
+                final int id = resp.optInt("id");
                 ui.post(() -> {
-                    verifyDetected.clear();
-                    verifyDetected.putAll(found);
-                    verifyChecked = true;
-                    beep(ok ? SOUND_OK : SOUND_ERR);
-                    StringBuilder sb = new StringBuilder();
-                    sb.append(ok ? "Bin verified ✓ — every paired tag was "
-                              + "detected." : "⚠ ");
-                    if (!ok) {
-                        if (missing > 0) {
-                            sb.append(missing).append(" product(s) missing "
-                                    + "tags. ");
-                        }
-                        if (foreign > 0) {
-                            sb.append(foreign).append(" tag(s) from other "
-                                    + "products. ");
-                        }
-                        if (unknown > 0) {
-                            sb.append(unknown).append(" unknown tag(s). ");
-                        }
-                    }
-                    sb.append(" Trackers below show detected/paired.");
-                    status.setText(sb.toString());
-                    refreshBatchList();
+                    beep(SOUND_OK);
+                    status.setText("Sent ✓ sweep #" + id + " (" + epcs.size()
+                            + " tags) — the PC/iPad is showing the "
+                            + "verification now. CLEAR before re-sweeping.");
                 });
             } catch (Exception e) {
                 ui.post(() -> {
                     beep(SOUND_ERR);
-                    status.setText(e.getMessage());
+                    status.setText("Send FAILED (" + e.getMessage()
+                            + ") — tags kept; get Wi-Fi and press SEND "
+                            + "again.");
                 });
             }
         }).start();
@@ -2223,7 +2188,7 @@ public class MainActivity extends Activity {
         batchBtnRow.setVisibility(in ? View.VISIBLE : View.GONE);
         // The two right-hand buttons change job with the step.
         btnUndo.setText(step == STEP_VERIFY ? "CLEAR" : "UNDO");
-        btnSweep.setText(step == STEP_VERIFY ? "CHECK BIN"
+        btnSweep.setText(step == STEP_VERIFY ? "SEND SWEEP"
                 : step == STEP_PAIR ? "SWEEP" : "UNPAIR");
         btnNext.setText(step == STEP_VERIFY ? "FINISH" : "NEXT →");
         if (in) {
@@ -2239,8 +2204,9 @@ public class MainActivity extends Activity {
                 status.setText("PAIR: scan a product barcode, TRIGGER each "
                         + "sticker; NEXT verifies the bin.");
             } else {
-                status.setText("VERIFY: pull the trigger and sweep the "
-                        + "whole bin, then CHECK BIN.");
+                status.setText("VERIFY: pull the trigger to sweep the whole "
+                        + "bin, then SEND SWEEP — the PC/iPad shows the "
+                        + "result.");
             }
         } else {
             status.setText("Pick an open batch (started on the PC/iPad).");
@@ -2283,15 +2249,6 @@ public class MainActivity extends Activity {
                     displayItems.add(b);
                 }
             }
-            if (verifyChecked) {
-                java.util.Collections.sort(displayItems, (x, y) -> {
-                    int fx = verifyDetected.containsKey(x.id)
-                            ? verifyDetected.get(x.id) : 0;
-                    int fy = verifyDetected.containsKey(y.id)
-                            ? verifyDetected.get(y.id) : 0;
-                    return (fx - x.paired) - (fy - y.paired);
-                });
-            }
         } else {
             for (BItem b : bItems)
                 if (b.qty > 0 || b.paired > 0) displayItems.add(b);
@@ -2305,11 +2262,9 @@ public class MainActivity extends Activity {
     // paired/scanned while pairing.
     private String trackerText(BItem b) {
         if (step == STEP_VERIFY) {
-            // detected / paired — what the sweep actually found
-            if (!verifyChecked) return String.valueOf(b.paired);
-            int found = verifyDetected.containsKey(b.id)
-                    ? verifyDetected.get(b.id) : 0;
-            return found + "/" + b.paired;
+            // Tags tied to this product; the detected-vs-paired comparison
+            // happens on the web terminal after SEND SWEEP.
+            return String.valueOf(b.paired);
         }
         if (step == STEP_PAIR)
             return b.paired + "/" + Math.max(b.qty, b.paired);

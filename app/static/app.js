@@ -1866,8 +1866,46 @@ async function refreshBatch() {
 // whatever the C72 (or any other terminal) is doing to the same batch.
 let batchLiveTimer = null;
 
+// A sweep sent from the C72 lands here by itself: the scanner posts it,
+// this screen notices, jumps to Verify and runs the check — no "pull"
+// button dance. Only sweeps newer than the moment this batch was opened
+// count, so an old capture can't hijack the screen.
+let lastSweepId = null;
+
+async function checkForIncomingSweep() {
+  if (!batch) return;
+  try {
+    const { captures } = await apiJson("/api/epc-captures?limit=1");
+    const newest = captures[0];
+    if (lastSweepId === null) {
+      // Baseline, set even when no sweep exists yet — otherwise the very
+      // first sweep of a fresh system gets mistaken for history.
+      lastSweepId = newest ? newest.id : 0;
+      return;
+    }
+    if (!newest || newest.id <= lastSweepId) return;
+    lastSweepId = newest.id;
+    // Sweeps tagged for another batch aren't ours.
+    if (newest.batch_id && newest.batch_id !== batch.id) return;
+    const cap = await apiJson(`/api/epc-captures/${newest.id}`);
+    if (batchStage !== "verify") showBatchStage("verify"); // this resets the set
+    cap.epcs.forEach((e) => verifyEpcs.add(String(e).toUpperCase()));
+    bEl.verifyCount.textContent = `${verifyEpcs.size} unique tags collected.`;
+    setBatchResult(
+      `Sweep #${cap.id} arrived from ${cap.device || "the C72"} ` +
+        `(${cap.epc_count} tags) — checking the bin…`,
+      "ok"
+    );
+    await runVerifyCheck();
+    batchSound("ok");
+  } catch (err) {
+    /* transient; the next tick tries again */
+  }
+}
+
 function startBatchLive() {
   stopBatchLive();
+  lastSweepId = null;
   batchLiveTimer = setInterval(() => {
     // No document.hidden guard: embedded webviews (and some tablet shells)
     // misreport visibility, and a live feed that silently pauses is worse
@@ -1892,6 +1930,7 @@ function startBatchLive() {
     )
       return;
     pullBatch(false);
+    checkForIncomingSweep();
   }, 3000);
 }
 

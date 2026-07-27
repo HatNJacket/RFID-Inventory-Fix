@@ -2972,6 +2972,9 @@ class CaptureIn(BaseModel):
     epcs: list[str] = Field(min_length=1, max_length=20000)
     device: str | None = Field(default=None, max_length=100)
     note: str | None = Field(default=None, max_length=255)
+    # Sweeps taken inside a batch carry it, so the web terminal watching
+    # that batch can pick the sweep up by itself.
+    batch_id: int | None = None
 
 
 @app.post(
@@ -2992,6 +2995,7 @@ def create_capture(payload: CaptureIn, session: Session = Depends(get_session)):
     row = EpcCapture(
         device=(payload.device or "").strip() or None,
         note=(payload.note or "").strip() or None,
+        batch_id=payload.batch_id,
         epc_count=len(epcs),
         epcs="\n".join(epcs),
     )

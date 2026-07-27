@@ -465,6 +465,9 @@ class EpcCapture(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     device: Mapped[str | None] = mapped_column(String(100))
     note: Mapped[str | None] = mapped_column(String(255))
+    # Set when the sweep was taken during a bin batch, so the terminal
+    # watching that batch knows the sweep is meant for it.
+    batch_id: Mapped[int | None] = mapped_column(Integer, index=True)
     epc_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Newline-joined unique EPCs. Text, not String: sweeps of a full rack
     # can be thousands of tags.
@@ -478,6 +481,7 @@ class EpcCapture(Base):
             "id": self.id,
             "device": self.device,
             "note": self.note,
+            "batch_id": self.batch_id,
             "epc_count": self.epc_count,
             "created_at": (
                 self.created_at.isoformat() if self.created_at else None
