@@ -124,6 +124,9 @@ public class MainActivity extends Activity {
     private TextView phaseChip;
     private Button pwrChipBatch;
     private Button pickBtn;
+    private Button btnNext;
+    private Button btnUndo;
+    private Button btnSweep;
     private FrameLayout batchCard;
     private ImageView batchImg;
     private TextView batchName;
@@ -202,7 +205,10 @@ public class MainActivity extends Activity {
     private static final int STEP_COLLECT = 0;
     private static final int STEP_CHECK = 1;
     private static final int STEP_PAIR = 2;
-    private static final String[] STEP_NAMES = {"COLLECT", "CHECK", "PAIR"};
+    private static final int STEP_VERIFY = 3;
+    private static final String[] STEP_NAMES =
+            {"COLLECT", "CHECK", "PAIR", "VERIFY"};
+    private static final int STEP_LAST = STEP_VERIFY;
 
     private static class CheckEntry {
         BItem item;
@@ -228,6 +234,10 @@ public class MainActivity extends Activity {
     // held-trigger sweep (unreadable-label rescue)
     private boolean sweepArmed = false;
     private volatile boolean sweepRunning = false;
+    // VERIFY step: detected-tag counts per batch item, from the last check
+    private final java.util.HashMap<Integer, Integer> verifyDetected =
+            new java.util.HashMap<>();
+    private boolean verifyChecked = false;
 
     private JSONObject stationProduct = null;
     private int stationTags = 0;
@@ -454,19 +464,23 @@ public class MainActivity extends Activity {
         Button next = smallBtn("NEXT →");
         next.setOnClickListener(x -> stepNext());
         batchBtnRow.addView(next, weight());
-        Button undo = smallBtn("UNDO");
-        undo.setOnClickListener(x -> undoPair());
-        undo.setOnLongClickListener(x -> {
+        btnUndo = smallBtn("UNDO");
+        btnUndo.setOnClickListener(x -> {
+            if (step == STEP_VERIFY) clearVerifySweep();
+            else undoPair();
+        });
+        btnUndo.setOnLongClickListener(x -> {
             undoAllPairing();
             return true;
         });
-        batchBtnRow.addView(undo, weight());
-        Button sweepBtn = smallBtn("SWEEP");
-        sweepBtn.setOnClickListener(x -> {
+        batchBtnRow.addView(btnUndo, weight());
+        btnSweep = smallBtn("SWEEP");
+        btnSweep.setOnClickListener(x -> {
             if (step == STEP_PAIR) armSweep();
+            else if (step == STEP_VERIFY) verifyCheckBin();
             else undoAllPairing();
         });
-        batchBtnRow.addView(sweepBtn, weight());
+        batchBtnRow.addView(btnSweep, weight());
         Button exit = smallBtn("EXIT");
         exit.setOnClickListener(x -> exitBatch(false));
         batchBtnRow.addView(exit, weight());
@@ -1423,6 +1437,8 @@ public class MainActivity extends Activity {
         if (activeTab == TAB_BATCH) {
             if (inBatch() && step == STEP_PAIR) {
                 pairReadTag();
+            } else if (inBatch() && step == STEP_VERIFY) {
+                toggleScan();   // same bulk sweep as the SWEEP tab
             } else if (inBatch()) {
                 beep(SOUND_ERR);
                 status.setText("RFID stickers pair in the PAIR step — "
@@ -1656,6 +1672,13 @@ public class MainActivity extends Activity {
     // --------------------------------------------------------- step flow ----
     private void stepBack() {
         if (!inBatch() || step == STEP_COLLECT) return;
+        if (step == STEP_VERIFY && scanning) {
+            try {
+                reader.stopInventory();
+            } catch (Exception ignored) {
+            }
+            scanning = false;
+        }
         step--;
         pairActive = null;
         if (step == STEP_CHECK) fetchReview();
@@ -1687,9 +1710,114 @@ public class MainActivity extends Activity {
                     .setNeutralButton("Skip → pair", (d, w) -> skipPrint())
                     .setNegativeButton("Cancel", null)
                     .show();
+        } else if (step == STEP_PAIR) {
+            // Sweep the finished bin here rather than sending the operator
+            // back to the desk to do it.
+            step = STEP_VERIFY;
+            startVerifyStep();
+            applyBatchUi();
         } else {
             finishBatch();
         }
+    }
+
+    // ------------------------------------------------------------ verify ---
+    private void startVerifyStep() {
+        if (scanning) {
+            try {
+                reader.stopInventory();
+            } catch (Exception ignored) {
+            }
+            scanning = false;
+        }
+        synchronized (tags) { tags.clear(); }
+        verifyDetected.clear();
+        verifyChecked = false;
+        pairActive = null;
+        previewItem = null;
+    }
+
+    private void clearVerifySweep() {
+        synchronized (tags) { tags.clear(); }
+        verifyDetected.clear();
+        verifyChecked = false;
+        beep(SOUND_OTHER);
+        status.setText("Sweep cleared — pull the trigger to scan the bin "
+                + "again.");
+        refreshBatchList();
+    }
+
+    private void verifyCheckBin() {
+        if (scanning) {
+            try {
+                reader.stopInventory();
+            } catch (Exception ignored) {
+            }
+            scanning = false;
+        }
+        final List<String> epcs = new ArrayList<>();
+        synchronized (tags) { epcs.addAll(tags.keySet()); }
+        if (epcs.isEmpty()) {
+            beep(SOUND_ERR);
+            status.setText("Nothing swept yet — pull the trigger and walk "
+                    + "the bin first.");
+            return;
+        }
+        status.setText("Checking " + epcs.size() + " tag(s) against the "
+                + "bin…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("epcs", new JSONArray(epcs));
+                JSONObject resp = api("POST", "/api/batches/" + batchId
+                        + "/verify", body);
+                JSONArray items = resp.getJSONArray("items");
+                final java.util.HashMap<Integer, Integer> found =
+                        new java.util.HashMap<>();
+                int short_ = 0;
+                for (int i = 0; i < items.length(); i++) {
+                    JSONObject r = items.getJSONObject(i);
+                    found.put(r.optInt("item_id"), r.optInt("detected"));
+                    if (r.optInt("detected") < r.optInt("paired_count")) {
+                        short_++;
+                    }
+                }
+                final int missing = short_;
+                final int foreign = resp.getJSONArray("foreign").length();
+                final int unknown = resp.getJSONArray("unknown_epcs").length();
+                final boolean ok = resp.optBoolean("ok");
+                ui.post(() -> {
+                    verifyDetected.clear();
+                    verifyDetected.putAll(found);
+                    verifyChecked = true;
+                    beep(ok ? SOUND_OK : SOUND_ERR);
+                    StringBuilder sb = new StringBuilder();
+                    sb.append(ok ? "Bin verified ✓ — every paired tag was "
+                              + "detected." : "⚠ ");
+                    if (!ok) {
+                        if (missing > 0) {
+                            sb.append(missing).append(" product(s) missing "
+                                    + "tags. ");
+                        }
+                        if (foreign > 0) {
+                            sb.append(foreign).append(" tag(s) from other "
+                                    + "products. ");
+                        }
+                        if (unknown > 0) {
+                            sb.append(unknown).append(" unknown tag(s). ");
+                        }
+                    }
+                    sb.append(" Trackers below show detected/paired.");
+                    status.setText(sb.toString());
+                    refreshBatchList();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText(e.getMessage());
+                });
+            }
+        }).start();
     }
 
     private void skipPrint() {
@@ -2021,8 +2149,10 @@ public class MainActivity extends Activity {
                     batchBin = bin;
                     bItems.clear();
                     bItems.addAll(loaded);
-                    step = ("printing".equals(st) || "pairing".equals(st))
-                            ? STEP_PAIR : STEP_COLLECT;
+                    step = "awaiting-verify".equals(st) ? STEP_VERIFY
+                            : ("printing".equals(st) || "pairing".equals(st))
+                              ? STEP_PAIR : STEP_COLLECT;
+                    if (step == STEP_VERIFY) startVerifyStep();
                     pairActive = null;
                     previewItem = null;
                     pairHistory.clear();
@@ -2043,7 +2173,8 @@ public class MainActivity extends Activity {
     private void publishStep() {
         if (!inBatch()) return;
         final String name = step == STEP_COLLECT ? "collect"
-                : step == STEP_CHECK ? "check" : "pair";
+                : step == STEP_CHECK ? "check"
+                : step == STEP_VERIFY ? "verify" : "pair";
         final int id = batchId;
         new Thread(() -> {
             try {
@@ -2061,9 +2192,15 @@ public class MainActivity extends Activity {
         if (in) publishStep();
         binChip.setText(in ? "Bin " + batchBin : "No batch");
         phaseChip.setText(in
-                ? STEP_NAMES[step] + "  " + (step + 1) + "/3" : "PICK");
+                ? STEP_NAMES[step] + "  " + (step + 1) + "/"
+                  + (STEP_LAST + 1) : "PICK");
         pickBtn.setVisibility(in ? View.GONE : View.VISIBLE);
         batchBtnRow.setVisibility(in ? View.VISIBLE : View.GONE);
+        // The two right-hand buttons change job with the step.
+        btnUndo.setText(step == STEP_VERIFY ? "CLEAR" : "UNDO");
+        btnSweep.setText(step == STEP_VERIFY ? "CHECK BIN"
+                : step == STEP_PAIR ? "SWEEP" : "UNPAIR");
+        btnNext.setText(step == STEP_VERIFY ? "FINISH" : "NEXT →");
         if (in) {
             if (step == STEP_COLLECT) {
                 status.setText("COLLECT: scan every box in this bin, then "
@@ -2073,9 +2210,12 @@ public class MainActivity extends Activity {
                         ? "CHECK: nothing flagged ✓ — NEXT queues labels."
                         : "CHECK: tap flagged items to review — NEXT "
                           + "queues labels.");
-            } else {
+            } else if (step == STEP_PAIR) {
                 status.setText("PAIR: scan a product barcode, TRIGGER each "
-                        + "sticker; NEXT finishes the bin.");
+                        + "sticker; NEXT verifies the bin.");
+            } else {
+                status.setText("VERIFY: pull the trigger and sweep the "
+                        + "whole bin, then CHECK BIN.");
             }
         } else {
             status.setText("Pick an open batch (started on the PC/iPad).");
@@ -2111,6 +2251,22 @@ public class MainActivity extends Activity {
         if (inBatch() && step == STEP_CHECK) {
             // Only flagged items — a clean bin shows an empty list.
             for (CheckEntry e : checkEntries) displayItems.add(e.item);
+        } else if (inBatch() && step == STEP_VERIFY) {
+            // Everything that got tagged, worst first once checked.
+            for (BItem b : bItems) {
+                if (b.resolved && (b.paired > 0 || b.qty > 0)) {
+                    displayItems.add(b);
+                }
+            }
+            if (verifyChecked) {
+                java.util.Collections.sort(displayItems, (x, y) -> {
+                    int fx = verifyDetected.containsKey(x.id)
+                            ? verifyDetected.get(x.id) : 0;
+                    int fy = verifyDetected.containsKey(y.id)
+                            ? verifyDetected.get(y.id) : 0;
+                    return (fx - x.paired) - (fy - y.paired);
+                });
+            }
         } else {
             for (BItem b : bItems)
                 if (b.qty > 0 || b.paired > 0) displayItems.add(b);
@@ -2123,6 +2279,13 @@ public class MainActivity extends Activity {
     // Tracker = two numbers only: scanned/expected while collecting,
     // paired/scanned while pairing.
     private String trackerText(BItem b) {
+        if (step == STEP_VERIFY) {
+            // detected / paired — what the sweep actually found
+            if (!verifyChecked) return String.valueOf(b.paired);
+            int found = verifyDetected.containsKey(b.id)
+                    ? verifyDetected.get(b.id) : 0;
+            return found + "/" + b.paired;
+        }
         if (step == STEP_PAIR)
             return b.paired + "/" + Math.max(b.qty, b.paired);
         return b.expected != null ? b.qty + "/" + b.expected
@@ -2871,6 +3034,11 @@ public class MainActivity extends Activity {
                 synchronized (tags) { n = tags.size(); }
                 status.setText("Sweeping… " + n + " tag(s) — release the "
                         + "trigger to stop.");
+            } else if (inBatch() && step == STEP_VERIFY && scanning) {
+                int n;
+                synchronized (tags) { n = tags.size(); }
+                status.setText("Sweeping the bin… " + n + " unique tag(s). "
+                        + "Trigger again to stop, then CHECK BIN.");
             }
         }
         ui.postDelayed(this::refreshTick, 400);
