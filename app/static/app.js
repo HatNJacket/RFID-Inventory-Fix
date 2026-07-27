@@ -1709,6 +1709,95 @@ bEl.abandon.addEventListener("click", async () => {
   enterBatchTab();
 });
 
+// Scan sounds, mirroring the C72: ding = expected product ticked up,
+// double-ding = real product that wasn't expected in this bin, buzz =
+// unknown barcode or failure. WebAudio spins up lazily — the scan
+// keystroke itself is the user gesture browsers require.
+let audioCtx = null;
+
+function batchSound(kind) {
+  try {
+    audioCtx =
+      audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    const tone = (freq, at, dur, type = "sine", vol = 0.25) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      const t = audioCtx.currentTime + at;
+      gain.gain.setValueAtTime(vol, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + dur + 0.02);
+    };
+    if (kind === "ok") {
+      tone(880, 0, 0.14);
+    } else if (kind === "other") {
+      tone(660, 0, 0.09);
+      tone(990, 0.11, 0.12);
+    } else {
+      tone(170, 0, 0.28, "square", 0.18);
+    }
+  } catch (err) {
+    /* sound is best-effort */
+  }
+}
+
+// One card renderer for collect and pair lists — the C72 view is the
+// design reference (image | bold name + labeled lines, tracker top-right).
+function itemCard(item, mode) {
+  const li = document.createElement("li");
+  li.className = "bcell";
+  if (!item.resolved) li.classList.add("bcell--warn");
+  if (mode === "pair") {
+    if (item.id === pairActiveItemId) li.classList.add("bcell--active");
+    if (item.qty_scanned > 0 && item.paired_count >= item.qty_scanned)
+      li.classList.add("bcell--exact");
+  } else if (item.expected_qty != null) {
+    if (item.qty_scanned === item.expected_qty && item.qty_scanned > 0)
+      li.classList.add("bcell--exact");
+    else if (item.qty_scanned > item.expected_qty)
+      li.classList.add("bcell--over");
+  }
+  const tracker =
+    mode === "pair"
+      ? `${item.paired_count}/${Math.max(item.qty_scanned, item.paired_count)}`
+      : item.expected_qty != null
+        ? `${item.qty_scanned}/${item.expected_qty}`
+        : `${item.qty_scanned}`;
+  const barcode = item.barcode || item.scanned_code;
+  li.innerHTML = `
+    ${
+      item.image_url
+        ? `<img class="bcell__img" src="${escapeHtml(item.image_url)}" alt="" loading="lazy" />`
+        : `<span class="bcell__img bcell__img--empty"></span>`
+    }
+    <div class="bcell__info">
+      <div class="bcell__name">${escapeHtml(itemDisplayName(item))}</div>
+      <div class="bcell__meta">${
+        item.sku
+          ? "SKU: " + escapeHtml(item.sku)
+          : item.resolved
+            ? "no SKU"
+            : "⚠ unknown barcode"
+      }</div>
+      ${barcode ? `<div class="bcell__meta">Barcode: ${escapeHtml(barcode)}</div>` : ""}
+    </div>
+    <span class="bcell__tracker">${tracker}</span>`;
+  return li;
+}
+
+// Stage chips are navigation: click any chip to jump to that step (going
+// back to fix something is the whole point).
+bEl.stages.querySelectorAll(".stage").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    if (!batch) return;
+    showBatchStage(chip.dataset.stage);
+  });
+});
+
 // --- Stage 1: collect -------------------------------------------------------
 bEl.scan.addEventListener("keydown", async (event) => {
   if (event.key !== "Enter") return;
@@ -1720,12 +1809,14 @@ bEl.scan.addEventListener("keydown", async (event) => {
     const data = await postJson(`/api/batches/${batch.id}/scan`, { code });
     const item = data.item;
     const existing = batchItems.findIndex((i) => i.id === item.id);
+    const wasListed = existing >= 0;
     if (existing >= 0) batchItems.splice(existing, 1);
     // Freshly scanned floats to the top — big bins pre-seed a long list
     // and the row you just ticked should stay in view.
     batchItems.unshift(item);
     if (data.bin_mismatch) item._binMismatch = true;
     renderBatchItems();
+    batchSound(!item.resolved ? "err" : wasListed ? "ok" : "other");
     if (!item.resolved) {
       setBatchResult(
         `"${code}" isn't in the system — kept in the count as unresolved. ` +
@@ -1747,6 +1838,7 @@ bEl.scan.addEventListener("keydown", async (event) => {
       );
     }
   } catch (err) {
+    batchSound("err");
     setBatchResult(err.message, "err");
   }
   bEl.scan.focus();
@@ -1767,28 +1859,19 @@ function renderBatchItems() {
   }
   bEl.items.innerHTML = "";
   batchItems.forEach((item) => {
-    const li = document.createElement("li");
-    if (!item.resolved) li.classList.add("warn");
-    const expected =
-      item.expected_qty != null
-        ? `<span class="bexp${
-            item.qty_scanned !== item.expected_qty ? " bexp--off" : ""
-          }">${item.qty_scanned} / ${item.expected_qty} on hand</span>`
-        : "";
-    li.innerHTML = `
-      <span class="recent__prod"><b>${escapeHtml(itemDisplayName(item))}</b></span>
-      <span class="mono recent__meta">${escapeHtml(item.sku || item.scanned_code || "")}</span>
-      ${expected}
-      <span class="bqty">
-        <button type="button" data-d="-1">−</button>
-        <span class="bqty__n">${item.qty_scanned}</span>
-        <button type="button" data-d="1">+</button>
-      </span>`;
-    li.querySelectorAll(".bqty button").forEach((btn) =>
+    const li = itemCard(item, "collect");
+    const qty = document.createElement("span");
+    qty.className = "bqty";
+    qty.innerHTML = `
+      <button type="button" data-d="-1">−</button>
+      <span class="bqty__n">${item.qty_scanned}</span>
+      <button type="button" data-d="1">+</button>`;
+    qty.querySelectorAll("button").forEach((btn) =>
       btn.addEventListener("click", () =>
         adjustItemQty(item, item.qty_scanned + Number(btn.dataset.d))
       )
     );
+    li.append(qty);
     if (item._binMismatch) {
       const warn = document.createElement("div");
       warn.className = "binwarn";
@@ -2015,13 +2098,7 @@ function renderPairItems() {
   batchItems
     .filter((i) => i.resolved && i.qty_scanned > 0)
     .forEach((item) => {
-      const li = document.createElement("li");
-      if (item.id === pairActiveItemId) li.classList.add("active");
-      const done = item.paired_count >= item.qty_scanned;
-      li.innerHTML = `
-        <span class="recent__prod"><b>${escapeHtml(itemDisplayName(item))}</b></span>
-        <span class="mono recent__meta">${escapeHtml(item.sku || "")}</span>
-        <span class="bexp${done ? "" : " bexp--off"}">${item.paired_count} / ${item.qty_scanned} paired${done ? " ✓" : ""}</span>`;
+      const li = itemCard(item, "pair");
       li.addEventListener("click", () => {
         pairActiveItemId = item.id;
         renderPairItems();
@@ -2044,12 +2121,14 @@ bEl.pairInput.addEventListener("keydown", async (event) => {
     pairActiveItemId = item.id;
     renderPairItems();
     renderPairCard();
+    batchSound("ok");
     setBatchResult(`Active product: ${itemDisplayName(item)}`, "ok");
     return;
   }
   // Barcode/serial-shaped scans that match nothing are NOT tags — saving
   // them as EPCs would pollute the tag table.
   if (/^\d{5,14}$/.test(code)) {
+    batchSound("err");
     setBatchResult(
       `"${code}" looks like a barcode or serial but doesn't match a ` +
         `product in this batch.`,

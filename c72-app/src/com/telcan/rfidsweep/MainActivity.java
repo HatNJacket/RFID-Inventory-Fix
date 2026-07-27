@@ -108,9 +108,10 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------ widgets ---
     private final Button[] tabBtns = new Button[4];
-    private Button collapseBtn;
     private Button gearBtn;
-    private boolean tabsCollapsed = false;
+    private FrameLayout drawerScrim;
+    private LinearLayout drawerPanel;
+    private TextView tabTitle;
     private int activeTab = TAB_BATCH;
     private EditText btInput;
     private TextView status;
@@ -212,8 +213,10 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("sweep", MODE_PRIVATE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // Alarm stream: audible regardless of the device's media volume —
+        // field testing showed STREAM_MUSIC tones can be silently muted.
         try {
-            tones = new ToneGenerator(AudioManager.STREAM_MUSIC, 90);
+            tones = new ToneGenerator(AudioManager.STREAM_ALARM, 100);
         } catch (Exception ignored) {
         }
 
@@ -223,29 +226,15 @@ public class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
         root.setBackgroundColor(C_BG);
 
-        // ---- tab row (collapsible like a sidebar) --------------------------
-        LinearLayout tabRow = new LinearLayout(this);
-        collapseBtn = smallBtn("≡");
-        collapseBtn.setOnClickListener(v -> {
-            tabsCollapsed = !tabsCollapsed;
-            prefs.edit().putBoolean("tabs_collapsed", tabsCollapsed).apply();
-            applyTabBar();
-        });
-        tabRow.addView(collapseBtn, new LinearLayout.LayoutParams(dp(44),
+        // ---- header: drawer button + scanner input / tab title -------------
+        // Tabs live in a slide-in drawer OVER the content (scrim behind),
+        // so the working screen never gives up layout space.
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        Button menuBtn = smallBtn("≡");
+        menuBtn.setOnClickListener(v -> toggleDrawer());
+        header.addView(menuBtn, new LinearLayout.LayoutParams(dp(44),
                 LinearLayout.LayoutParams.WRAP_CONTENT));
-        for (int i = 0; i < 4; i++) {
-            final int tab = i;
-            Button b = smallBtn(TAB_NAMES[i]);
-            b.setOnClickListener(v -> selectTab(tab));
-            tabBtns[i] = b;
-            tabRow.addView(b, weight());
-        }
-        gearBtn = smallBtn("⚙");
-        gearBtn.setOnClickListener(v -> showSettings());
-        tabRow.addView(gearBtn, new LinearLayout.LayoutParams(dp(40),
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        root.addView(tabRow);
-        tabsCollapsed = prefs.getBoolean("tabs_collapsed", false);
 
         // ---- shared scanner input + status --------------------------------
         btInput = new EditText(this);
@@ -281,7 +270,16 @@ public class MainActivity extends Activity {
             if (!code.isEmpty()) onScanInput(code);
             return true;
         });
-        root.addView(btInput);
+        header.addView(btInput, weight());
+
+        // Shown in place of the input on tabs that don't take barcodes.
+        tabTitle = new TextView(this);
+        tabTitle.setTextSize(16);
+        tabTitle.setTypeface(null, Typeface.BOLD);
+        tabTitle.setTextColor(C_TEXT);
+        tabTitle.setPadding(dp(6), 0, 0, 0);
+        header.addView(tabTitle, weight());
+        root.addView(header);
 
         status = new TextView(this);
         status.setTextSize(13);
@@ -300,7 +298,62 @@ public class MainActivity extends Activity {
         root.addView(content, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        setContentView(root);
+        // ---- drawer overlay ------------------------------------------------
+        FrameLayout outer = new FrameLayout(this);
+        outer.addView(root);
+
+        drawerScrim = new FrameLayout(this);
+        drawerScrim.setBackgroundColor(Color.parseColor("#88000000"));
+        drawerScrim.setVisibility(View.GONE);
+        drawerScrim.setOnClickListener(v -> closeDrawer());
+
+        drawerPanel = new LinearLayout(this);
+        drawerPanel.setOrientation(LinearLayout.VERTICAL);
+        drawerPanel.setBackgroundColor(Color.WHITE);
+        drawerPanel.setPadding(dp(10), dp(14), dp(10), dp(14));
+        drawerPanel.setClickable(true); // taps inside don't close
+        TextView dTitle = new TextView(this);
+        dTitle.setText("TC RFID Sweep");
+        dTitle.setTextSize(17);
+        dTitle.setTypeface(null, Typeface.BOLD);
+        dTitle.setTextColor(C_TEXT);
+        dTitle.setPadding(dp(6), 0, 0, dp(10));
+        drawerPanel.addView(dTitle);
+        for (int i = 0; i < 4; i++) {
+            final int tab = i;
+            Button b = smallBtn(TAB_NAMES[i]);
+            b.setTextSize(15);
+            b.setMinimumHeight(dp(46));
+            b.setOnClickListener(v -> {
+                closeDrawer();
+                selectTab(tab);
+            });
+            tabBtns[i] = b;
+            LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            bl.bottomMargin = dp(6);
+            drawerPanel.addView(b, bl);
+        }
+        gearBtn = smallBtn("⚙  Settings");
+        gearBtn.setTextSize(14);
+        gearBtn.setMinimumHeight(dp(44));
+        gearBtn.setOnClickListener(v -> {
+            closeDrawer();
+            showSettings();
+        });
+        LinearLayout.LayoutParams gl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        gl.topMargin = dp(14);
+        drawerPanel.addView(gearBtn, gl);
+
+        drawerScrim.addView(drawerPanel, new FrameLayout.LayoutParams(
+                dp(210), FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.START));
+        outer.addView(drawerScrim);
+
+        setContentView(outer);
 
         restoreMap("saved_tags", tags);
         selectTab(TAB_BATCH);
@@ -565,28 +618,38 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ------------------------------------------------------------- tabs -----
-    // The ≡ button collapses the tab bar to a single square so the working
-    // list gets the room (state remembered across launches).
-    private void applyTabBar() {
-        collapseBtn.setText(tabsCollapsed ? "»" : "≡");
+    // ------------------------------------------------------------ drawer ----
+    private void toggleDrawer() {
+        if (drawerScrim.getVisibility() == View.VISIBLE) {
+            closeDrawer();
+            return;
+        }
         for (int i = 0; i < 4; i++) {
-            boolean shown = !tabsCollapsed && tabVisible(i);
-            tabBtns[i].setVisibility(shown ? View.VISIBLE : View.GONE);
+            tabBtns[i].setVisibility(tabVisible(i) ? View.VISIBLE : View.GONE);
             tabBtns[i].setBackgroundColor(i == activeTab ? C_BLUE : C_CHIP);
             tabBtns[i].setTextColor(i == activeTab ? Color.WHITE : C_TEXT);
         }
-        gearBtn.setVisibility(tabsCollapsed ? View.GONE : View.VISIBLE);
+        drawerScrim.setVisibility(View.VISIBLE);
+        android.view.animation.TranslateAnimation slide =
+                new android.view.animation.TranslateAnimation(
+                        -dp(210), 0, 0, 0);
+        slide.setDuration(150);
+        drawerPanel.startAnimation(slide);
+    }
+
+    private void closeDrawer() {
+        drawerScrim.setVisibility(View.GONE);
     }
 
     private void selectTab(int tab) {
         activeTab = tab;
-        applyTabBar();
         for (int i = 0; i < 4; i++) {
             tabViews[i].setVisibility(i == tab ? View.VISIBLE : View.GONE);
         }
         boolean needsInput = tab == TAB_BATCH || tab == TAB_STATION;
         btInput.setVisibility(needsInput ? View.VISIBLE : View.GONE);
+        tabTitle.setVisibility(needsInput ? View.GONE : View.VISIBLE);
+        tabTitle.setText(TAB_NAMES[tab]);
         if (needsInput) btInput.requestFocus();
         if (tab == TAB_BATCH) {
             applyBatchUi();

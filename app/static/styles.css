@@ -810,6 +810,52 @@ body {
 }
 .binwarn .reset { padding: 5px 10px; font-size: 12px; }
 
+/* batch cells restyled to mirror the C72 app: image | name + labeled
+   SKU/Barcode lines, two-number tracker pinned top-right, glow borders */
+.stage { cursor: pointer; }
+.batch__items li.bcell {
+  position: relative;
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  gap: 10px;
+  padding: 10px 12px 10px 10px;
+}
+.bcell__img {
+  width: 56px; height: 56px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--card-2);
+}
+.bcell__img--empty { display: inline-block; }
+.bcell__info { flex: 1; min-width: 0; padding-right: 56px; }
+.bcell__name { font-weight: 650; font-size: 14px; line-height: 1.25; }
+.bcell__meta { color: var(--ink-dim); font-size: 12px; margin-top: 2px; }
+.bcell__tracker {
+  position: absolute;
+  top: 8px; right: 12px;
+  font-weight: 750;
+  font-size: 17px;
+  color: var(--accent);
+  font-family: var(--mono);
+}
+.bcell .bqty {
+  position: absolute;
+  right: 10px; bottom: 8px;
+  margin-left: 0;
+}
+.bcell .binwarn { margin-top: 8px; flex-basis: auto; }
+.bcell--active { background: var(--accent-soft); border-color: var(--accent); }
+.bcell--exact {
+  border-color: var(--ok-ink);
+  box-shadow: 0 0 0 1px var(--ok-ink), 0 0 10px rgba(41, 132, 90, 0.4);
+}
+.bcell--over {
+  border-color: var(--danger-ink, #d72c0d);
+  box-shadow: 0 0 0 1px #d72c0d, 0 0 10px rgba(215, 44, 13, 0.4);
+}
+.bcell--warn { border-left: 3px solid var(--warn-ink); }
+
 /* status + event chips (print queue, history) */
 .chip-status {
   font-size: 11px;
