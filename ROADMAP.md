@@ -91,6 +91,13 @@ next bin.
 
 ## 🔜 Next up (the revamp — after the C72 barcode test)
 
+- C72 v2.2 — tab bar becomes a slide-in SIDEBAR (Steve, 2026-07-26):
+  a single small button; tapping opens a drawer from the screen edge
+  OVER the content with the page behind greyed out (scrim); it closes
+  when a tab is chosen or the button is pressed again. The current
+  collapse leaves the bar's row height in place, so the list never
+  gains the space — the drawer fixes that by never occupying layout.
+
 - C72-first batch workflow (the 8-step flow):
   server endpoints for barcode-driven collect + pair; C72 app batch
   screen: pick bin → collect with dings + expected tickers → pair
