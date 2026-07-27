@@ -41,6 +41,9 @@ next bin.
   rejected (never saved as EPCs)
 - Verify stage: RFID sweep (C72 app "Pull latest sweep" or wedge) →
   per-product boxes/paired/detected + foreign/unknown report
+- Finish check (web + C72): the confirm shows per-product entered-by-RFID
+  counts; finishing with untagged boxes requires an explicit are-you-sure
+  naming how many products/boxes are missing ("Finish anyway")
 - Complete → auto-files Review tasks (count mismatch, pairing incomplete,
   unresolved barcode); abandon; cross-device resume + Refresh
 
