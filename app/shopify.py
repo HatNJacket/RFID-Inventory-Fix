@@ -253,7 +253,7 @@ def set_variant_bin(variant_gid: str, bin_value: str) -> None:
 
 _ALL_BINS_QUERY = """
 query AllBins($cursor: String) {
-  productVariants(first: 100, after: $cursor) {
+  productVariants(first: 50, after: $cursor) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id
@@ -261,6 +261,11 @@ query AllBins($cursor: String) {
       sku
       barcode
       inventoryQuantity
+      inventoryItem {
+        inventoryLevels(first: 5) {
+          nodes { quantities(names: ["on_hand"]) { name quantity } }
+        }
+      }
       bin: metafield(namespace: "stock", key: "bin") { value }
       image { url }
       product {
@@ -275,6 +280,25 @@ query AllBins($cursor: String) {
   }
 }
 """
+
+
+def _sum_on_hand(variant_node: dict) -> int | None:
+    """Total ON-HAND across locations from an inventoryItem node, or None
+    when the store exposes no levels. On-hand is the shelf truth —
+    inventoryQuantity is "available", which drops as orders commit stock
+    and goes negative on oversells."""
+    try:
+        levels = variant_node["inventoryItem"]["inventoryLevels"]["nodes"]
+    except (KeyError, TypeError):
+        return None
+    if not levels:
+        return None
+    total = 0
+    for lvl in levels:
+        for q in lvl["quantities"]:
+            if q["name"] == "on_hand":
+                total += q["quantity"]
+    return total
 
 
 def fetch_all_variant_bins() -> list[dict]:
@@ -300,6 +324,7 @@ def fetch_all_variant_bins() -> list[dict]:
                 (v["image"] or {}).get("url")
                 or (v["product"]["featuredImage"] or {}).get("url")
             )
+            on_hand = _sum_on_hand(v)
             results.append({
                 "shopify_variant_id": v["id"],
                 "shopify_product_id": v["product"]["id"],
@@ -310,13 +335,44 @@ def fetch_all_variant_bins() -> list[dict]:
                 "sku": v["sku"],
                 "barcode": v["barcode"],
                 "bin": bin_value,
-                "qty": v["inventoryQuantity"],
+                "qty": on_hand if on_hand is not None
+                       else v["inventoryQuantity"],
                 "image_url": image,
             })
         if not page["pageInfo"]["hasNextPage"]:
             return results
         cursor = page["pageInfo"]["endCursor"]
         time.sleep(0.3)  # stay far away from the throttle
+
+
+_ON_HAND_QUERY = """
+query OnHand($search: String!) {
+  productVariants(first: 5, query: $search) {
+    nodes {
+      sku
+      inventoryQuantity
+      inventoryItem {
+        inventoryLevels(first: 5) {
+          nodes { quantities(names: ["on_hand"]) { name quantity } }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def get_on_hand(sku: str) -> int | None:
+    """Live ON-HAND for one SKU (sum across locations); None if the SKU
+    isn't found. Used for shelf expectations — never trust the mirror's
+    quantities, its sync can silently stall."""
+    cleaned = sku.replace('"', "")
+    data = query_shopify(_ON_HAND_QUERY, {"search": f'sku:"{cleaned}"'})
+    for v in data["productVariants"]["nodes"]:
+        if v["sku"] == sku:
+            on_hand = _sum_on_hand(v)
+            return on_hand if on_hand is not None else v["inventoryQuantity"]
+    return None
 
 
 def lookup_barcode(term: str) -> dict | None:

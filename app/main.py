@@ -1293,28 +1293,11 @@ def _rebuild_bin_map() -> None:
     from app.database import get_engine
 
     try:
+        # Entries carry LIVE on-hand straight from Shopify inventory levels
+        # (never the TELCAN mirror's quantities — its sync can stall for
+        # months and it burned us once with 8-month-old numbers).
         entries = shopify.fetch_all_variant_bins()
         with Session(get_engine()) as session:
-            # Expected counts must be ON-HAND, not Shopify's "available"
-            # (available = on-hand minus committed, so an oversold item
-            # reads -1 at the shelf where the truth is 0 boxes).
-            on_hand: dict = {}
-            if session.get_bind().dialect.name == "mssql":
-                try:
-                    on_hand = {
-                        r.Variant_SKU: int(r.oh)
-                        for r in session.execute(text(
-                            "SELECT Variant_SKU, MAX(On_Hand_Current) AS oh "
-                            "FROM dbo.Shopify_Inventory "
-                            "WHERE On_Hand_Current IS NOT NULL "
-                            "GROUP BY Variant_SKU"
-                        ))
-                    }
-                except Exception as error:
-                    logger.warning("on-hand map load failed: %s", error)
-            for e in entries:
-                if e["sku"] in on_hand:
-                    e["qty"] = on_hand[e["sku"]]
             # Serialize rewrites across gunicorn workers: without this,
             # two workers booting onto a stale map both insert and the
             # table doubles.
@@ -1409,10 +1392,19 @@ def _batch_items(session: Session, batch_id: int) -> list[BatchItem]:
 
 
 def _mirror_qty(session: Session, sku: str | None) -> int | None:
-    """True ON-HAND from the TELCAN mirror (falls back to the variant's
-    "available" figure only when the inventory row is missing). Available
-    goes negative on oversells; the shelf count compares against on-hand."""
-    if not sku or session.get_bind().dialect.name != "mssql":
+    """Expected shelf count for one SKU: LIVE Shopify on-hand first (the
+    mirror's quantities proved stale by months), mirror as the fallback
+    when the API is unreachable."""
+    if not sku:
+        return None
+    if not config.check_shopify_env():
+        try:
+            live = shopify.get_on_hand(sku)
+            if live is not None:
+                return live
+        except Exception as error:
+            logger.warning("live on-hand failed for %s: %s", sku, error)
+    if session.get_bind().dialect.name != "mssql":
         return None
     try:
         row = session.execute(
