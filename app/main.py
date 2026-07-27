@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 from sqlalchemy import bindparam, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -1095,11 +1095,20 @@ def overwrite_barcode(
 
 
 class BinUpdateIn(BaseModel):
-    """Set a product's bin location (Shopify stock.bin metafield)."""
+    """Set a product's bin location: the variant's stock.bin metafield AND
+    the product's my_fields.bin_location (what EasyScan reads), so the two
+    can't drift apart."""
 
     target: str = Field(max_length=100)  # barcode or SKU
-    bin: str = Field(max_length=100)
+    # `new_bin` is accepted as an alias: the scanner and older builds send
+    # that name, and a rejected bin move at the shelf is worse than a
+    # slightly permissive schema.
+    bin: str = Field(max_length=100, validation_alias=AliasChoices(
+        "bin", "new_bin"
+    ))
     changed_by: str | None = Field(default=None, max_length=100)
+
+    model_config = {"populate_by_name": True}
 
     @field_validator("target", "bin")
     @classmethod
@@ -1132,6 +1141,23 @@ def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
     except RuntimeError as error:
         raise HTTPException(502, f"Shopify bin update failed: {error}")
 
+    # Keep EasyScan's product-level bin in step, so the two sources can't
+    # disagree. Only when it's unambiguous: a single-variant product, or a
+    # value that already exists (otherwise a multi-variant product's other
+    # variants would inherit a bin they don't belong to).
+    easyscan_updated = False
+    product_gid = product.get("shopify_product_id")
+    if product_gid and str(product_gid).startswith("gid://"):
+        try:
+            info = shopify.product_bin_info(product_gid)
+            if info["variant_count"] <= 1 or info["easy_bin"]:
+                shopify.set_product_bin(product_gid, payload.bin)
+                easyscan_updated = True
+        except RuntimeError as error:
+            # The variant write already landed; say so rather than failing.
+            logger.warning("EasyScan bin update failed for %s: %s",
+                           product.get("sku"), error)
+
     session.add(BarcodeChange(
         sku=product.get("sku"),
         product_title=product.get("product_title"),
@@ -1144,7 +1170,7 @@ def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
     session.commit()
 
     product["bin_location"] = payload.bin
-    return {"product": product}
+    return {"product": product, "easyscan_updated": easyscan_updated}
 
 
 class SkuOverwriteIn(BaseModel):
@@ -1891,7 +1917,7 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
                 if actual and not bin_contains(actual, wanted):
                     moved.append(f"{p.get('sku')}→{actual}")
                     continue
-                if actual:
+                if actual and bin_contains(actual, wanted):
                     others = bins_other_than(actual, wanted)
                     p["other_bins"] = ", ".join(others) if others else None
                 fresh.append(p)
@@ -2074,9 +2100,15 @@ def batch_scan(
             item.sku = product.get("sku")
             item.barcode = product.get("barcode")
             item.bin_location = product.get("bin_location")
-            others = bins_other_than(product.get("bin_location"),
-                                     batch.bin_name)
-            item.other_bins = (", ".join(others))[:255] if others else None
+            # "Other bins" only means something when this bin is genuinely
+            # one of the product's — otherwise it's simply on the wrong
+            # shelf, and calling that a split would be a lie.
+            saved = product.get("bin_location")
+            if bin_contains(saved, batch.bin_name):
+                others = bins_other_than(saved, batch.bin_name)
+                item.other_bins = (", ".join(others))[:255] if others else None
+            else:
+                item.other_bins = None
             item.serial_prefix = product.get("serial_prefix")
             item.image_url = (product.get("image_url") or "")[:500] or None
             # Batch labels print the store header + SKU (Astronomik naming

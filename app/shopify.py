@@ -229,6 +229,54 @@ mutation SetBin($metafields: [MetafieldsSetInput!]!) {
 """
 
 
+_PRODUCT_BIN_INFO_QUERY = """
+query ProductBin($id: ID!) {
+  product(id: $id) {
+    id
+    easyScanBin: metafield(namespace: "my_fields", key: "bin_location") {
+      value
+    }
+    variants(first: 2) { nodes { id } }
+  }
+}
+"""
+
+
+def product_bin_info(product_gid: str) -> dict:
+    """The product-level (EasyScan) bin and how many variants share it."""
+    data = query_shopify(_PRODUCT_BIN_INFO_QUERY, {"id": product_gid})
+    product = data.get("product") or {}
+    meta = product.get("easyScanBin") or {}
+    return {
+        "easy_bin": meta.get("value"),
+        "variant_count": len(
+            (product.get("variants") or {}).get("nodes", []) or []
+        ),
+    }
+
+
+def set_product_bin(product_gid: str, bin_value: str) -> None:
+    """Write the product's my_fields.bin_location — the field EasyScan
+    reads. Requires write_products."""
+    data = query_shopify(
+        _SET_BIN_MUTATION,
+        {
+            "metafields": [{
+                "ownerId": product_gid,
+                "namespace": "my_fields",
+                "key": "bin_location",
+                "type": "single_line_text_field",
+                "value": bin_value,
+            }]
+        },
+    )
+    result = data["metafieldsSet"]
+    if result["userErrors"]:
+        raise RuntimeError(
+            "; ".join(e["message"] for e in result["userErrors"])
+        )
+
+
 def set_variant_bin(variant_gid: str, bin_value: str) -> None:
     """Write the variant's stock.bin metafield — the bin source the lookup
     reads first. Requires write_products."""

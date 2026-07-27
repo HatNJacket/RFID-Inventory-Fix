@@ -2549,7 +2549,7 @@ document.getElementById("bitem-binwarn").addEventListener("click", async (ev) =>
     try {
       await postJson("/api/bin-updates", {
         target: it.sku || it.barcode,
-        new_bin: batch.bin_name,
+        bin: batch.bin_name,
         changed_by: operatorEl.value || null,
       });
       it.bin_location = batch.bin_name;

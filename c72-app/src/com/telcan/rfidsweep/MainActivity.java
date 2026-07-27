@@ -1107,7 +1107,7 @@ public class MainActivity extends Activity {
                         JSONObject body = new JSONObject()
                                 .put("target", it.sku != null ? it.sku
                                         : it.barcode)
-                                .put("new_bin", batchBin)
+                                .put("bin", batchBin)
                                 .put("changed_by",
                                         prefs.getString("device", "C72"));
                         api("POST", "/api/bin-updates", body);
@@ -1222,7 +1222,7 @@ public class MainActivity extends Activity {
             try {
                 JSONObject body = new JSONObject()
                         .put("target", it.sku != null ? it.sku : it.barcode)
-                        .put("new_bin", bin)
+                        .put("bin", bin)
                         .put("changed_by", prefs.getString("device", "C72"));
                 api("POST", "/api/bin-updates", body);
                 ui.post(() -> {
