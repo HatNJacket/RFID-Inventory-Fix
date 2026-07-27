@@ -3521,7 +3521,12 @@ async function undoHistoryEvent(e, btn) {
         {}
       );
       await loadHistory();
-      alert(`${res.removed} tie(s) released.`);
+      alert(
+        `${res.removed} tie(s) released` +
+          (res.legacy
+            ? ` (${res.legacy} of them paired before batches tracked their own ties).`
+            : ".")
+      );
     } catch (err) {
       btn.disabled = false;
       alert(err.message);

@@ -2377,18 +2377,54 @@ def batch_complete(
     }
 
 
-def _unpair_batch(session: Session, batch_id: int) -> int:
+def _aware(dt: datetime | None) -> datetime | None:
+    """Timestamps come back naive from some backends; compare in UTC."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _batch_tie_rows(session: Session, batch: Batch) -> list[RfidAssignment]:
+    """Every tag tie belonging to a batch.
+
+    Ties made before rfid_assignments carried a batch_id are matched the
+    only way left: the bin that batch walked, during the window it was
+    open. Without this, old batches look untied but aren't."""
+    rows = {
+        r.id: r
+        for r in session.scalars(
+            select(RfidAssignment).where(RfidAssignment.batch_id == batch.id)
+        )
+    }
+    bin_name = (batch.bin_name or "").strip().lower()
+    start = _aware(batch.created_at)
+    if not bin_name or start is None:
+        return list(rows.values())
+    end = _aware(batch.completed_at) or datetime.now(timezone.utc)
+    for r in session.scalars(
+        select(RfidAssignment).where(
+            RfidAssignment.batch_id.is_(None),
+            func.lower(func.coalesce(RfidAssignment.bin_location, ""))
+            == bin_name,
+        )
+    ):
+        at = _aware(r.assigned_at)
+        if at is not None and start <= at <= end:
+            rows[r.id] = r
+    return list(rows.values())
+
+
+def _unpair_batch(session: Session, batch: Batch) -> dict:
     """Remove every tag tie this batch created and zero its paired counts.
-    Returns how many ties were removed. Local records only — no Shopify."""
-    rows = session.scalars(
-        select(RfidAssignment).where(RfidAssignment.batch_id == batch_id)
-    ).all()
+    Local records only — no Shopify, and the printed labels stay valid."""
+    rows = _batch_tie_rows(session, batch)
+    legacy = sum(1 for r in rows if r.batch_id is None)
     for row in rows:
         session.delete(row)
-    for item in _batch_items(session, batch_id):
+    for item in _batch_items(session, batch.id):
         item.paired_count = 0
     session.commit()
-    return len(rows)
+    return {"removed": len(rows), "legacy": legacy}
 
 
 class AbandonIn(BaseModel):
@@ -2411,7 +2447,8 @@ def batch_abandon(
         raise HTTPException(409, "This batch is already done.")
     removed = 0
     if payload is None or payload.remove_ties:
-        removed = _unpair_batch(session, batch_id)
+        # Before flipping status: completed_at bounds the legacy window.
+        removed = _unpair_batch(session, batch)["removed"]
     batch.status = "abandoned"
     batch.completed_at = datetime.now(timezone.utc)
     session.commit()
@@ -2427,9 +2464,8 @@ def batch_abandon(
 def batch_unpair_all(batch_id: int, session: Session = Depends(get_session)):
     """Undo the pairing step: every tag this batch tied is released so the
     shelf can be re-scanned. Labels already printed stay valid."""
-    _get_batch(session, batch_id)
-    removed = _unpair_batch(session, batch_id)
-    return {"removed": removed}
+    batch = _get_batch(session, batch_id)
+    return _unpair_batch(session, batch)
 
 
 @app.post(
@@ -2913,14 +2949,38 @@ def history(
             },
         })
 
+    # Tie counts for the batch events below. Pulled once and matched in
+    # memory: ties made before assignments carried a batch_id can only be
+    # recognised by bin + time window, and per-batch queries would be
+    # dozens of round trips.
+    tie_by_batch: dict = {}
+    legacy_ties: list = []
+    for bid, bin_loc, at in session.execute(
+        select(RfidAssignment.batch_id, RfidAssignment.bin_location,
+               RfidAssignment.assigned_at)
+    ):
+        if bid is not None:
+            tie_by_batch[bid] = tie_by_batch.get(bid, 0) + 1
+        else:
+            legacy_ties.append(((bin_loc or "").strip().lower(), _aware(at)))
+
+    def _ties_for(b: Batch) -> int:
+        n = tie_by_batch.get(b.id, 0)
+        bin_name = (b.bin_name or "").strip().lower()
+        start = _aware(b.created_at)
+        if not bin_name or start is None:
+            return n
+        end = _aware(b.completed_at) or datetime.now(timezone.utc)
+        for loc, at in legacy_ties:
+            if loc == bin_name and at is not None and start <= at <= end:
+                n += 1
+        return n
+
     for b in session.scalars(
         select(Batch).order_by(Batch.id.desc()).limit(limit)
     ):
         # Every batch event can release that batch's tag ties in one click.
-        tie_count = session.scalar(
-            select(func.count()).select_from(RfidAssignment)
-            .where(RfidAssignment.batch_id == b.id)
-        ) or 0
+        tie_count = _ties_for(b)
         undo = (
             {"kind": "batch-ties", "batch_id": b.id, "ties": tie_count}
             if tie_count else None
