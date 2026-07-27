@@ -1428,6 +1428,90 @@ def _maybe_refresh_bin_map(force: bool = False) -> bool:
     return True
 
 
+@app.get("/api/bins/overview", dependencies=[Depends(require_user)])
+def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
+    """Every bin in the store (from the Shopify bin map) split into
+    still-to-do and recently finished, so Batch Tagging can offer a work
+    list instead of an empty box."""
+    counts = session.execute(
+        select(BinMapEntry.bin, func.count())
+        .where(BinMapEntry.bin.isnot(None))
+        .group_by(BinMapEntry.bin)
+    ).all()
+
+    last_done: dict = {}
+    open_by_bin: dict = {}
+    done_batches: list = []
+    for b in session.scalars(select(Batch).order_by(Batch.id)):
+        key = (b.bin_name or "").strip().lower()
+        if b.status == "done":
+            last_done[key] = b
+            done_batches.append(b)
+        elif b.status != "abandoned":
+            open_by_bin[key] = b
+
+    # Box/tag totals for the recent list.
+    recent_batches = sorted(
+        done_batches,
+        key=lambda b: (_aware(b.completed_at) or datetime.min.replace(
+            tzinfo=timezone.utc)),
+        reverse=True,
+    )[: max(1, min(recent, 20))]
+    totals: dict = {}
+    if recent_batches:
+        for r in session.execute(
+            select(
+                BatchItem.batch_id,
+                func.count().label("products"),
+                func.sum(BatchItem.qty_scanned).label("boxes"),
+                func.sum(BatchItem.paired_count).label("tags"),
+            )
+            .where(BatchItem.batch_id.in_([b.id for b in recent_batches]))
+            .group_by(BatchItem.batch_id)
+        ):
+            totals[r.batch_id] = r
+
+    todo = []
+    done_bins = 0
+    for name, products in counts:
+        key = (name or "").strip().lower()
+        if not key:
+            continue
+        if key in last_done:
+            done_bins += 1
+            continue
+        openb = open_by_bin.get(key)
+        todo.append({
+            "bin": name,
+            "products": products,
+            "open_batch_id": openb.id if openb else None,
+        })
+    # Bins already in progress first, then the biggest jobs.
+    todo.sort(key=lambda b: (b["open_batch_id"] is None, -b["products"],
+                             b["bin"]))
+
+    return {
+        "total_bins": len(counts),
+        "done_bins": done_bins,
+        "todo_count": len(todo),
+        "todo": todo,
+        "recent": [
+            {
+                "batch_id": b.id,
+                "bin": b.bin_name,
+                "completed_at": (
+                    b.completed_at.isoformat() if b.completed_at else None
+                ),
+                "by": b.created_by,
+                "products": totals[b.id].products if b.id in totals else 0,
+                "boxes": int(totals[b.id].boxes or 0) if b.id in totals else 0,
+                "tags": int(totals[b.id].tags or 0) if b.id in totals else 0,
+            }
+            for b in recent_batches
+        ],
+    }
+
+
 @app.get(
     "/api/bins/{bin_name}/odd-barcodes", dependencies=[Depends(require_user)]
 )

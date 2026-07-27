@@ -1490,13 +1490,17 @@ function itemDisplayName(item) {
 }
 
 function enterBatchTab() {
+  const board = document.querySelector(".binboard");
   if (batch) {
+    board.hidden = true;
     showBatchStage(batchStage);
     return;
   }
   bEl.start.hidden = false;
   bEl.active.hidden = true;
+  board.hidden = false;
   loadResumeList();
+  loadBinBoard();
   bEl.bin.focus();
 }
 
@@ -1519,6 +1523,93 @@ async function loadResumeList() {
     bEl.resumeWrap.hidden = true;
   }
 }
+
+// --- Bin work board ---------------------------------------------------------
+// Every bin in the store (from the Shopify bin map) that hasn't been
+// batched yet, plus the last few that were finished.
+let binBoard = null;
+
+async function loadBinBoard() {
+  const list = document.getElementById("binboard-list");
+  const recent = document.getElementById("binboard-recent");
+  try {
+    binBoard = await apiJson("/api/bins/overview?recent=8");
+    renderBinBoard();
+    recent.innerHTML = "";
+    if (!binBoard.recent.length) {
+      recent.innerHTML =
+        '<li class="recent__empty">No finished bins yet.</li>';
+      return;
+    }
+    binBoard.recent.forEach((r) => {
+      const li = document.createElement("li");
+      li.innerHTML =
+        `<span class="binlist__name">${escapeHtml(r.bin)}</span>` +
+        `<div class="binlist__count">${r.products} product(s) · ` +
+        `${r.boxes} box(es) · ${r.tags} tag(s)</div>` +
+        `<div class="binlist__count">${escapeHtml(fmtWhen(r.completed_at))}` +
+        `${r.by ? " · " + escapeHtml(r.by) : ""}</div>`;
+      recent.append(li);
+    });
+  } catch (err) {
+    list.innerHTML = `<li class="recent__empty">${escapeHtml(err.message)}</li>`;
+  }
+}
+
+function renderBinBoard() {
+  const list = document.getElementById("binboard-list");
+  const countEl = document.getElementById("binboard-count");
+  if (!binBoard) return;
+  const q = document
+    .getElementById("binboard-filter")
+    .value.trim()
+    .toLowerCase();
+  const rows = q
+    ? binBoard.todo.filter((b) => b.bin.toLowerCase().includes(q))
+    : binBoard.todo;
+  countEl.textContent =
+    `(${binBoard.todo_count} of ${binBoard.total_bins} left · ` +
+    `${binBoard.done_bins} done)`;
+  list.innerHTML = "";
+  if (!rows.length) {
+    list.innerHTML = `<li class="recent__empty">${
+      q ? "No bins match that." : "Every bin has been done ✓"
+    }</li>`;
+    return;
+  }
+  rows.forEach((b) => {
+    const li = document.createElement("li");
+    if (b.open_batch_id) li.classList.add("binlist--open");
+    li.innerHTML =
+      `<span class="binlist__name">${escapeHtml(b.bin)}</span>` +
+      `<span class="binlist__count">${b.products} product(s)${
+        b.open_batch_id ? " · in progress" : ""
+      }</span>` +
+      `<button class="binlist__go" type="button">${
+        b.open_batch_id ? "Resume" : "Start batch"
+      }</button>`;
+    // Clicking the name only fills the box — starting is a deliberate act.
+    li.querySelector(".binlist__name").addEventListener("click", () => {
+      bEl.bin.value = b.bin;
+      bEl.bin.focus();
+    });
+    li.querySelector(".binlist__go").addEventListener("click", () => {
+      if (b.open_batch_id) {
+        resumeBatch(b.open_batch_id);
+      } else {
+        bEl.bin.value = b.bin;
+        startBatch();
+      }
+    });
+    list.append(li);
+  });
+}
+
+let binFilterTimer;
+document.getElementById("binboard-filter").addEventListener("input", () => {
+  clearTimeout(binFilterTimer);
+  binFilterTimer = setTimeout(renderBinBoard, 120);
+});
 
 bEl.create.addEventListener("click", startBatch);
 bEl.bin.addEventListener("keydown", (e) => {
@@ -1702,6 +1793,7 @@ async function resumeBatch(id) {
 function openBatchView(stage) {
   bEl.start.hidden = true;
   bEl.active.hidden = false;
+  document.querySelector(".binboard").hidden = true;
   bEl.binChip.textContent = `Bin ${batch.bin_name}`;
   setBatchResult("", null);
   showBatchStage(stage);

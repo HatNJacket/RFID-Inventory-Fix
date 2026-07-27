@@ -321,6 +321,25 @@
         </div>
       </div>
 
+      <!-- Bin work board: what's left, and what was just finished -->
+      <div class="binboard">
+        <div class="binboard__todo linkbox serialbox">
+          <div class="recent__head">
+            <h2>Bins to do <span class="recent__note" id="binboard-count"></span></h2>
+            <input id="binboard-filter" class="recent__search" type="search" placeholder="Filter bins…" autocomplete="off" />
+          </div>
+          <ul class="binlist" id="binboard-list">
+            <li class="recent__empty">Loading bins…</li>
+          </ul>
+        </div>
+        <div class="binboard__recent linkbox serialbox">
+          <div class="recent__head"><h2>Recently done</h2></div>
+          <ul class="binlist binlist--recent" id="binboard-recent">
+            <li class="recent__empty">—</li>
+          </ul>
+        </div>
+      </div>
+
       <!-- Active batch -->
       <div id="batch-active" hidden>
         <div class="batch__header">
