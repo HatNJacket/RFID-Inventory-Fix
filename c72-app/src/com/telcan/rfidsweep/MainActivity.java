@@ -473,8 +473,16 @@ public class MainActivity extends Activity {
         v.addView(batchBtnRow);
 
         batchListView.setOnItemClickListener((parent, view, pos, id) -> {
-            if (inBatch() && step == STEP_CHECK && pos < checkEntries.size()) {
+            if (!inBatch() || pos >= displayItems.size()) return;
+            if (step == STEP_CHECK && pos < checkEntries.size()) {
                 openItemEditor(checkEntries.get(pos));
+            } else if (step == STEP_COLLECT) {
+                // Same editor while collecting: fix a count, rename the
+                // label, or move the product to another bin without
+                // waiting for the check step.
+                CheckEntry e = new CheckEntry();
+                e.item = displayItems.get(pos);
+                openItemEditor(e);
             }
         });
 
@@ -735,6 +743,7 @@ public class MainActivity extends Activity {
     private TextView editMsg;
     private LinearLayout editBinRow;
     private TextView editBinText;
+    private Button editBinChip;
     private LinearLayout editLabelRow;
     private Button editLabelMode;
     private EditText editLabelText;
@@ -805,6 +814,11 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT));
         mid.addView(editNameRow);
 
+        // Bin chip — always available, not just when the bin looks wrong.
+        editBinChip = smallBtn("BIN");
+        editBinChip.setOnClickListener(v -> changeBinDialog());
+        mid.addView(editBinChip);
+
         // Wrong shelf: move it, drop it, or ignore for this batch.
         editBinRow = new LinearLayout(this);
         editBinRow.setOrientation(LinearLayout.VERTICAL);
@@ -867,8 +881,11 @@ public class MainActivity extends Activity {
         editQty = new TextView(this);
         editQty.setTextSize(18);
         editQty.setTypeface(null, Typeface.BOLD);
-        editQty.setTextColor(C_TEXT);
+        editQty.setTextColor(C_BLUE);
         editQty.setGravity(Gravity.CENTER);
+        // Tap the number to type an exact count — thirty taps of "+" is
+        // no way to correct a big shelf.
+        editQty.setOnClickListener(v -> exactCountDialog());
         qtyRow.addView(editQty, new LinearLayout.LayoutParams(dp(80),
                 LinearLayout.LayoutParams.WRAP_CONTENT));
         Button plus = smallBtn("+");
@@ -927,6 +944,10 @@ public class MainActivity extends Activity {
     private void closeItemEditor() {
         editScrim.setVisibility(View.GONE);
         editEntry = null;
+        if (inBatch() && step == STEP_COLLECT) {
+            refreshBatchList();
+            btInput.requestFocus(); // straight back to scanning
+        }
     }
 
     private void renderItemEditor() {
@@ -957,7 +978,13 @@ public class MainActivity extends Activity {
         editMeta.setText("SKU: " + sku + "\nBarcode: " + bc
                 + "  ·  Bin: " + bin);
         loadImage(img, editImg);
+        editFlags.setVisibility(editEntry.flags.isEmpty()
+                ? View.GONE : View.VISIBLE);
         editFlags.setText("⚠ " + flagText(editEntry.flags));
+        editBinChip.setVisibility(it.resolved ? View.VISIBLE : View.GONE);
+        editBinChip.setText("BIN: "
+                + (it.binLocation == null || it.binLocation.isEmpty()
+                   ? "none" : it.binLocation) + "   ✎ change");
         editPrev.setVisibility(multi ? View.VISIBLE : View.INVISIBLE);
         editNext.setVisibility(multi ? View.VISIBLE : View.INVISIBLE);
         editPrev.setEnabled(editIdx > 0);
@@ -1144,10 +1171,94 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    private void editorAdjust(int delta) {
+    // Point this product at any bin — writes the same audited Shopify bin
+    // update the Scan Station uses (shows in History).
+    private void changeBinDialog() {
+        if (editEntry == null || !editEntry.item.resolved) return;
+        final BItem it = editEntry.item;
+        final EditText in = new EditText(this);
+        in.setHint("Bin, e.g. D2-2");
+        in.setText(it.binLocation == null || "No bin assigned"
+                .equalsIgnoreCase(it.binLocation) ? batchBin : it.binLocation);
+        in.setSelectAllOnFocus(true);
+        int pad = dp(16);
+        in.setPadding(pad, pad, pad, pad);
+        new AlertDialog.Builder(this)
+                .setTitle("Change bin for " + it.name())
+                .setView(in)
+                .setPositiveButton("Save to Shopify", (d, w) -> {
+                    final String bin = in.getText().toString().trim();
+                    if (bin.isEmpty()) return;
+                    new AlertDialog.Builder(this)
+                            .setMessage("Set this product's bin in Shopify "
+                                    + "to " + bin + "?\n\nWas: "
+                                    + (it.binLocation == null ? "none"
+                                       : it.binLocation))
+                            .setPositiveButton("Yes, change it",
+                                    (d2, w2) -> applyBinChange(it, bin))
+                            .setNegativeButton("Cancel", null)
+                            .show();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void applyBinChange(BItem it, String bin) {
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("target", it.sku != null ? it.sku : it.barcode)
+                        .put("new_bin", bin)
+                        .put("changed_by", prefs.getString("device", "C72"));
+                api("POST", "/api/bin-updates", body);
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    it.binLocation = bin;
+                    editMsg.setText("Bin set to " + bin + " ✓");
+                    renderItemEditor();
+                    status.setText(it.name() + " → bin " + bin);
+                    reloadBatchOnly();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    editMsg.setText(e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    private void exactCountDialog() {
         if (editEntry == null) return;
         final BItem it = editEntry.item;
-        final int qty = Math.max(0, it.qty + delta);
+        final EditText in = new EditText(this);
+        in.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        in.setText(String.valueOf(it.qty));
+        in.setSelectAllOnFocus(true);
+        int pad = dp(16);
+        in.setPadding(pad, pad, pad, pad);
+        new AlertDialog.Builder(this)
+                .setTitle("Boxes scanned for " + it.name())
+                .setView(in)
+                .setPositiveButton("Set", (d, w) -> {
+                    try {
+                        setItemQty(it, Math.max(0,
+                                Integer.parseInt(
+                                        in.getText().toString().trim())));
+                    } catch (NumberFormatException ignored) {
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void editorAdjust(int delta) {
+        if (editEntry == null) return;
+        setItemQty(editEntry.item, Math.max(0, editEntry.item.qty + delta));
+    }
+
+    private void setItemQty(BItem item, int qty) {
+        final BItem it = item;
         new Thread(() -> {
             try {
                 JSONObject body = new JSONObject().put("qty", qty);
@@ -1155,12 +1266,17 @@ public class MainActivity extends Activity {
                         + "/items/" + it.id + "/qty", body);
                 final BItem updated = BItem.from(resp);
                 ui.post(() -> {
-                    editEntry.item = updated;
+                    if (editEntry != null) editEntry.item = updated;
                     BItem inList = itemById(updated.id);
                     if (inList != null) {
                         bItems.set(bItems.indexOf(inList), updated);
+                        if (previewItem == inList) previewItem = updated;
+                        if (pairActive == inList) pairActive = updated;
                     }
                     renderItemEditor();
+                    // Keep the list behind the editor honest too.
+                    refreshBatchList();
+                    updateBatchCard();
                 });
             } catch (Exception e) {
                 ui.post(() -> editMsg.setText(e.getMessage()));
