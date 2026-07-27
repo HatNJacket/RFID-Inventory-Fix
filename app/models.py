@@ -383,6 +383,7 @@ class BinMapEntry(Base):
     shopify_product_id: Mapped[str | None] = mapped_column(String(300))
     bin: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
     qty: Mapped[int | None] = mapped_column(Integer)
+    image_url: Mapped[str | None] = mapped_column(String(500))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

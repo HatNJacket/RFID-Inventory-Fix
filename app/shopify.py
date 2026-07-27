@@ -262,9 +262,11 @@ query AllBins($cursor: String) {
       barcode
       inventoryQuantity
       bin: metafield(namespace: "stock", key: "bin") { value }
+      image { url }
       product {
         id
         title
+        featuredImage { url }
         easyScanBin: metafield(namespace: "my_fields", key: "bin_location") {
           value
         }
@@ -294,6 +296,10 @@ def fetch_all_variant_bins() -> list[dict]:
             bin_value = (variant_bin or easy_bin or "").strip()
             if not bin_value:
                 continue
+            image = (
+                (v["image"] or {}).get("url")
+                or (v["product"]["featuredImage"] or {}).get("url")
+            )
             results.append({
                 "shopify_variant_id": v["id"],
                 "shopify_product_id": v["product"]["id"],
@@ -305,6 +311,7 @@ def fetch_all_variant_bins() -> list[dict]:
                 "barcode": v["barcode"],
                 "bin": bin_value,
                 "qty": v["inventoryQuantity"],
+                "image_url": image,
             })
         if not page["pageInfo"]["hasNextPage"]:
             return results

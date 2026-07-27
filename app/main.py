@@ -1315,6 +1315,7 @@ def _rebuild_bin_map() -> None:
                     shopify_product_id=e["shopify_product_id"],
                     bin=e["bin"][:100],
                     qty=e["qty"],
+                    image_url=(e.get("image_url") or "")[:500] or None,
                 )
                 for e in entries
             )
@@ -1453,6 +1454,7 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
                 "barcode": r.barcode,
                 "bin_location": r.bin,
                 "expected_qty": r.qty,
+                "image_url": r.image_url,
             })
     except Exception as error:
         logger.warning("bin pre-seed failed for %s: %s", payload.bin, error)
@@ -1482,6 +1484,7 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
             barcode=p.get("barcode"),
             bin_location=p.get("bin_location"),
             serial_prefix=sp.prefix if sp else None,
+            image_url=(p.get("image_url") or "")[:500] or None,
             # Batch labels use the standard store header + SKU; Astronomik
             # item names are set in Scan Station, not here.
             label_name=None,
