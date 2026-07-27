@@ -61,8 +61,11 @@ def main():
     # android.jar goes on the classpath (NOT bootclasspath): with the JDK's
     # own core classes available, lambdas compile under -source 8; d8 then
     # desugars for the device.
+    # -encoding UTF-8 matters: without it javac decodes the sources with the
+    # Windows codepage and every … ✓ — in a string ships garbled.
     run(os.path.join(JDK, "bin", "javac.exe"),
         "-source", "1.8", "-target", "1.8", "-nowarn",
+        "-encoding", "UTF-8",
         "-cp", ANDROID_JAR + os.pathsep + classes_jar,
         "-d", cls_dir, *sources)
 

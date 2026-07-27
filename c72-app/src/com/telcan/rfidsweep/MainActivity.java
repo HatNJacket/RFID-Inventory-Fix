@@ -2,19 +2,22 @@ package com.telcan.rfidsweep;
 
 // TC RFID Sweep — Chainway C72 companion app.
 //
-// Workflow: pull the trigger, walk the shelf, everything dedupes on the
-// device; hit SEND once when done. The sweep goes to the Azure server over
-// Wi-Fi and the PC's batch-verify screen pulls it with one click. No
-// Bluetooth anywhere, so range can't break a scan session.
+// v1.2: RFID ⇄ BARCODE mode toggle (the C72's 2D imager, via the same
+// Chainway SDK), scan sounds, and a 1–30 power slider with recommended
+// presets. Barcode mode is the capability test for moving the whole batch
+// workflow onto this device — capture works and dings; server upload for
+// barcodes lands with the batch-flow update.
 //
-// IMPORTANT on the device: only one app may hold the UHF module — turn off
-// KeyboardEmulator's UHF mode (and close the Chainway demo apps) first.
+// IMPORTANT on the device: only one app may hold the UHF module / scanner —
+// turn off KeyboardEmulator's UHF AND barcode modes first.
 
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.media.AudioManager;
+import android.media.ToneGenerator;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -27,9 +30,12 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.rscja.barcode.BarcodeDecoder;
+import com.rscja.barcode.BarcodeFactory;
 import com.rscja.deviceapi.RFIDWithUHFUART;
 
 import org.json.JSONArray;
@@ -55,28 +61,34 @@ public class MainActivity extends Activity {
     private static final int[] TRIGGER_KEYS = {
             139, 280, 291, 293, 294, 311, 312, 313, 315, 591, 593, 594, 595, 596
     };
+    // Recommended antenna power per job; the slider allows anything 1-30.
+    private static final int[] PRESET_LEVELS = {2, 5, 10, 30};
+    private static final String[] PRESET_LABELS = {
+            "2\nstation", "5\nbin", "10\nrack", "30\nlocate"};
 
     private RFIDWithUHFUART reader;
     private volatile boolean readerReady = false;
     private volatile boolean scanning = false;
     private volatile boolean listDirty = false;
 
-    private final LinkedHashMap<String, Integer> tags = new LinkedHashMap<>();
-    private final Handler ui = new Handler(Looper.getMainLooper());
+    private BarcodeDecoder decoder;
+    private volatile boolean decoderReady = false;
+    private volatile boolean decoderOpening = false;
+    private boolean barcodeMode = false;
 
-    // Antenna power presets: 2 = desk/scan-station range, 5 = standing at
-    // the bin, 10 = reach across a rack. (Radio max is 30 — saved for a
-    // future locate mode.)
-    private static final int[] POWER_LEVELS = {2, 5, 10};
-    private static final String[] POWER_LABELS = {
-            "PWR 2 · desk", "PWR 5 · bin", "PWR 10 · rack"};
+    private final LinkedHashMap<String, Integer> tags = new LinkedHashMap<>();
+    private final LinkedHashMap<String, Integer> codes = new LinkedHashMap<>();
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private ToneGenerator tones;
 
     private SharedPreferences prefs;
     private TextView status;
     private TextView countView;
+    private TextView powerLabel;
+    private SeekBar powerSeek;
+    private Button modeBtn;
     private Button toggleBtn;
     private Button sendBtn;
-    private final Button[] powerBtns = new Button[POWER_LEVELS.length];
     private ArrayAdapter<String> adapter;
 
     @Override
@@ -84,6 +96,10 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("sweep", MODE_PRIVATE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        try {
+            tones = new ToneGenerator(AudioManager.STREAM_MUSIC, 90);
+        } catch (Exception ignored) {
+        }
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -113,9 +129,51 @@ public class MainActivity extends Activity {
         countView.setPadding(0, dp(4), 0, dp(8));
         root.addView(countView);
 
+        modeBtn = new Button(this);
+        modeBtn.setOnClickListener(v -> toggleMode());
+        root.addView(modeBtn);
+
+        // Power: slider 1..30 plus recommended presets underneath. Only
+        // affects the RFID antenna; the barcode imager doesn't use it.
+        powerLabel = new TextView(this);
+        powerLabel.setTypeface(null, Typeface.BOLD);
+        powerLabel.setTextColor(Color.parseColor("#202223"));
+        powerLabel.setPadding(0, dp(6), 0, 0);
+        root.addView(powerLabel);
+
+        powerSeek = new SeekBar(this);
+        powerSeek.setMax(29); // progress 0..29 -> power 1..30
+        powerSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                powerLabel.setText("RFID power: " + (p + 1));
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+                setPowerLevel(s.getProgress() + 1, true);
+            }
+        });
+        root.addView(powerSeek);
+
+        LinearLayout presetRow = new LinearLayout(this);
+        for (int i = 0; i < PRESET_LEVELS.length; i++) {
+            final int level = PRESET_LEVELS[i];
+            Button b = new Button(this);
+            b.setText(PRESET_LABELS[i]);
+            b.setTextSize(11);
+            b.setAllCaps(false);
+            b.setOnClickListener(v -> setPowerLevel(level, true));
+            presetRow.addView(b, weight());
+        }
+        root.addView(presetRow);
+
         LinearLayout row1 = new LinearLayout(this);
         toggleBtn = new Button(this);
-        toggleBtn.setText("START SCAN");
         toggleBtn.setOnClickListener(v -> toggleScan());
         row1.addView(toggleBtn, weight());
         sendBtn = new Button(this);
@@ -123,19 +181,6 @@ public class MainActivity extends Activity {
         sendBtn.setOnClickListener(v -> send());
         row1.addView(sendBtn, weight());
         root.addView(row1);
-
-        LinearLayout powerRow = new LinearLayout(this);
-        for (int i = 0; i < POWER_LEVELS.length; i++) {
-            final int level = POWER_LEVELS[i];
-            Button b = new Button(this);
-            b.setText(POWER_LABELS[i]);
-            b.setTextSize(12);
-            b.setAllCaps(false);
-            b.setOnClickListener(v -> setPowerLevel(level, true));
-            powerBtns[i] = b;
-            powerRow.addView(b, weight());
-        }
-        root.addView(powerRow);
 
         LinearLayout row2 = new LinearLayout(this);
         Button clearBtn = new Button(this);
@@ -156,43 +201,16 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
-        restoreTags();
+        restoreSaved();
+        barcodeMode = prefs.getBoolean("barcode_mode", false);
+        applyMode();
+        int power = prefs.getInt("power", 5);
+        powerSeek.setProgress(power - 1);
+        powerLabel.setText("RFID power: " + power);
         refreshList();
-        highlightPower(prefs.getInt("power", 5));
         initReader();
+        if (barcodeMode) initBarcode();
         ui.postDelayed(this::refreshTick, 400);
-    }
-
-    private void highlightPower(int level) {
-        for (int i = 0; i < POWER_LEVELS.length; i++) {
-            boolean sel = POWER_LEVELS[i] == level;
-            powerBtns[i].setBackgroundColor(sel
-                    ? Color.parseColor("#005bd3")
-                    : Color.parseColor("#d9dbdd"));
-            powerBtns[i].setTextColor(sel ? Color.WHITE
-                    : Color.parseColor("#202223"));
-        }
-    }
-
-    private void setPowerLevel(int level, boolean announce) {
-        prefs.edit().putInt("power", level).apply();
-        highlightPower(level);
-        if (!readerReady) return;
-        final boolean wasScanning = scanning;
-        new Thread(() -> {
-            try {
-                if (wasScanning) reader.stopInventory();
-                final boolean ok = reader.setPower(level);
-                if (wasScanning) reader.startInventoryTag();
-                if (announce) ui.post(() -> status.setText(ok
-                        ? "Power set to " + level
-                        : "Power change FAILED — try again"));
-            } catch (Exception e) {
-                if (announce) ui.post(() ->
-                        status.setText("Power change failed: "
-                                + e.getMessage()));
-            }
-        }).start();
     }
 
     private LinearLayout.LayoutParams weight() {
@@ -204,7 +222,45 @@ public class MainActivity extends Activity {
         return Math.round(getResources().getDisplayMetrics().density * v);
     }
 
-    // ---------------------------------------------------------- reader ----
+    private void beep(boolean ok) {
+        if (tones == null) return;
+        try {
+            tones.startTone(ok ? ToneGenerator.TONE_PROP_BEEP
+                    : ToneGenerator.TONE_CDMA_SOFT_ERROR_LITE, ok ? 120 : 300);
+        } catch (Exception ignored) {
+        }
+    }
+
+    // ------------------------------------------------------------ modes ----
+    private LinkedHashMap<String, Integer> active() {
+        return barcodeMode ? codes : tags;
+    }
+
+    private void applyMode() {
+        modeBtn.setText(barcodeMode
+                ? "MODE: BARCODE  (tap for RFID)"
+                : "MODE: RFID  (tap for barcode)");
+        toggleBtn.setText(barcodeMode ? "SCAN BARCODE" : "START SCAN");
+        sendBtn.setEnabled(!barcodeMode);
+        refreshList();
+    }
+
+    private void toggleMode() {
+        if (scanning) toggleScan(); // stop RFID inventory first
+        barcodeMode = !barcodeMode;
+        prefs.edit().putBoolean("barcode_mode", barcodeMode).apply();
+        applyMode();
+        if (barcodeMode) {
+            if (!decoderReady) initBarcode();
+            else status.setText("Barcode mode — pull the trigger to scan");
+        } else {
+            status.setText(readerReady
+                    ? "RFID mode — pull the trigger to scan"
+                    : "RFID mode — reader not ready");
+        }
+    }
+
+    // ---------------------------------------------------------- RFID -------
     private void initReader() {
         new Thread(() -> {
             try {
@@ -240,17 +296,117 @@ public class MainActivity extends Activity {
             }
             ui.post(() -> {
                 readerReady = ready;
-                status.setText(ready
-                        ? "Reader ready (power " + power + ") — pull the "
-                          + "trigger to scan"
-                        : "Reader init FAILED — is KeyboardEmulator's "
-                          + "UHF mode still on? Only one app can hold the "
-                          + "module. Turn it off and reopen this app.");
+                if (!barcodeMode) {
+                    status.setText(ready
+                            ? "Reader ready (power " + power + ") — pull "
+                              + "the trigger to scan"
+                            : "Reader init FAILED — is KeyboardEmulator's "
+                              + "UHF mode still on? Only one app can hold "
+                              + "the module. Turn it off and reopen this "
+                              + "app.");
+                }
             });
         }).start();
     }
 
+    private void setPowerLevel(int level, boolean announce) {
+        final int lv = Math.max(1, Math.min(30, level));
+        prefs.edit().putInt("power", lv).apply();
+        powerSeek.setProgress(lv - 1);
+        powerLabel.setText("RFID power: " + lv);
+        if (!readerReady) return;
+        final boolean wasScanning = scanning;
+        new Thread(() -> {
+            try {
+                if (wasScanning) reader.stopInventory();
+                final boolean ok = reader.setPower(lv);
+                if (wasScanning) reader.startInventoryTag();
+                if (announce) ui.post(() -> status.setText(ok
+                        ? "Power set to " + lv
+                        : "Power change FAILED — try again"));
+            } catch (Exception e) {
+                if (announce) ui.post(() ->
+                        status.setText("Power change failed: "
+                                + e.getMessage()));
+            }
+        }).start();
+    }
+
+    // --------------------------------------------------------- barcode -----
+    private void initBarcode() {
+        if (decoderReady || decoderOpening) return;
+        decoderOpening = true;
+        status.setText("Starting the barcode engine…");
+        new Thread(() -> {
+            boolean ok = false;
+            try {
+                decoder = BarcodeFactory.getInstance().getBarcodeDecoder();
+                ok = decoder.open(getApplicationContext());
+                if (ok) {
+                    decoder.setDecodeCallback(entity -> {
+                        int rc = entity == null ? -99 : entity.getResultCode();
+                        final String data =
+                                rc == BarcodeDecoder.DECODE_SUCCESS
+                                        ? entity.getBarcodeData() : null;
+                        ui.post(() -> onBarcode(rc, data));
+                    });
+                }
+            } catch (Exception ignored) {
+            }
+            final boolean ready = ok;
+            ui.post(() -> {
+                decoderOpening = false;
+                decoderReady = ready;
+                if (barcodeMode) {
+                    status.setText(ready
+                            ? "Barcode mode — pull the trigger to scan"
+                            : "Barcode engine FAILED to open — turn off "
+                              + "KeyboardEmulator's barcode/scan mode too, "
+                              + "then reopen this app.");
+                }
+            });
+        }).start();
+    }
+
+    private void scanBarcodeOnce() {
+        if (!decoderReady) {
+            if (!decoderOpening) initBarcode();
+            return;
+        }
+        status.setText("Scanning… aim at the barcode");
+        try {
+            decoder.startScan();
+        } catch (Exception e) {
+            status.setText("Scan failed: " + e.getMessage());
+        }
+    }
+
+    private void onBarcode(int resultCode, String data) {
+        if (resultCode == BarcodeDecoder.DECODE_SUCCESS && data != null
+                && !data.trim().isEmpty()) {
+            final String code = data.trim();
+            synchronized (codes) {
+                Integer n = codes.get(code);
+                codes.put(code, n == null ? 1 : n + 1);
+            }
+            beep(true);
+            status.setText("Read: " + code);
+            refreshList();
+        } else if (resultCode == BarcodeDecoder.DECODE_TIMEOUT) {
+            beep(false);
+            status.setText("No barcode read — try again");
+        } else if (resultCode != BarcodeDecoder.DECODE_CANCEL) {
+            beep(false);
+            status.setText("Scan error (code " + resultCode + ")");
+        }
+    }
+
+    // ------------------------------------------------------------ scan -----
     private void toggleScan() {
+        if (barcodeMode) {
+            scanBarcodeOnce();
+            return;
+        }
         if (!readerReady) {
             Toast.makeText(this, "Reader not ready", Toast.LENGTH_SHORT).show();
             return;
@@ -281,7 +437,7 @@ public class MainActivity extends Activity {
         return super.onKeyDown(keyCode, event);
     }
 
-    // -------------------------------------------------------------- UI ----
+    // -------------------------------------------------------------- UI -----
     private void refreshTick() {
         if (listDirty) {
             listDirty = false;
@@ -292,9 +448,11 @@ public class MainActivity extends Activity {
 
     private void refreshList() {
         List<String> rows = new ArrayList<>();
-        synchronized (tags) {
-            countView.setText(tags.size() + " unique tags");
-            for (Map.Entry<String, Integer> e : tags.entrySet()) {
+        LinkedHashMap<String, Integer> src = active();
+        synchronized (src) {
+            countView.setText(src.size()
+                    + (barcodeMode ? " unique barcodes" : " unique tags"));
+            for (Map.Entry<String, Integer> e : src.entrySet()) {
                 rows.add(e.getKey() + "   ×" + e.getValue());
             }
         }
@@ -303,13 +461,15 @@ public class MainActivity extends Activity {
     }
 
     private void confirmClear() {
+        LinkedHashMap<String, Integer> src = active();
         int n;
-        synchronized (tags) { n = tags.size(); }
+        synchronized (src) { n = src.size(); }
         if (n == 0) return;
         new AlertDialog.Builder(this)
-                .setMessage("Clear " + n + " collected tags?")
+                .setMessage("Clear " + n
+                        + (barcodeMode ? " barcodes?" : " collected tags?"))
                 .setPositiveButton("Clear", (d, w) -> {
-                    synchronized (tags) { tags.clear(); }
+                    synchronized (src) { src.clear(); }
                     refreshList();
                     status.setText("Cleared — ready for the next shelf");
                 })
@@ -319,6 +479,11 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------- send ----
     private void send() {
+        if (barcodeMode) {
+            status.setText("Barcode capture is a test for now — the batch "
+                    + "workflow upload lands in the next update.");
+            return;
+        }
         final List<String> epcs = new ArrayList<>();
         synchronized (tags) { epcs.addAll(tags.keySet()); }
         if (epcs.isEmpty()) {
@@ -379,7 +544,7 @@ public class MainActivity extends Activity {
             final boolean sent = ok;
             ui.post(() -> {
                 status.setText(msg);
-                sendBtn.setEnabled(true);
+                sendBtn.setEnabled(!barcodeMode);
                 if (sent) Toast.makeText(this, "Sweep sent ✓",
                         Toast.LENGTH_LONG).show();
             });
@@ -453,15 +618,20 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------- persistence ----
-    private void restoreTags() {
-        String saved = prefs.getString("saved_tags", "");
+    private void restoreSaved() {
+        restoreMap("saved_tags", tags);
+        restoreMap("saved_codes", codes);
+    }
+
+    private void restoreMap(String prefKey, LinkedHashMap<String, Integer> map) {
+        String saved = prefs.getString(prefKey, "");
         if (saved.isEmpty()) return;
-        synchronized (tags) {
+        synchronized (map) {
             for (String line : saved.split("\n")) {
                 int sep = line.lastIndexOf('|');
                 if (sep <= 0) continue;
                 try {
-                    tags.put(line.substring(0, sep),
+                    map.put(line.substring(0, sep),
                             Integer.parseInt(line.substring(sep + 1)));
                 } catch (NumberFormatException ignored) {
                 }
@@ -469,17 +639,22 @@ public class MainActivity extends Activity {
         }
     }
 
-    @Override
-    protected void onPause() {
-        super.onPause();
+    private void saveMap(String prefKey, LinkedHashMap<String, Integer> map) {
         StringBuilder sb = new StringBuilder();
-        synchronized (tags) {
-            for (Map.Entry<String, Integer> e : tags.entrySet()) {
+        synchronized (map) {
+            for (Map.Entry<String, Integer> e : map.entrySet()) {
                 sb.append(e.getKey()).append('|').append(e.getValue())
                         .append('\n');
             }
         }
-        prefs.edit().putString("saved_tags", sb.toString()).apply();
+        prefs.edit().putString(prefKey, sb.toString()).apply();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        saveMap("saved_tags", tags);
+        saveMap("saved_codes", codes);
     }
 
     @Override
@@ -488,6 +663,14 @@ public class MainActivity extends Activity {
         try {
             if (scanning) reader.stopInventory();
             if (readerReady) reader.free();
+        } catch (Exception ignored) {
+        }
+        try {
+            if (decoderReady) decoder.close();
+        } catch (Exception ignored) {
+        }
+        try {
+            if (tones != null) tones.release();
         } catch (Exception ignored) {
         }
     }
