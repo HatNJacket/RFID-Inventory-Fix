@@ -2416,6 +2416,9 @@ function renderBitem() {
     it.expected_qty != null
       ? `boxes scanned · Shopify on-hand ${it.expected_qty}`
       : "boxes scanned";
+  // Reprinting one product's labels only makes sense once it resolved.
+  document.getElementById("bitem-printwrap").hidden = !it.resolved;
+  document.getElementById("bitem-printqty").value = 1;
 }
 
 // --- label format (Change Name / Change SKU / Change Both) ------------------
@@ -2804,6 +2807,41 @@ document.getElementById("batch-skip-print").addEventListener("click", async () =
     setBatchResult("Straight to pairing — no labels queued.", "ok");
   } catch (err) {
     setBatchResult(err.message, "err");
+  }
+});
+
+// Print labels for just this product — a damaged sticker shouldn't mean
+// reprinting the whole bin.
+document.getElementById("bitem-print").addEventListener("click", async () => {
+  const it = bitemEntry.item;
+  const msg = document.getElementById("bitem-msg");
+  const btn = document.getElementById("bitem-print");
+  const qty = Math.max(
+    1,
+    Math.min(50, Number(document.getElementById("bitem-printqty").value) || 1)
+  );
+  if (
+    !confirm(
+      `Print ${qty} label(s) for ${it.product_title || it.sku}?\n\n` +
+        `They join the print queue with the rest — the other products in ` +
+        `this bin aren't reprinted.`
+    )
+  )
+    return;
+  btn.disabled = true;
+  msg.textContent = "Queueing…";
+  try {
+    const res = await postJson(
+      `/api/batches/${batch.id}/items/${it.id}/labels`,
+      { quantity: qty, requested_by: operatorEl.value || null }
+    );
+    batchSound("ok");
+    msg.textContent = `${res.count} label(s) queued — collect them at the printer.`;
+  } catch (err) {
+    batchSound("err");
+    msg.textContent = err.message;
+  } finally {
+    btn.disabled = false;
   }
 });
 

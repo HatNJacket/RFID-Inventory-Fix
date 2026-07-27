@@ -2337,6 +2337,76 @@ class BatchQueueIn(BaseModel):
     requested_by: str | None = Field(default=None, max_length=100)
 
 
+def _label_name_for(session: Session, item: BatchItem) -> tuple:
+    """Preferred label name + placement for one batch item, in order: the
+    serial brand's confirmed name, the product's saved label name, then
+    the item's own override. None = store header + SKU."""
+    if item.serial_prefix:
+        sp = session.get(SerialPrefix, item.serial_prefix)
+        if sp is not None and sp.label_name:
+            return sp.label_name, "header"
+    if item.sku:
+        custom = session.get(LabelName, item.sku)
+        if custom is not None:
+            return custom.label_name, custom.placement or "header"
+    if item.label_name and item.label_name != item.sku:
+        return item.label_name, "header"
+    return None, "header"
+
+
+class ItemLabelsIn(BaseModel):
+    quantity: int = Field(default=1, ge=1, le=50)
+    requested_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/batches/{batch_id}/items/{item_id}/labels",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def batch_item_labels(
+    batch_id: int,
+    item_id: int,
+    payload: ItemLabelsIn,
+    session: Session = Depends(get_session),
+):
+    """Print labels for ONE product in the batch — a damaged sticker or a
+    box that turned up late shouldn't mean reprinting the whole bin. Same
+    label content as the batch run; the batch's status is untouched."""
+    batch = _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    if not item.resolved or not item.shopify_variant_id:
+        raise HTTPException(
+            422, "That row never resolved to a product, so there's nothing "
+                 "to put on a label."
+        )
+    label_name, placement = _label_name_for(session, item)
+    jobs = [
+        PrintJob(
+            epc=_new_epc(),
+            status="pending",
+            batch_id=batch.id,
+            shopify_variant_id=item.shopify_variant_id,
+            shopify_product_id=item.shopify_product_id,
+            product_title=item.product_title or "",
+            variant_title=item.variant_title,
+            sku=item.sku,
+            barcode=item.barcode,
+            bin_location=batch.bin_name,
+            other_bins=item.other_bins,
+            label_name=label_name,
+            label_placement=placement,
+            requested_by=payload.requested_by or batch.created_by,
+        )
+        for _ in range(payload.quantity)
+    ]
+    session.add_all(jobs)
+    session.commit()
+    return {"count": len(jobs), "item": item.as_dict()}
+
+
 @app.post(
     "/api/batches/{batch_id}/queue-labels",
     status_code=201,
@@ -2361,24 +2431,7 @@ def batch_queue_labels(
     for item in _batch_items(session, batch_id):
         if not item.resolved or not item.shopify_variant_id:
             continue
-        # Preferred name, in order: this batch item's own override, the
-        # serial brand's confirmed name, then the product's saved label
-        # name (Check step / History panel). None = store header + SKU.
-        label_name = None
-        label_placement = "header"
-        if item.serial_prefix:
-            sp = session.get(SerialPrefix, item.serial_prefix)
-            if sp is not None and sp.label_name:
-                label_name = sp.label_name
-        if label_name is None and item.sku:
-            custom = session.get(LabelName, item.sku)
-            if custom is not None:
-                label_name = custom.label_name
-                label_placement = custom.placement or "header"
-        if label_name is None and item.label_name and (
-            item.label_name != item.sku
-        ):
-            label_name = item.label_name
+        label_name, label_placement = _label_name_for(session, item)
         for _ in range(item.qty_scanned):
             jobs.append(
                 PrintJob(
