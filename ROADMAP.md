@@ -72,12 +72,14 @@ next bin.
 
 ## 🔶 In progress / blocked
 
-- **C72 batch workflow FIELD TEST** (app v1.5, deployed 2026-07-26):
-  the whole batch flow now runs on the C72 — BATCH… picker, COLLECT
-  (BT-scanner scans, outcome sounds, n/N tickers), PAIR (barcode selects,
-  trigger single-reads the sticker, undo), FINISH (stock-delta confirm).
-  Any browser with the same batch open mirrors it live (3s poll).
-  ACTION (Steve): install v1.5, pair the BT scanner, run one real bin
+- **C72 v2.0 FIELD TEST** (deployed 2026-07-26): tabbed app —
+  BATCH | STATION | SWEEP | LOCATE(WIP), tabs hideable in ⚙. Batch
+  screen: bin+boxes top-left, tappable COLLECT/PAIR chip top-right,
+  PWR chip → power dialog, product preview card (image/name/SKU +
+  scanned/expected tracker in the corner), scan list owns the screen.
+  Station tab = single-product tag linking with the same card. Live web
+  mirror (3s poll) while a batch is open.
+  ACTION (Steve): install v2.0, pair the BT scanner, run one real bin
   end to end.
 - Built-in imager: confirmed absent (no aimer light, instant
   DECODE_FAILURE) — barcodes come from the BT scanner permanently.
