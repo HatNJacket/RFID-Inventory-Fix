@@ -1567,9 +1567,9 @@ async function startBatch() {
   }
 }
 
-// Re-pull the batch from the server: the iPad collects at the shelf while
-// the PC watches the same list — Refresh (either side) syncs the view.
-async function refreshBatch() {
+// Re-pull the batch from the server. The C72 (or another terminal) writes
+// every scan/pair server-side, so pulling is all "live" means.
+async function pullBatch(announce) {
   if (!batch) return;
   try {
     const data = await apiJson(`/api/batches/${batch.id}`);
@@ -1581,9 +1581,46 @@ async function refreshBatch() {
       renderPairItems();
       renderPairCard();
     }
-    setBatchResult("Refreshed from the server.", "ok");
+    if (announce) setBatchResult("Refreshed from the server.", "ok");
   } catch (err) {
-    setBatchResult(err.message, "err");
+    if (announce) setBatchResult(err.message, "err");
+  }
+}
+
+async function refreshBatch() {
+  return pullBatch(true);
+}
+
+// Live feed: while a batch is open, poll every 3s so this screen mirrors
+// whatever the C72 (or any other terminal) is doing to the same batch.
+let batchLiveTimer = null;
+
+function startBatchLive() {
+  stopBatchLive();
+  batchLiveTimer = setInterval(() => {
+    // No document.hidden guard: embedded webviews (and some tablet shells)
+    // misreport visibility, and a live feed that silently pauses is worse
+    // than one cheap GET every 3s.
+    if (!batch) return;
+    if (document.getElementById("tab-batch").hidden) return;
+    // Never clobber something the operator is typing (label names etc.);
+    // the always-focused scan fields are exempt — they're transient.
+    const ae = document.activeElement;
+    if (
+      ae &&
+      ae.tagName === "INPUT" &&
+      ae.closest("#tab-batch") &&
+      !["batch-scan", "bpair-scan", "bverify-scan", "batch-bin"].includes(ae.id)
+    )
+      return;
+    pullBatch(false);
+  }, 3000);
+}
+
+function stopBatchLive() {
+  if (batchLiveTimer) {
+    clearInterval(batchLiveTimer);
+    batchLiveTimer = null;
   }
 }
 
@@ -1609,6 +1646,7 @@ function openBatchView(stage) {
   bEl.binChip.textContent = `Bin ${batch.bin_name}`;
   setBatchResult("", null);
   showBatchStage(stage);
+  startBatchLive();
 }
 
 const BATCH_STAGES = ["collect", "labels", "print", "pair", "verify"];
@@ -1667,6 +1705,7 @@ bEl.abandon.addEventListener("click", async () => {
   batch = null;
   batchItems = [];
   stopBatchPrintPoll();
+  stopBatchLive();
   enterBatchTab();
 });
 
@@ -2166,6 +2205,7 @@ bEl.complete.addEventListener("click", async () => {
     batchItems = [];
     pairHistory = [];
     pairActiveItemId = null;
+    stopBatchLive();
     enterBatchTab();
     setBatchResult(
       n
