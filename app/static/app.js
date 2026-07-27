@@ -1438,7 +1438,6 @@ function postJson(url, payload) {
 let batch = null; // {id, bin_name, status, ...}
 let batchItems = []; // BatchItem dicts (server shape)
 let batchStage = "collect";
-let labelIndex = 0;
 let pairActiveItemId = null;
 let pairHistory = []; // [{epc, item_id}] for undo
 let verifyEpcs = new Set();
@@ -1458,16 +1457,6 @@ const bEl = {
   scan: document.getElementById("batch-scan"),
   items: document.getElementById("batch-items"),
   toLabels: document.getElementById("batch-to-labels"),
-  labelCount: document.getElementById("blabel-count"),
-  labelImg: document.getElementById("blabel-img"),
-  labelTitle: document.getElementById("blabel-title"),
-  labelSku: document.getElementById("blabel-sku"),
-  labelQty: document.getElementById("blabel-qty"),
-  labelExpected: document.getElementById("blabel-expected"),
-  labelName: document.getElementById("blabel-name"),
-  labelSave: document.getElementById("blabel-save"),
-  labelPrev: document.getElementById("blabel-prev"),
-  labelNext: document.getElementById("blabel-next"),
   queue: document.getElementById("batch-queue"),
   printAgent: document.getElementById("bprint-agent"),
   printStatus: document.getElementById("bprint-status"),
@@ -1576,11 +1565,12 @@ async function pullBatch(announce) {
     batch = data.batch;
     batchItems = data.items;
     if (batchStage === "collect") renderBatchItems();
-    else if (batchStage === "labels") renderLabelCard();
     else if (batchStage === "pair") {
       renderPairItems();
       renderPairCard();
     }
+    // (check stage re-fetches its review on entry, not on the live poll —
+    // the candidates lookups are too heavy to run every 3s)
     if (announce) setBatchResult("Refreshed from the server.", "ok");
   } catch (err) {
     if (announce) setBatchResult(err.message, "err");
@@ -1667,9 +1657,7 @@ function showBatchStage(stage) {
     renderBatchItems();
     bEl.scan.focus();
   } else if (stage === "labels") {
-    labelIndex = Math.min(labelIndex, labelItems().length - 1);
-    if (labelIndex < 0) labelIndex = 0;
-    renderLabelCard();
+    loadBatchReview();
   } else if (stage === "print") {
     pollBatchPrint();
     batchPrintTimer = setInterval(pollBatchPrint, 3000);
@@ -1934,81 +1922,219 @@ async function moveItemBin(item) {
 
 bEl.toLabels.addEventListener("click", () => {
   if (!labelItems().length) {
-    setBatchResult("Nothing to label yet — scan at least one known product.", "err");
+    setBatchResult("Nothing scanned yet — scan at least one known product.", "err");
     return;
   }
-  labelIndex = 0;
   showBatchStage("labels");
 });
 
-// --- Stage 2: labels --------------------------------------------------------
+// --- Stage 2: check ---------------------------------------------------------
+// Only items needing a human decision appear here (server decides why);
+// everything else sails straight through to label queueing.
 function labelItems() {
   return batchItems.filter((i) => i.resolved && i.qty_scanned > 0);
 }
 
-function renderLabelCard() {
-  const items = labelItems();
-  const item = items[labelIndex];
-  if (!item) return;
-  bEl.labelCount.textContent = `Product ${labelIndex + 1} of ${items.length}`;
-  bEl.labelTitle.textContent =
-    (item.product_title || "—") +
-    (item.variant_title ? ` (${item.variant_title})` : "");
-  bEl.labelSku.textContent = item.sku || "—";
-  bEl.labelQty.textContent = `${item.qty_scanned} → ${item.qty_scanned} label(s)`;
-  bEl.labelExpected.textContent =
-    item.expected_qty != null ? String(item.expected_qty) : "—";
-  // Batch labels print "Telescopes Canada" + SKU; the field defaults to the
-  // SKU. Type a real name only for a rare custom header (Astronomik item
-  // names are set in Scan Station).
-  bEl.labelName.value = item.label_name || item.sku || "";
-  if (item.image_url) {
-    bEl.labelImg.src = item.image_url;
-    bEl.labelImg.hidden = false;
-  } else {
-    bEl.labelImg.hidden = true;
-    bEl.labelImg.removeAttribute("src");
+const FLAG_TEXT = {
+  ambiguous: "barcode matches several listings",
+  "count-mismatch": "count differs from Shopify",
+  "unconfirmed-name": "serial name not confirmed",
+  unresolved: "unknown barcode",
+};
+
+let checkEntries = [];
+let bitemEntry = null;
+let bitemIdx = 0;
+
+async function loadBatchReview() {
+  const list = document.getElementById("bcheck-list");
+  const empty = document.getElementById("bcheck-empty");
+  empty.hidden = true;
+  list.innerHTML = '<li class="recent__empty">Checking the batch…</li>';
+  try {
+    const data = await apiJson(`/api/batches/${batch.id}/review`);
+    checkEntries = data.items;
+    list.innerHTML = "";
+    if (!checkEntries.length) {
+      empty.hidden = false;
+      return;
+    }
+    checkEntries.forEach((entry) => {
+      const li = itemCard(entry.item, "collect");
+      const flags = document.createElement("div");
+      flags.className = "bcell__meta bcell__flags";
+      flags.textContent =
+        "⚠ " + entry.flags.map((f) => FLAG_TEXT[f] || f).join(" · ");
+      li.querySelector(".bcell__info").append(flags);
+      li.style.cursor = "pointer";
+      li.addEventListener("click", () => openBitem(entry));
+      list.append(li);
+    });
+  } catch (err) {
+    list.innerHTML = `<li class="recent__empty">${escapeHtml(err.message)}</li>`;
   }
-  bEl.labelPrev.disabled = labelIndex === 0;
-  bEl.labelNext.disabled = labelIndex >= items.length - 1;
-  bEl.labelSave.textContent = "Save name";
 }
 
-async function saveBatchLabelName() {
-  const item = labelItems()[labelIndex];
-  const name = bEl.labelName.value.trim();
-  if (!item || !name) return;
+// --- Check-item editor (candidates arrows, counts, serial name) -------------
+function openBitem(entry) {
+  bitemEntry = entry;
+  const cands = entry.candidates || [];
+  bitemIdx = Math.max(
+    0,
+    cands.findIndex(
+      (c) => c.shopify_variant_id === entry.item.shopify_variant_id
+    )
+  );
+  document.getElementById("bitem-msg").textContent = "";
+  document.getElementById("bitem-overlay").hidden = false;
+  renderBitem();
+}
+
+function renderBitem() {
+  const it = bitemEntry.item;
+  const cands = bitemEntry.candidates || [];
+  const multi = cands.length > 1;
+  const showing = multi ? cands[bitemIdx] : it;
+  document.getElementById("bitem-title").textContent =
+    (showing.product_title || "(unknown)") +
+    (showing.variant_title ? ` (${showing.variant_title})` : "");
+  document.getElementById("bitem-meta").textContent =
+    `SKU: ${showing.sku || "—"} · Barcode: ${showing.barcode || it.scanned_code || "—"}` +
+    ` · Bin: ${showing.bin_location || "—"}`;
+  const img = document.getElementById("bitem-img");
+  const imgUrl = showing.image_url || (showing === it ? it.image_url : null);
+  if (imgUrl) {
+    img.src = imgUrl;
+    img.hidden = false;
+  } else {
+    img.hidden = true;
+    img.removeAttribute("src");
+  }
+  document.getElementById("bitem-flags").textContent =
+    "⚠ " + bitemEntry.flags.map((f) => FLAG_TEXT[f] || f).join(" · ");
+
+  const prev = document.getElementById("bitem-prev");
+  const next = document.getElementById("bitem-next");
+  prev.style.visibility = multi ? "visible" : "hidden";
+  next.style.visibility = multi ? "visible" : "hidden";
+  prev.disabled = bitemIdx === 0;
+  next.disabled = bitemIdx >= cands.length - 1;
+  const pos = document.getElementById("bitem-candpos");
+  pos.hidden = !multi;
+  if (multi) {
+    const current =
+      cands[bitemIdx].shopify_variant_id === it.shopify_variant_id;
+    pos.textContent =
+      `Listing ${bitemIdx + 1} of ${cands.length} sharing this barcode` +
+      (current ? " — currently selected" : "");
+    const useWrap = document.getElementById("bitem-usewrap");
+    useWrap.hidden = false;
+    document.getElementById("bitem-use").disabled = current;
+  } else {
+    document.getElementById("bitem-usewrap").hidden = true;
+  }
+
+  const nameWrap = document.getElementById("bitem-namewrap");
+  nameWrap.hidden = !bitemEntry.flags.includes("unconfirmed-name");
+  if (!nameWrap.hidden) {
+    document.getElementById("bitem-name").value = it.label_name || "";
+  }
+
+  document.getElementById("bitem-qty").textContent = it.qty_scanned;
+  document.getElementById("bitem-expected").textContent =
+    it.expected_qty != null
+      ? `boxes scanned · Shopify on-hand ${it.expected_qty}`
+      : "boxes scanned";
+}
+
+document.getElementById("bitem-prev").addEventListener("click", () => {
+  if (bitemIdx > 0) {
+    bitemIdx--;
+    renderBitem();
+  }
+});
+document.getElementById("bitem-next").addEventListener("click", () => {
+  if (bitemIdx < (bitemEntry.candidates || []).length - 1) {
+    bitemIdx++;
+    renderBitem();
+  }
+});
+
+document.getElementById("bitem-use").addEventListener("click", async () => {
+  const cand = bitemEntry.candidates[bitemIdx];
+  const msg = document.getElementById("bitem-msg");
   try {
-    const updated = await apiJson(
-      `/api/batches/${batch.id}/items/${item.id}/label`,
+    const data = await apiJson(
+      `/api/batches/${batch.id}/items/${bitemEntry.item.id}/reassign`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shopify_variant_id: cand.shopify_variant_id }),
+      }
+    );
+    batchSound("ok");
+    document.getElementById("bitem-overlay").hidden = true;
+    setBatchResult(
+      (data.merged ? "Merged into the existing row for " : "Reassigned to ") +
+        (data.item.product_title || data.item.sku) +
+        ".",
+      "ok"
+    );
+    await pullBatch(false);
+    loadBatchReview();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+document.getElementById("bitem-name-save").addEventListener("click", async () => {
+  const it = bitemEntry.item;
+  const name = document.getElementById("bitem-name").value.trim();
+  const msg = document.getElementById("bitem-msg");
+  if (!name || !it.serial_prefix) return;
+  try {
+    await apiJson(
+      `/api/serial-prefixes/${encodeURIComponent(it.serial_prefix)}/label`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ label_name: name }),
       }
     );
-    Object.assign(item, updated);
-    bEl.labelSave.textContent = "Saved ✓";
-    setTimeout(() => (bEl.labelSave.textContent = "Save name"), 1500);
+    it.label_name = name;
+    msg.textContent = "Name confirmed ✓";
   } catch (err) {
-    setBatchResult(err.message, "err");
+    msg.textContent = err.message;
+  }
+});
+
+async function bitemAdjust(delta) {
+  const it = bitemEntry.item;
+  const qty = Math.max(0, it.qty_scanned + delta);
+  try {
+    const updated = await postJson(
+      `/api/batches/${batch.id}/items/${it.id}/qty`,
+      { qty }
+    );
+    Object.assign(it, updated);
+    const inList = batchItems.find((i) => i.id === it.id);
+    if (inList) Object.assign(inList, updated);
+    renderBitem();
+  } catch (err) {
+    document.getElementById("bitem-msg").textContent = err.message;
   }
 }
+document.getElementById("bitem-minus").addEventListener("click", () => bitemAdjust(-1));
+document.getElementById("bitem-plus").addEventListener("click", () => bitemAdjust(1));
 
-bEl.labelSave.addEventListener("click", saveBatchLabelName);
-bEl.labelName.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") saveBatchLabelName();
+document.getElementById("bitem-close").addEventListener("click", () => {
+  document.getElementById("bitem-overlay").hidden = true;
+  loadBatchReview();
 });
-bEl.labelPrev.addEventListener("click", () => {
-  if (labelIndex > 0) {
-    labelIndex--;
-    renderLabelCard();
-  }
-});
-bEl.labelNext.addEventListener("click", () => {
-  if (labelIndex < labelItems().length - 1) {
-    labelIndex++;
-    renderLabelCard();
+document.getElementById("bitem-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "bitem-overlay") {
+    document.getElementById("bitem-overlay").hidden = true;
+    loadBatchReview();
   }
 });
 
@@ -2597,14 +2723,24 @@ async function openProductHistory(term) {
       document.getElementById("phist-serial").hidden = false;
       document.getElementById("phist-label-input").value =
         phistEffectiveName() || "";
+      phistPlacement = data.serial_prefix
+        ? "header"
+        : data.custom_placement || "header";
+      // Serialized names are header-only by design (name-at-top labels);
+      // the placement toggle applies to everything else.
+      document.getElementById("phist-placement").hidden =
+        !!data.serial_prefix;
+      document.getElementById("phist-label-clear").hidden =
+        !!data.serial_prefix;
+      updatePlacementBtn();
       document.getElementById("phist-label-hint").textContent =
         data.serial_prefix
           ? "Preferred label name (serialized product) — printed at the " +
             "top of every label, including Scan Station auto-prints. " +
             "Long names print smaller to fit two lines:"
-          : "Preferred label name — printed at the top instead of " +
-            "“Telescopes Canada” when set here. Leave blank for " +
-            "the standard label. Long names print smaller:";
+          : "Preferred label name — prints where the toggle says " +
+            "(replacing the store name, or the SKU line above the " +
+            "barcode). ✕ clears it back to the standard label:";
       updateLabelPreview();
     }
     document.getElementById("phist-print").disabled = !p;
@@ -2668,7 +2804,9 @@ document.getElementById("phist-overlay").addEventListener("click", (e) => {
 });
 
 // The name a label would print for this product right now (null = the
-// standard store header).
+// standard store header) and where it goes.
+let phistPlacement = "header";
+
 function phistEffectiveName() {
   if (!phistData) return null;
   if (phistData.serial_prefix)
@@ -2676,29 +2814,52 @@ function phistEffectiveName() {
   return phistData.custom_label;
 }
 
+function updatePlacementBtn() {
+  document.getElementById("phist-placement").textContent =
+    phistPlacement === "sku" ? "Replaces: SKU line" : "Replaces: store name";
+}
+
 // Miniature sticker mirrors the agent's real layout, including the
-// smaller font tiers long names trigger.
+// smaller font tiers long names trigger and the placement modes.
 function updateLabelPreview() {
   if (!phistData) return;
   const p = phistData.product || {};
   const typed = document.getElementById("phist-label-input").value.trim();
-  const header = typed || "Telescopes Canada";
+  const asSku = typed && phistPlacement === "sku";
+  const header = asSku || !typed ? "Telescopes Canada" : typed;
   const el = document.getElementById("phist-prev-header");
   el.textContent = header;
   el.className =
     "label-preview__header " +
-    (!typed || header.length <= 26
+    (asSku || !typed || header.length <= 26
       ? "label-preview__header--lg"
       : header.length <= 56
         ? "label-preview__header--md"
         : "label-preview__header--sm");
-  document.getElementById("phist-prev-sku").textContent =
-    p.sku || phistData.sku || "";
+  document.getElementById("phist-prev-sku").textContent = asSku
+    ? typed
+    : p.sku || phistData.sku || "";
   document.getElementById("phist-prev-bc").textContent =
     p.barcode || p.sku || phistData.barcode || "";
   document.getElementById("phist-prev-bin").textContent =
     "BIN: " + (p.bin_location || "—");
 }
+
+document.getElementById("phist-placement").addEventListener("click", () => {
+  phistPlacement = phistPlacement === "sku" ? "header" : "sku";
+  updatePlacementBtn();
+  updateLabelPreview();
+});
+
+document.getElementById("phist-label-clear").addEventListener("click", async () => {
+  const input = document.getElementById("phist-label-input");
+  input.value = "";
+  updateLabelPreview();
+  // If a name was saved, clearing the box also purges it server-side.
+  if (phistData && !phistData.serial_prefix && phistData.custom_label) {
+    document.getElementById("phist-label-save").click();
+  }
+});
 
 document
   .getElementById("phist-label-input")
@@ -2736,11 +2897,13 @@ document.getElementById("phist-label-save").addEventListener("click", async () =
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             label_name: name,
+            placement: phistPlacement,
             updated_by: operatorEl.value || null,
           }),
         }
       );
       phistData.custom_label = name || null;
+      phistData.custom_placement = phistPlacement;
     }
     updateLabelPreview();
     msg.textContent = name
@@ -2783,6 +2946,11 @@ document.getElementById("phist-print").addEventListener("click", async () => {
         barcode: p.barcode,
         bin_location: p.bin_location,
         label_name: phistEffectiveName(),
+        label_placement: phistEffectiveName()
+          ? phistData.serial_prefix
+            ? "header"
+            : phistData.custom_placement || "header"
+          : null,
         requested_by: operator,
       }),
     });

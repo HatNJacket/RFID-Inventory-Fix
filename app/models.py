@@ -227,9 +227,12 @@ class PrintJob(Base):
     # handles run up to 255 chars.
     shopify_product_id: Mapped[str | None] = mapped_column(String(300))
 
-    # Operator-preferred label header (serialized brands like Astronomik);
-    # when set, the agent prints it in place of the store name.
+    # Operator-preferred label name (serialized brands like Astronomik, or
+    # per-SKU custom names); when set, the agent prints it per placement.
     label_name: Mapped[str | None] = mapped_column(String(255))
+    # Where the name goes: "header" replaces the store name, "sku" replaces
+    # the SKU line above the barcode. NULL = header (back-compat).
+    label_placement: Mapped[str | None] = mapped_column(String(10))
 
     requested_by: Mapped[str | None] = mapped_column(String(100))
     error: Mapped[str | None] = mapped_column(String(500))
@@ -257,6 +260,7 @@ class PrintJob(Base):
             "shopify_variant_id": self.shopify_variant_id,
             "shopify_product_id": self.shopify_product_id,
             "label_name": self.label_name,
+            "label_placement": self.label_placement,
             "requested_by": self.requested_by,
             "error": self.error,
             "created_at": (
@@ -398,6 +402,10 @@ class LabelName(Base):
 
     sku: Mapped[str] = mapped_column(String(100), primary_key=True)
     label_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # "header" (replaces the store name) or "sku" (replaces the SKU line).
+    placement: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="header", server_default="header"
+    )
     updated_by: Mapped[str | None] = mapped_column(String(100))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

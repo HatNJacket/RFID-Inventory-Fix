@@ -156,6 +156,7 @@ public class MainActivity extends Activity {
         String scannedCode;
         String serialPrefix;
         String imageUrl;
+        String variantId;
         boolean resolved;
         int qty;
         Integer expected;
@@ -176,6 +177,8 @@ public class MainActivity extends Activity {
                     : o.optString("serial_prefix");
             b.imageUrl = o.isNull("image_url") ? null
                     : o.optString("image_url");
+            b.variantId = o.isNull("shopify_variant_id") ? null
+                    : o.optString("shopify_variant_id");
             b.resolved = o.optBoolean("resolved", false);
             b.qty = o.optInt("qty_scanned", 0);
             b.expected = o.isNull("expected_qty") ? null
@@ -191,13 +194,30 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static final int STEP_COLLECT = 0;
+    private static final int STEP_CHECK = 1;
+    private static final int STEP_PAIR = 2;
+    private static final String[] STEP_NAMES = {"COLLECT", "CHECK", "PAIR"};
+
+    private static class CheckEntry {
+        BItem item;
+        final List<String> flags = new ArrayList<>();
+        final List<JSONObject> candidates = new ArrayList<>();
+    }
+
     private int batchId = -1;
     private String batchBin = null;
-    private boolean pairPhase = false;
+    private int step = STEP_COLLECT;
     private final List<BItem> bItems = new ArrayList<>();
+    private final List<CheckEntry> checkEntries = new ArrayList<>();
+    private final HashMap<Integer, String> checkFlagText = new HashMap<>();
     private BItem previewItem = null;   // last scanned / pair target
     private BItem pairActive = null;
     private final ArrayDeque<String[]> pairHistory = new ArrayDeque<>();
+
+    // check-item editor state
+    private CheckEntry editEntry = null;
+    private int editIdx = 0;
 
     private JSONObject stationProduct = null;
     private int stationTags = 0;
@@ -353,6 +373,8 @@ public class MainActivity extends Activity {
                 Gravity.START));
         outer.addView(drawerScrim);
 
+        buildItemEditor(outer);
+
         setContentView(outer);
 
         restoreMap("saved_tags", tags);
@@ -415,19 +437,25 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         batchBtnRow = new LinearLayout(this);
-        Button print = smallBtn("PRINT");
-        print.setOnClickListener(x -> queueLabels());
-        batchBtnRow.addView(print, weight());
+        Button back = smallBtn("← BACK");
+        back.setOnClickListener(x -> stepBack());
+        batchBtnRow.addView(back, weight());
+        Button next = smallBtn("NEXT →");
+        next.setOnClickListener(x -> stepNext());
+        batchBtnRow.addView(next, weight());
         Button undo = smallBtn("UNDO");
         undo.setOnClickListener(x -> undoPair());
         batchBtnRow.addView(undo, weight());
-        Button finish = smallBtn("FINISH");
-        finish.setOnClickListener(x -> finishBatch());
-        batchBtnRow.addView(finish, weight());
         Button exit = smallBtn("EXIT");
         exit.setOnClickListener(x -> exitBatch(false));
         batchBtnRow.addView(exit, weight());
         v.addView(batchBtnRow);
+
+        batchListView.setOnItemClickListener((parent, view, pos, id) -> {
+            if (inBatch() && step == STEP_CHECK && pos < checkEntries.size()) {
+                openItemEditor(checkEntries.get(pos));
+            }
+        });
 
         return v;
     }
@@ -598,6 +626,290 @@ public class MainActivity extends Activity {
         return b;
     }
 
+    // ------------------------------------------------ check-item editor -----
+    private FrameLayout editScrim;
+    private ImageView editImg;
+    private TextView editName;
+    private TextView editMeta;
+    private TextView editFlags;
+    private TextView editPos;
+    private Button editUse;
+    private Button editPrev;
+    private Button editNext;
+    private LinearLayout editNameRow;
+    private EditText editNameIn;
+    private TextView editQty;
+    private TextView editMsg;
+
+    private void buildItemEditor(FrameLayout outer) {
+        editScrim = new FrameLayout(this);
+        editScrim.setBackgroundColor(Color.parseColor("#99000000"));
+        editScrim.setVisibility(View.GONE);
+        editScrim.setOnClickListener(v -> closeItemEditor());
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackgroundColor(Color.WHITE);
+        panel.setPadding(dp(8), dp(10), dp(8), dp(10));
+        panel.setClickable(true);
+
+        LinearLayout nav = new LinearLayout(this);
+        nav.setGravity(Gravity.CENTER_VERTICAL);
+        editPrev = smallBtn("◀");
+        editPrev.setOnClickListener(v -> {
+            if (editIdx > 0) {
+                editIdx--;
+                renderItemEditor();
+            }
+        });
+        nav.addView(editPrev, new LinearLayout.LayoutParams(dp(44),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout mid = new LinearLayout(this);
+        mid.setOrientation(LinearLayout.VERTICAL);
+        editImg = new ImageView(this);
+        editImg.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        editImg.setBackgroundColor(C_BG);
+        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(110));
+        mid.addView(editImg, il);
+        editName = new TextView(this);
+        editName.setTextSize(16);
+        editName.setTypeface(null, Typeface.BOLD);
+        editName.setTextColor(C_TEXT);
+        editName.setPadding(0, dp(6), 0, 0);
+        mid.addView(editName);
+        editMeta = new TextView(this);
+        editMeta.setTextSize(13);
+        editMeta.setTextColor(C_MUTED);
+        mid.addView(editMeta);
+        editFlags = new TextView(this);
+        editFlags.setTextSize(13);
+        editFlags.setTextColor(Color.parseColor("#8a6116"));
+        editFlags.setPadding(0, dp(4), 0, 0);
+        mid.addView(editFlags);
+        editPos = new TextView(this);
+        editPos.setTextSize(13);
+        editPos.setTextColor(C_BLUE);
+        mid.addView(editPos);
+        editUse = smallBtn("USE THIS LISTING");
+        editUse.setOnClickListener(v -> reassignToShown());
+        mid.addView(editUse);
+        editNameRow = new LinearLayout(this);
+        editNameIn = new EditText(this);
+        editNameIn.setHint("Label name (confirm)");
+        editNameIn.setTextSize(13);
+        editNameRow.addView(editNameIn, weight());
+        Button saveName = smallBtn("SAVE");
+        saveName.setOnClickListener(v -> saveEditorName());
+        editNameRow.addView(saveName, new LinearLayout.LayoutParams(dp(70),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        mid.addView(editNameRow);
+        LinearLayout qtyRow = new LinearLayout(this);
+        qtyRow.setGravity(Gravity.CENTER_VERTICAL);
+        Button minus = smallBtn("−");
+        minus.setOnClickListener(v -> editorAdjust(-1));
+        qtyRow.addView(minus, new LinearLayout.LayoutParams(dp(52),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        editQty = new TextView(this);
+        editQty.setTextSize(18);
+        editQty.setTypeface(null, Typeface.BOLD);
+        editQty.setTextColor(C_TEXT);
+        editQty.setGravity(Gravity.CENTER);
+        qtyRow.addView(editQty, new LinearLayout.LayoutParams(dp(80),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        Button plus = smallBtn("+");
+        plus.setOnClickListener(v -> editorAdjust(1));
+        qtyRow.addView(plus, new LinearLayout.LayoutParams(dp(52),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        mid.addView(qtyRow);
+        editMsg = new TextView(this);
+        editMsg.setTextSize(12);
+        editMsg.setTextColor(C_MUTED);
+        mid.addView(editMsg);
+        Button close = smallBtn("CLOSE");
+        close.setOnClickListener(v -> closeItemEditor());
+        mid.addView(close);
+        nav.addView(mid, weight());
+
+        editNext = smallBtn("▶");
+        editNext.setOnClickListener(v -> {
+            if (editEntry != null && editIdx < editEntry.candidates.size() - 1) {
+                editIdx++;
+                renderItemEditor();
+            }
+        });
+        nav.addView(editNext, new LinearLayout.LayoutParams(dp(44),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        panel.addView(nav);
+
+        FrameLayout.LayoutParams pl = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+        pl.leftMargin = dp(6);
+        pl.rightMargin = dp(6);
+        editScrim.addView(panel, pl);
+        outer.addView(editScrim);
+    }
+
+    private void openItemEditor(CheckEntry entry) {
+        editEntry = entry;
+        editIdx = 0;
+        for (int i = 0; i < entry.candidates.size(); i++) {
+            if (entry.candidates.get(i).optString("shopify_variant_id")
+                    .equals(entryVariantId(entry))) {
+                editIdx = i;
+                break;
+            }
+        }
+        editMsg.setText("");
+        editScrim.setVisibility(View.VISIBLE);
+        renderItemEditor();
+    }
+
+    private String entryVariantId(CheckEntry e) {
+        return e.item.variantId == null ? "" : e.item.variantId;
+    }
+
+    private void closeItemEditor() {
+        editScrim.setVisibility(View.GONE);
+        editEntry = null;
+    }
+
+    private void renderItemEditor() {
+        if (editEntry == null) return;
+        BItem it = editEntry.item;
+        boolean multi = editEntry.candidates.size() > 1;
+        JSONObject cand = multi ? editEntry.candidates.get(editIdx) : null;
+        String name = cand != null
+                ? cand.optString("product_title", "(unknown)")
+                  + (cand.isNull("variant_title")
+                     || cand.optString("variant_title").isEmpty()
+                     ? "" : " (" + cand.optString("variant_title") + ")")
+                : it.name();
+        String sku = cand != null
+                ? (cand.isNull("sku") ? "—" : cand.optString("sku"))
+                : (it.sku == null ? "—" : it.sku);
+        String bc = cand != null
+                ? (cand.isNull("barcode") ? "—" : cand.optString("barcode"))
+                : (it.barcode == null ? it.scannedCode : it.barcode);
+        String bin = cand != null
+                ? cand.optString("bin_location", "—")
+                : "—";
+        String img = cand != null
+                ? (cand.isNull("image_url") ? null
+                   : cand.optString("image_url"))
+                : it.imageUrl;
+        editName.setText(name);
+        editMeta.setText("SKU: " + sku + "\nBarcode: " + bc
+                + "  ·  Bin: " + bin);
+        loadImage(img, editImg);
+        editFlags.setText("⚠ " + flagText(editEntry.flags));
+        editPrev.setVisibility(multi ? View.VISIBLE : View.INVISIBLE);
+        editNext.setVisibility(multi ? View.VISIBLE : View.INVISIBLE);
+        editPrev.setEnabled(editIdx > 0);
+        editNext.setEnabled(editIdx < editEntry.candidates.size() - 1);
+        if (multi) {
+            boolean current = cand.optString("shopify_variant_id")
+                    .equals(entryVariantId(editEntry));
+            editPos.setVisibility(View.VISIBLE);
+            editPos.setText("Listing " + (editIdx + 1) + " of "
+                    + editEntry.candidates.size() + " sharing this barcode"
+                    + (current ? "  — currently selected" : ""));
+            editUse.setVisibility(View.VISIBLE);
+            editUse.setEnabled(!current);
+        } else {
+            editPos.setVisibility(View.GONE);
+            editUse.setVisibility(View.GONE);
+        }
+        editNameRow.setVisibility(
+                editEntry.flags.contains("unconfirmed-name")
+                        ? View.VISIBLE : View.GONE);
+        editQty.setText(String.valueOf(it.qty)
+                + (it.expected != null ? " / " + it.expected : ""));
+    }
+
+    private String flagText(List<String> flags) {
+        StringBuilder sb = new StringBuilder();
+        for (String f : flags) {
+            if (sb.length() > 0) sb.append(" · ");
+            if ("ambiguous".equals(f)) sb.append("several listings share "
+                    + "this barcode");
+            else if ("count-mismatch".equals(f)) sb.append("count differs "
+                    + "from Shopify");
+            else if ("unconfirmed-name".equals(f)) sb.append("serial name "
+                    + "not confirmed");
+            else if ("unresolved".equals(f)) sb.append("unknown barcode");
+            else sb.append(f);
+        }
+        return sb.toString();
+    }
+
+    private void reassignToShown() {
+        if (editEntry == null || editEntry.candidates.isEmpty()) return;
+        final JSONObject cand = editEntry.candidates.get(editIdx);
+        final int itemId = editEntry.item.id;
+        editMsg.setText("Reassigning…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject().put("shopify_variant_id",
+                        cand.optString("shopify_variant_id"));
+                api("POST", "/api/batches/" + batchId + "/items/" + itemId
+                        + "/reassign", body);
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    closeItemEditor();
+                    status.setText("Reassigned ✓ — refreshing…");
+                    reloadBatchAndReview();
+                });
+            } catch (Exception e) {
+                ui.post(() -> editMsg.setText(e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void saveEditorName() {
+        if (editEntry == null || editEntry.item.serialPrefix == null) return;
+        final String name = editNameIn.getText().toString().trim();
+        if (name.isEmpty()) return;
+        final String prefix = editEntry.item.serialPrefix;
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject().put("label_name", name);
+                api("PUT", "/api/serial-prefixes/"
+                        + URLEncoder.encode(prefix, "UTF-8") + "/label",
+                        body);
+                ui.post(() -> editMsg.setText("Name confirmed ✓"));
+            } catch (Exception e) {
+                ui.post(() -> editMsg.setText(e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void editorAdjust(int delta) {
+        if (editEntry == null) return;
+        final BItem it = editEntry.item;
+        final int qty = Math.max(0, it.qty + delta);
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject().put("qty", qty);
+                JSONObject resp = api("POST", "/api/batches/" + batchId
+                        + "/items/" + it.id + "/qty", body);
+                final BItem updated = BItem.from(resp);
+                ui.post(() -> {
+                    editEntry.item = updated;
+                    BItem inList = itemById(updated.id);
+                    if (inList != null) {
+                        bItems.set(bItems.indexOf(inList), updated);
+                    }
+                    renderItemEditor();
+                });
+            } catch (Exception e) {
+                ui.post(() -> editMsg.setText(e.getMessage()));
+            }
+        }).start();
+    }
+
     private LinearLayout.LayoutParams weight() {
         return new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
@@ -683,8 +995,12 @@ public class MainActivity extends Activity {
                 status.setText("Pick a batch first.");
                 return;
             }
-            if (pairPhase) pairSelect(code);
-            else batchScan(code);
+            if (step == STEP_PAIR) pairSelect(code);
+            else if (step == STEP_CHECK) {
+                beep(SOUND_ERR);
+                status.setText("CHECK step — tap flagged items to review, "
+                        + "or BACK to keep scanning.");
+            } else batchScan(code);
         } else if (activeTab == TAB_STATION) {
             stationLookup(code);
         } else {
@@ -706,12 +1022,12 @@ public class MainActivity extends Activity {
 
     private void onTrigger() {
         if (activeTab == TAB_BATCH) {
-            if (inBatch() && pairPhase) {
+            if (inBatch() && step == STEP_PAIR) {
                 pairReadTag();
             } else if (inBatch()) {
                 beep(SOUND_ERR);
-                status.setText("COLLECT uses the barcode scanner — tap the "
-                        + "COLLECT chip to switch to PAIR for stickers.");
+                status.setText("RFID stickers pair in the PAIR step — "
+                        + "press NEXT until you get there.");
             } else {
                 status.setText("Pick a batch first.");
             }
@@ -933,13 +1249,108 @@ public class MainActivity extends Activity {
     }
 
     private void togglePhase() {
-        if (!inBatch()) {
-            openBatchPicker();
-            return;
-        }
-        pairPhase = !pairPhase;
+        // The chip is a step indicator now; tapping it only opens the
+        // picker when no batch is loaded. Steps move via BACK / NEXT.
+        if (!inBatch()) openBatchPicker();
+    }
+
+    // --------------------------------------------------------- step flow ----
+    private void stepBack() {
+        if (!inBatch() || step == STEP_COLLECT) return;
+        step--;
         pairActive = null;
+        if (step == STEP_CHECK) fetchReview();
         applyBatchUi();
+    }
+
+    private void stepNext() {
+        if (!inBatch()) return;
+        if (step == STEP_COLLECT) {
+            boolean any = false;
+            for (BItem b : bItems) if (b.qty > 0) any = true;
+            if (!any) {
+                beep(SOUND_ERR);
+                status.setText("Scan at least one box first.");
+                return;
+            }
+            step = STEP_CHECK;
+            fetchReview();
+            applyBatchUi();
+        } else if (step == STEP_CHECK) {
+            queueLabels(); // advances to PAIR on success / already-queued
+        } else {
+            finishBatch();
+        }
+    }
+
+    private void fetchReview() {
+        status.setText("Checking the batch…");
+        checkEntries.clear();
+        checkFlagText.clear();
+        refreshBatchList();
+        new Thread(() -> {
+            try {
+                JSONObject resp = api("GET",
+                        "/api/batches/" + batchId + "/review", null);
+                JSONArray arr = resp.getJSONArray("items");
+                final List<CheckEntry> loaded = new ArrayList<>();
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    CheckEntry e = new CheckEntry();
+                    e.item = BItem.from(o.getJSONObject("item"));
+                    JSONArray fl = o.getJSONArray("flags");
+                    for (int j = 0; j < fl.length(); j++) {
+                        e.flags.add(fl.getString(j));
+                    }
+                    JSONArray cs = o.getJSONArray("candidates");
+                    for (int j = 0; j < cs.length(); j++) {
+                        e.candidates.add(cs.getJSONObject(j));
+                    }
+                    loaded.add(e);
+                }
+                ui.post(() -> {
+                    checkEntries.clear();
+                    checkEntries.addAll(loaded);
+                    checkFlagText.clear();
+                    for (CheckEntry e : checkEntries) {
+                        checkFlagText.put(e.item.id,
+                                "⚠ " + flagText(e.flags));
+                    }
+                    if (step == STEP_CHECK) {
+                        status.setText(checkEntries.isEmpty()
+                                ? "Nothing needs checking ✓ — NEXT queues "
+                                  + "the labels."
+                                : checkEntries.size() + " item(s) need a "
+                                  + "look — tap one to review. NEXT queues "
+                                  + "the labels.");
+                        refreshBatchList();
+                    }
+                });
+            } catch (Exception e) {
+                ui.post(() -> status.setText("Check failed: "
+                        + e.getMessage()));
+            }
+        }).start();
+    }
+
+    private void reloadBatchAndReview() {
+        new Thread(() -> {
+            try {
+                JSONObject resp = api("GET", "/api/batches/" + batchId, null);
+                JSONArray items = resp.getJSONArray("items");
+                final List<BItem> loaded = new ArrayList<>();
+                for (int i = 0; i < items.length(); i++) {
+                    loaded.add(BItem.from(items.getJSONObject(i)));
+                }
+                ui.post(() -> {
+                    bItems.clear();
+                    bItems.addAll(loaded);
+                    fetchReview();
+                });
+            } catch (Exception e) {
+                ui.post(() -> status.setText(e.getMessage()));
+            }
+        }).start();
     }
 
     private void openBatchPicker() {
@@ -997,10 +1408,13 @@ public class MainActivity extends Activity {
                     batchBin = bin;
                     bItems.clear();
                     bItems.addAll(loaded);
-                    pairPhase = "printing".equals(st) || "pairing".equals(st);
+                    step = ("printing".equals(st) || "pairing".equals(st))
+                            ? STEP_PAIR : STEP_COLLECT;
                     pairActive = null;
                     previewItem = null;
                     pairHistory.clear();
+                    checkEntries.clear();
+                    checkFlagText.clear();
                     applyBatchUi();
                 });
             } catch (Exception e) {
@@ -1013,14 +1427,23 @@ public class MainActivity extends Activity {
     private void applyBatchUi() {
         boolean in = inBatch();
         binChip.setText(in ? "Bin " + batchBin : "No batch");
-        phaseChip.setText(in ? (pairPhase ? "PAIR" : "COLLECT") : "PICK");
+        phaseChip.setText(in
+                ? STEP_NAMES[step] + "  " + (step + 1) + "/3" : "PICK");
         pickBtn.setVisibility(in ? View.GONE : View.VISIBLE);
         batchBtnRow.setVisibility(in ? View.VISIBLE : View.GONE);
         if (in) {
-            status.setText(pairPhase
-                    ? "PAIR: scan a product barcode, then TRIGGER each of "
-                      + "its stickers."
-                    : "COLLECT: scan every box in this bin.");
+            if (step == STEP_COLLECT) {
+                status.setText("COLLECT: scan every box in this bin, then "
+                        + "NEXT.");
+            } else if (step == STEP_CHECK) {
+                status.setText(checkEntries.isEmpty()
+                        ? "CHECK: nothing flagged ✓ — NEXT queues labels."
+                        : "CHECK: tap flagged items to review — NEXT "
+                          + "queues labels.");
+            } else {
+                status.setText("PAIR: scan a product barcode, TRIGGER each "
+                        + "sticker; NEXT finishes the bin.");
+            }
         } else {
             status.setText("Pick an open batch (started on the PC/iPad).");
             batchCard.setVisibility(View.GONE);
@@ -1031,7 +1454,9 @@ public class MainActivity extends Activity {
     }
 
     private void updateBatchCard() {
-        BItem it = pairPhase && pairActive != null ? pairActive : previewItem;
+        BItem it = step == STEP_PAIR && pairActive != null
+                ? pairActive : previewItem;
+        if (step == STEP_CHECK) it = null; // check step: the list IS the view
         if (it == null) {
             batchCard.setVisibility(View.GONE);
             return;
@@ -1050,15 +1475,23 @@ public class MainActivity extends Activity {
 
     private void refreshBatchList() {
         displayItems.clear();
-        for (BItem b : bItems) if (b.qty > 0 || b.paired > 0) displayItems.add(b);
-        for (BItem b : bItems) if (b.qty == 0 && b.paired == 0) displayItems.add(b);
+        if (inBatch() && step == STEP_CHECK) {
+            // Only flagged items — a clean bin shows an empty list.
+            for (CheckEntry e : checkEntries) displayItems.add(e.item);
+        } else {
+            for (BItem b : bItems)
+                if (b.qty > 0 || b.paired > 0) displayItems.add(b);
+            for (BItem b : bItems)
+                if (b.qty == 0 && b.paired == 0) displayItems.add(b);
+        }
         batchAdapter.notifyDataSetChanged();
     }
 
     // Tracker = two numbers only: scanned/expected while collecting,
     // paired/scanned while pairing.
     private String trackerText(BItem b) {
-        if (pairPhase) return b.paired + "/" + Math.max(b.qty, b.paired);
+        if (step == STEP_PAIR)
+            return b.paired + "/" + Math.max(b.qty, b.paired);
         return b.expected != null ? b.qty + "/" + b.expected
                 : String.valueOf(b.qty);
     }
@@ -1152,8 +1585,12 @@ public class MainActivity extends Activity {
             h.name.setText(b.name());
             h.sku.setText(b.sku != null ? "SKU: " + b.sku
                     : (b.resolved ? "no SKU" : "⚠ unknown barcode"));
+            String flags = checkFlagText.get(b.id);
             String bc = b.barcode != null ? b.barcode : b.scannedCode;
-            if (bc != null && !bc.isEmpty()) {
+            if (inBatch() && step == STEP_CHECK && flags != null) {
+                h.bc.setVisibility(View.VISIBLE);
+                h.bc.setText(flags);
+            } else if (bc != null && !bc.isEmpty()) {
                 h.bc.setVisibility(View.VISIBLE);
                 h.bc.setText("Barcode: " + bc);
             } else {
@@ -1374,14 +1811,27 @@ public class MainActivity extends Activity {
                         final int queued = resp.optInt("count");
                         ui.post(() -> {
                             beep(SOUND_OK);
+                            step = STEP_PAIR;
+                            applyBatchUi();
                             status.setText(queued + " label(s) queued ✓ — "
                                     + "printing at the warehouse laptop. "
-                                    + "Switch to PAIR when they're on.");
+                                    + "Stick them on, then pair.");
                         });
                     } catch (Exception e) {
+                        final boolean already = String.valueOf(
+                                e.getMessage()).contains("already");
                         ui.post(() -> {
-                            beep(SOUND_ERR);
-                            status.setText(e.getMessage());
+                            if (already) {
+                                // Labels were queued on an earlier pass —
+                                // just move on to pairing.
+                                step = STEP_PAIR;
+                                applyBatchUi();
+                                status.setText("Labels were already "
+                                        + "queued — on to PAIR.");
+                            } else {
+                                beep(SOUND_ERR);
+                                status.setText(e.getMessage());
+                            }
                         });
                     }
                 }).start())
@@ -1432,7 +1882,9 @@ public class MainActivity extends Activity {
         pairActive = null;
         previewItem = null;
         pairHistory.clear();
-        pairPhase = false;
+        step = STEP_COLLECT;
+        checkEntries.clear();
+        checkFlagText.clear();
         applyBatchUi();
         if (!completed) {
             status.setText("Left the batch (still open — resume any time).");

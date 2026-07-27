@@ -375,6 +375,66 @@ def _resolve(term: str, mode: str, db_ok: bool, api_ok: bool) -> dict | None:
     return None
 
 
+# Titles that mark secondary listings — the primary listing should be the
+# default pick when one barcode matches several products.
+_SECONDARY_TITLE = re.compile(r"open[\s-]?box|used|demo|refurb", re.I)
+
+
+def _candidate_rank(p: dict) -> tuple:
+    title = f"{p.get('product_title') or ''} {p.get('variant_title') or ''}"
+    return (1 if _SECONDARY_TITLE.search(title) else 0,)
+
+
+def products_by_barcode_all(code: str) -> list[dict]:
+    """All catalog matches for a barcode, primary listing first. Falls back
+    to the single-product resolver chain (alias/serial) when the direct
+    barcode search finds nothing."""
+    code = code.strip()
+    mode = config.BARCODE_LOOKUP
+    db_ok = database_configured()
+    api_ok = not config.check_shopify_env()
+    candidates: list[dict] = []
+    if mode in ("auto", "db") and db_ok:
+        try:
+            from app.database import get_engine
+
+            with Session(get_engine()) as session:
+                candidates = catalog.lookup_barcode_all(session, code)
+        except Exception as error:
+            logger.warning("TELCAN multi-lookup failed: %s", error)
+    if not candidates and mode in ("auto", "api") and api_ok:
+        try:
+            candidates = shopify.lookup_barcode_all(code)
+        except Exception as error:
+            logger.warning("Shopify multi-lookup failed: %s", error)
+    if not candidates:
+        try:
+            single = product_by_barcode(code)
+            if single is not None:
+                candidates = [single]
+        except HTTPException:
+            candidates = []
+    # De-dup by variant id (mirror + API can both contribute).
+    seen: set = set()
+    unique = []
+    for p in candidates:
+        key = p.get("shopify_variant_id") or p.get("sku")
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(p)
+    unique.sort(key=_candidate_rank)
+    return unique
+
+
+@app.get(
+    "/api/products/candidates", dependencies=[Depends(require_user)]
+)
+def product_candidates(barcode: str):
+    items = products_by_barcode_all(barcode)
+    return {"count": len(items), "candidates": items}
+
+
 @app.get("/api/products/tags", dependencies=[Depends(require_user)])
 def tags_for_product(
     sku: str | None = None,
@@ -507,6 +567,9 @@ class PrintJobIn(BaseModel):
     barcode: str | None = Field(default=None, max_length=64)
     bin_location: str | None = Field(default=None, max_length=100)
     label_name: str | None = Field(default=None, max_length=255)
+    label_placement: str | None = Field(
+        default=None, pattern="^(header|sku)$"
+    )
     requested_by: str | None = Field(default=None, max_length=100)
 
     @field_validator("shopify_variant_id", "product_title")
@@ -1670,6 +1733,119 @@ def batch_scan(
     }
 
 
+@app.get(
+    "/api/batches/{batch_id}/review", dependencies=[Depends(require_user)]
+)
+def batch_review(batch_id: int, session: Session = Depends(get_session)):
+    """The Check step, shared by web and C72: which items need a human
+    decision before labels print, and why. Flags: 'ambiguous' (barcode
+    matches several listings — candidates included, primary first),
+    'count-mismatch' (scanned != expected), 'unconfirmed-name' (serialized
+    product whose label name was never operator-confirmed), 'unresolved'
+    (barcode matched nothing)."""
+    _get_batch(session, batch_id)
+    flagged = []
+    for item in _batch_items(session, batch_id):
+        if item.qty_scanned == 0 and item.paired_count == 0:
+            continue  # untouched pre-seeded rows need no checking
+        flags = []
+        candidates: list[dict] = []
+        if not item.resolved:
+            flags.append("unresolved")
+        else:
+            code = item.barcode or item.scanned_code
+            if code:
+                try:
+                    candidates = products_by_barcode_all(code)
+                except Exception as error:
+                    logger.warning("candidates failed for %s: %s",
+                                   code, error)
+                if len(candidates) > 1:
+                    flags.append("ambiguous")
+                else:
+                    candidates = []
+            if (
+                item.expected_qty is not None
+                and item.qty_scanned != item.expected_qty
+            ):
+                flags.append("count-mismatch")
+            if item.serial_prefix:
+                sp = session.get(SerialPrefix, item.serial_prefix)
+                if sp is not None and sp.label_name is None:
+                    flags.append("unconfirmed-name")
+        if flags:
+            flagged.append({
+                "item": item.as_dict(),
+                "flags": flags,
+                "candidates": candidates,
+            })
+    return {"count": len(flagged), "items": flagged}
+
+
+class ReassignIn(BaseModel):
+    shopify_variant_id: str = Field(max_length=64)
+
+
+@app.post(
+    "/api/batches/{batch_id}/items/{item_id}/reassign",
+    dependencies=[Depends(require_user)],
+)
+def batch_item_reassign(
+    batch_id: int,
+    item_id: int,
+    payload: ReassignIn,
+    session: Session = Depends(get_session),
+):
+    """Point an ambiguous item at a different listing sharing its barcode.
+    The WHOLE scanned count moves (mixed shelves get fixed with -/+
+    afterwards). If the target product is already in the batch, the counts
+    merge into that row."""
+    _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    code = item.barcode or item.scanned_code
+    match = next(
+        (
+            p for p in products_by_barcode_all(code or "")
+            if p.get("shopify_variant_id") == payload.shopify_variant_id
+        ),
+        None,
+    )
+    if match is None:
+        raise HTTPException(404, "That listing doesn't share this barcode.")
+
+    existing = next(
+        (
+            i for i in _batch_items(session, batch_id)
+            if i.id != item.id and i.resolved and i.sku
+            and i.sku == match.get("sku")
+        ),
+        None,
+    )
+    if existing is not None:
+        existing.qty_scanned += item.qty_scanned
+        existing.paired_count += item.paired_count
+        session.delete(item)
+        session.commit()
+        session.refresh(existing)
+        return {"item": existing.as_dict(), "merged": True}
+
+    item.resolved = True
+    item.shopify_variant_id = match.get("shopify_variant_id")
+    item.shopify_product_id = match.get("shopify_product_id")
+    item.product_title = match.get("product_title")
+    item.variant_title = match.get("variant_title")
+    item.sku = match.get("sku")
+    item.barcode = match.get("barcode")
+    item.bin_location = match.get("bin_location")
+    item.image_url = (match.get("image_url") or "")[:500] or None
+    item.expected_qty = _mirror_qty(session, item.sku)
+    session.commit()
+    session.refresh(item)
+    return {"item": item.as_dict(), "merged": False}
+
+
 class ItemQtyIn(BaseModel):
     qty: int = Field(ge=0, le=500)
 
@@ -2150,6 +2326,7 @@ def get_capture(capture_id: int, session: Session = Depends(get_session)):
 # ------------------------------------------------------------ label names ---
 class LabelNameIn(BaseModel):
     label_name: str = Field(default="", max_length=76)
+    placement: str = Field(default="header", pattern="^(header|sku)$")
     updated_by: str | None = Field(default=None, max_length=100)
 
 
@@ -2174,9 +2351,10 @@ def set_label_name(
         row = LabelName(sku=sku)
         session.add(row)
     row.label_name = name
+    row.placement = payload.placement
     row.updated_by = payload.updated_by
     session.commit()
-    return {"sku": sku, "label_name": name}
+    return {"sku": sku, "label_name": name, "placement": row.placement}
 
 
 # -------------------------------------------------------- product history ---
@@ -2350,6 +2528,7 @@ def product_history(term: str, session: Session = Depends(get_session)):
         "serial_label_saved": bool(sp and sp.label_name),
         # Non-serial products keep their preferred header here instead.
         "custom_label": custom.label_name if custom else None,
+        "custom_placement": custom.placement if custom else "header",
         "count": len(events),
         "events": events,
     }

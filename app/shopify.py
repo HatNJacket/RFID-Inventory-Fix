@@ -345,6 +345,40 @@ def fetch_all_variant_bins() -> list[dict]:
         time.sleep(0.3)  # stay far away from the throttle
 
 
+_FIND_VARIANTS_ALL_QUERY = _FIND_VARIANT_QUERY.replace(
+    "productVariants(first: 1", "productVariants(first: 10"
+)
+
+
+def lookup_barcode_all(term: str) -> list[dict]:
+    """Every store match for a barcode (or SKU when nothing matches the
+    barcode) — for barcodes shared by several listings."""
+    quoted = term.replace('"', "")
+    nodes = []
+    for search in (f'barcode:"{quoted}"', f'sku:"{quoted}"'):
+        data = query_shopify(_FIND_VARIANTS_ALL_QUERY, {"search": search})
+        nodes = data["productVariants"]["nodes"]
+        if nodes:
+            break
+    results = []
+    for variant in nodes:
+        product = variant["product"]
+        variant_bin = variant["bin"]["value"] if variant["bin"] else None
+        easy_bin = (
+            product["easyScanBin"]["value"] if product["easyScanBin"] else None
+        )
+        results.append({
+            "shopify_variant_id": variant["id"],
+            "shopify_product_id": product["id"],
+            "product_title": product["title"],
+            "variant_title": variant["title"],
+            "sku": variant["sku"],
+            "barcode": variant["barcode"],
+            "bin_location": variant_bin or easy_bin or "No bin assigned",
+        })
+    return results
+
+
 _ON_HAND_QUERY = """
 query OnHand($search: String!) {
   productVariants(first: 5, query: $search) {

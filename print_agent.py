@@ -137,12 +137,17 @@ def build_zpl(job: dict, encode_rfid: bool,
     pw, ll = label_dots(width_in, height_in)
 
     label = clean(job.get("label_name"), fallback="")
-    if label:
-        # Explicit operator-preferred name — set only by the Scan Station
-        # serial flow, so Astronomik filters print their item name at the
-        # top. Font steps DOWN with length: ZPL's ^FB does NOT clip text
-        # past its max line count — it overprints the last line — so the
-        # name must genuinely fit in two lines at the chosen size.
+    placement = (job.get("label_placement") or "header").strip().lower()
+    sku_text = clean(job.get("sku"))
+    if label and placement == "sku":
+        # Preferred name replaces the SKU line; the store header stays.
+        header = HEADER_STORE.format(pw=pw)
+        sku_text = label[:56]
+    elif label:
+        # Preferred name replaces the store header. Font steps DOWN with
+        # length: ZPL's ^FB does NOT clip text past its max line count —
+        # it overprints the last line — so the name must genuinely fit in
+        # two lines at the chosen size.
         if len(label) <= 26:
             size = 28
         elif len(label) <= 56:
@@ -179,7 +184,7 @@ def build_zpl(job: dict, encode_rfid: bool,
         sr=shift_right,
         header=header,
         bin_y=ll - 45,
-        sku=clean(job.get("sku")),
+        sku=sku_text,
         barcode_line=barcode_line,
         bin=clean(job.get("bin_location")),
     )

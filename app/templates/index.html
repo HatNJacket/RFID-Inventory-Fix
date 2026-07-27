@@ -327,7 +327,7 @@
           <span class="inventory__bin" id="batch-bin-chip">—</span>
           <div class="stages" id="batch-stages">
             <span class="stage" data-stage="collect">1 Collect</span>
-            <span class="stage" data-stage="labels">2 Labels</span>
+            <span class="stage" data-stage="labels">2 Check</span>
             <span class="stage" data-stage="print">3 Print</span>
             <span class="stage" data-stage="pair">4 Pair</span>
             <span class="stage" data-stage="verify">5 Verify</span>
@@ -350,36 +350,64 @@
           </section>
           <p class="linkbox__text" id="bcollect-summary" hidden></p>
           <ul class="batch__items" id="batch-items"></ul>
-          <button class="print__btn" id="batch-to-labels" type="button">Done scanning → prepare labels</button>
+          <button class="print__btn" id="batch-to-labels" type="button">Next step →</button>
         </div>
 
-        <!-- Stage 2: labels -->
+        <!-- Stage 2: check (only items needing a decision) -->
         <div id="bstage-labels" hidden>
-          <div class="linkbox serialbox">
-            <div class="linkbox__title" id="blabel-count">Product</div>
-            <div class="linkbox__card">
-              <img class="linkbox__img" id="blabel-img" alt="" hidden />
-              <div class="linkbox__info">
-                <div class="linkbox__ptitle" id="blabel-title">—</div>
-                <dl class="product__grid">
-                  <div><dt>SKU</dt><dd id="blabel-sku">—</dd></div>
-                  <div><dt>Boxes scanned</dt><dd id="blabel-qty">—</dd></div>
-                  <div><dt>Shopify on-hand</dt><dd id="blabel-expected">—</dd></div>
-                </dl>
+          <section class="step step--active">
+            <div class="step__index">2</div>
+            <div class="step__body">
+              <label class="step__label">Check flagged items</label>
+              <p class="step__hint">Only products needing a decision appear here — barcodes matching several listings, counts that differ from Shopify, unconfirmed serial names. Click one to review it. A clean bin shows nothing.</p>
+            </div>
+          </section>
+          <p class="linkbox__text" id="bcheck-empty" hidden>Nothing needs checking ✓</p>
+          <ul class="batch__items" id="bcheck-list"></ul>
+          <button class="print__btn" id="batch-queue" type="button">Next step → queue labels to print</button>
+        </div>
+
+        <!-- Check-item editor (modal): candidates arrows + counts + name -->
+        <div class="phist-overlay" id="bitem-overlay" hidden>
+          <section class="linkbox serialbox phist-modal" style="max-width:640px">
+            <div class="bitem-nav">
+              <button class="reset bitem-arrow" id="bitem-prev" type="button">&larr;</button>
+              <div class="bitem-body">
+                <div class="linkbox__product" style="margin-bottom:8px">
+                  <img class="linkbox__img" id="bitem-img" alt="" hidden />
+                  <div>
+                    <div class="linkbox__ptitle" id="bitem-title">—</div>
+                    <p class="linkbox__text" id="bitem-meta"></p>
+                  </div>
+                </div>
+                <p class="linkbox__text" id="bitem-flags"></p>
+                <p class="linkbox__text" id="bitem-candpos" hidden></p>
+                <div class="linkbox__actions" id="bitem-usewrap" hidden>
+                  <button class="print__btn" id="bitem-use" type="button">Use this listing</button>
+                </div>
+                <div id="bitem-namewrap" hidden>
+                  <p class="linkbox__extra-label">Label name (serialized product — needs confirming):</p>
+                  <div class="linkbox__form">
+                    <input id="bitem-name" class="linkbox__input" type="text" maxlength="76" autocomplete="off" spellcheck="false" />
+                    <button class="reset" id="bitem-name-save" type="button">Save name</button>
+                  </div>
+                </div>
+                <div class="linkbox__form" style="margin-top:8px">
+                  <span class="bqty">
+                    <button type="button" id="bitem-minus">−</button>
+                    <span class="bqty__n" id="bitem-qty">0</span>
+                    <button type="button" id="bitem-plus">+</button>
+                  </span>
+                  <span class="linkbox__text" id="bitem-expected"></span>
+                </div>
+                <p class="linkbox__text" id="bitem-msg"></p>
               </div>
+              <button class="reset bitem-arrow" id="bitem-next" type="button">&rarr;</button>
             </div>
-            <p class="linkbox__extra-label">Label ID — prints "Telescopes Canada" at the top with this below (defaults to the SKU). Astronomik item names are set in Scan Station.</p>
-            <div class="linkbox__form">
-              <input id="blabel-name" class="linkbox__input" type="text" maxlength="80"
-                     autocomplete="off" spellcheck="false" />
-              <button class="reset" id="blabel-save" type="button">Save name</button>
+            <div class="linkbox__actions" style="margin-top:10px">
+              <button class="reset" id="bitem-close" type="button">Close</button>
             </div>
-            <div class="linkbox__actions">
-              <button class="reset" id="blabel-prev" type="button">&larr; Previous</button>
-              <button class="reset" id="blabel-next" type="button">Next &rarr;</button>
-              <button class="print__btn" id="batch-queue" type="button">Queue all labels to print</button>
-            </div>
-          </div>
+          </section>
         </div>
 
         <!-- Stage 3: print -->
@@ -496,7 +524,11 @@
         <div id="phist-serial" hidden>
           <p class="linkbox__extra-label" id="phist-label-hint">Preferred label name — printed at the top of this product's labels instead of "Telescopes Canada". Leave blank for the standard label. Long names print smaller to fit two lines:</p>
           <div class="linkbox__form">
-            <input id="phist-label-input" class="linkbox__input" type="text" maxlength="76" autocomplete="off" spellcheck="false" />
+            <span class="phist-inputwrap">
+              <input id="phist-label-input" class="linkbox__input" type="text" maxlength="76" autocomplete="off" spellcheck="false" />
+              <button class="phist-clear" id="phist-label-clear" type="button" title="Clear the name — print the standard label">✕</button>
+            </span>
+            <button class="reset" id="phist-placement" type="button" title="Where the name prints on the label">Replaces: store name</button>
             <button class="reset" id="phist-label-save" type="button">Save name</button>
           </div>
           <div class="label-preview" id="phist-preview">

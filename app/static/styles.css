@@ -913,6 +913,35 @@ a { color: var(--accent); }
 }
 .label-preview__bin { font-size: 13px; font-weight: 600; }
 
+/* name input with inline clear button */
+.phist-inputwrap { position: relative; flex: 1; display: flex; }
+.phist-inputwrap .linkbox__input { width: 100%; padding-right: 30px; }
+.phist-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--ink-dim);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.phist-clear:hover { color: var(--danger-ink, #d72c0d); }
+
+/* check-item editor: arrows flanking the product */
+.bitem-nav { display: flex; align-items: stretch; gap: 8px; }
+.bitem-body { flex: 1; min-width: 0; }
+.bitem-arrow {
+  min-width: 44px;
+  font-size: 20px;
+  align-self: center;
+  padding: 14px 8px;
+}
+.bitem-arrow:disabled { opacity: 0.25; cursor: default; }
+.bcell__flags { color: var(--warn-ink); font-weight: 600; }
+
 /* status + event chips (print queue, history) */
 .chip-status {
   font-size: 11px;

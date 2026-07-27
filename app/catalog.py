@@ -64,6 +64,61 @@ def _variant_title(row) -> str | None:
     return None if (not title or title == "Default Title") else title
 
 
+# Same match as _LOOKUP_SQL but ALL rows — for barcodes shared by several
+# listings (e.g. a product and its open-box variant).
+_LOOKUP_ALL_SQL = text(
+    """
+    SELECT TOP 10
+        v.Variant_ID,
+        v.Handle_ID,
+        v.Variant_SKU,
+        v.Variant_Barcode,
+        v.Option1_Name,
+        v.Option1_Value,
+        v.Option2_Value,
+        v.Option3_Value,
+        p.Title AS Product_Title,
+        i.Bin_Name
+    FROM dbo.Shopify_Variants v
+    LEFT JOIN dbo.Shopify_Products p
+           ON p.Handle_ID = v.Handle_ID
+    LEFT JOIN dbo.Shopify_Inventory i
+           ON i.Handle_ID = v.Handle_ID
+          AND i.Variant_SKU = v.Variant_SKU
+    WHERE v.Variant_Barcode = :term OR v.Variant_SKU = :term
+    ORDER BY CASE WHEN v.Variant_Barcode = :term THEN 0 ELSE 1 END,
+             v.Variant_ID
+    """
+)
+
+
+def lookup_barcode_all(session: Session, term: str) -> list[dict]:
+    """Every catalog match for a barcode/SKU, same dict shape as
+    lookup_barcode."""
+    rows = session.execute(_LOOKUP_ALL_SQL, {"term": term}).all()
+    results = []
+    for row in rows:
+        image_url = session.execute(
+            _IMAGE_SQL, {"handle": row.Handle_ID, "sku": row.Variant_SKU}
+        ).scalar()
+        results.append({
+            "image_url": image_url,
+            "shopify_variant_id": f"telcan:{row.Variant_ID}",
+            "shopify_product_id": f"handle:{row.Handle_ID}",
+            "product_title": row.Product_Title or row.Handle_ID or "(unknown)",
+            "variant_title": _variant_title(row),
+            "sku": row.Variant_SKU,
+            "barcode": row.Variant_Barcode,
+            "bin_location": (
+                str(row.Bin_Name).strip()
+                if row.Bin_Name and str(row.Bin_Name).strip()
+                else "No bin assigned"
+            ),
+            "source": "telcan",
+        })
+    return results
+
+
 def lookup_barcode(session: Session, term: str) -> dict | None:
     """Look up a variant by barcode or SKU in TELCAN. Returns the same flat
     dict shape as shopify.lookup_barcode (plus source='telcan'), or None."""
