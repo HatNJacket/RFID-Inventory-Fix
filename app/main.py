@@ -1447,13 +1447,14 @@ def _maybe_refresh_bin_map(force: bool = False,
 _BIN_SPLIT_RE = re.compile(r"\s*(?:[&,;/+]|\band\b)\s*", re.I)
 
 
-def parse_bins(value: str | None) -> list[str]:
-    """Every bin named in a bin field, in order, de-duplicated. Part
-    labels ("MOUNT: B18-1") are dropped — the shelf code is what matters."""
+def parse_bin_parts(value: str | None) -> list[str]:
+    """Every box this product is stored as, in order — duplicates KEPT.
+    Two boxes on the same shelf are two entries, because "Other: G3-2,
+    G3-2" tells a picker there are two of them there. Part labels
+    ("MOUNT: B18-1") are dropped; the shelf code is what matters."""
     if not value:
         return []
-    bins: list[str] = []
-    seen: set = set()
+    parts: list[str] = []
     for part in _BIN_SPLIT_RE.split(str(value)):
         part = part.strip()
         if not part:
@@ -1462,6 +1463,16 @@ def parse_bins(value: str | None) -> list[str]:
             part = part.rsplit(":", 1)[-1].strip()
         if not part or part.lower() == "no bin assigned":
             continue
+        parts.append(part)
+    return parts
+
+
+def parse_bins(value: str | None) -> list[str]:
+    """The distinct shelves a product lives on — for bin membership and
+    for listing a bin's contents once each."""
+    bins: list[str] = []
+    seen: set = set()
+    for part in parse_bin_parts(value):
         if part.lower() not in seen:
             seen.add(part.lower())
             bins.append(part)
@@ -1475,8 +1486,15 @@ def bin_contains(value: str | None, wanted: str) -> bool:
 
 
 def bins_other_than(value: str | None, wanted: str) -> list[str]:
+    """The product's OTHER boxes, from the point of view of one bin: drop
+    a single occurrence of `wanted` (the box in your hand) and keep the
+    rest — including repeats of the same shelf."""
     target = (wanted or "").strip().lower()
-    return [b for b in parse_bins(value) if b.lower() != target]
+    parts = parse_bin_parts(value)
+    for i, part in enumerate(parts):
+        if part.lower() == target:
+            return parts[:i] + parts[i + 1:]
+    return parts
 
 
 # A well-formed bin is one letter + 1-99, a dash, then 1-99 (D2-2, E14-3).
