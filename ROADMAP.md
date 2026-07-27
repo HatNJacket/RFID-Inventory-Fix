@@ -98,6 +98,16 @@ next bin.
 
 ## 🔜 Next up (the revamp — after the C72 barcode test)
 
+- ✅ SHIPPED 2026-07-27 (round 3, C72 v2.5): batch ties are now
+  batch-scoped — abandoning releases them, History can undo a whole
+  batch's ties, and pairing can be undone wholesale for a re-scan;
+  skip-printing goes straight to pairing; unresolved barcodes get a
+  rescue flow (odd-barcode candidates → fix the Shopify barcode);
+  wrong-shelf products can be dropped/moved/ignored; label format
+  (Name / SKU / Both) editable per product in the Check step; pair
+  ticker counts printed labels; verify auto-checks on pull, states
+  whether boxes/paired/detected agree, and can look up any bin; C72
+  gained a FIND BIN tab and a sweep-for-unlinked-tags rescue.
 - ✅ SHIPPED 2026-07-27: ambiguous-barcode Check step (web + C72 v2.4).
   Batch flow is now linear Collect → Check → Pair on both surfaces; the
   Check step flags shared barcodes (candidate arrows, main listing
