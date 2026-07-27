@@ -2154,6 +2154,166 @@ def get_capture(capture_id: int, session: Session = Depends(get_session)):
     return row.as_dict(with_epcs=True)
 
 
+# -------------------------------------------------------- product history ---
+@app.get("/api/product-history", dependencies=[Depends(require_user)])
+def product_history(term: str, session: Session = Depends(get_session)):
+    """One product's complete paper trail, newest first. Every event says
+    whether it touched Shopify ("shopify": true) or only this system's
+    records — count observations from batches are always local; nothing
+    in the RFID system writes stock numbers to Shopify today."""
+    term = term.strip()
+    if not term:
+        raise HTTPException(422, "Provide a SKU or barcode.")
+
+    product = None
+    try:
+        product = product_by_barcode(term)
+    except HTTPException as error:
+        if error.status_code != 404:
+            raise
+    sku = (product.get("sku") if product else None) or term
+    barcode = (product.get("barcode") if product else None) or term
+
+    def iso(dt):
+        return dt.isoformat() if dt else None
+
+    events = []
+
+    for a in session.scalars(
+        select(RfidAssignment).where(or_(
+            RfidAssignment.sku == sku, RfidAssignment.barcode == barcode
+        ))
+    ):
+        events.append({
+            "at": iso(a.assigned_at),
+            "type": "tag-assigned",
+            "worker": a.assigned_by,
+            "detail": f"EPC {a.rfid_id}"
+                      + (" · SUSPECT read" if a.suspect else "")
+                      + (f" · bin {a.bin_location}" if a.bin_location else ""),
+            "shopify": False,
+        })
+
+    change_types = {
+        "barcode": "barcode-replaced", "sku": "sku-updated",
+        "bin": "bin-updated",
+    }
+    for c in session.scalars(
+        select(BarcodeChange).where(or_(
+            BarcodeChange.sku == sku,
+            BarcodeChange.old_barcode == barcode,
+            BarcodeChange.new_barcode == barcode,
+        ))
+    ):
+        events.append({
+            "at": iso(c.changed_at),
+            "type": change_types.get(c.changed_field, c.changed_field),
+            "worker": c.changed_by,
+            "detail": f"{c.old_barcode or '(none)'} → {c.new_barcode}",
+            "shopify": True,  # these flows write to the store
+        })
+
+    job_types = {
+        "done": "label-printed", "error": "label-failed",
+        "canceled": "label-canceled", "pending": "label-queued",
+        "printing": "label-printing",
+    }
+    for j in session.scalars(
+        select(PrintJob).where(or_(
+            PrintJob.sku == sku, PrintJob.barcode == barcode
+        ))
+    ):
+        events.append({
+            "at": iso(j.printed_at or j.created_at),
+            "type": job_types.get(j.status, j.status),
+            "worker": j.requested_by,
+            "detail": f"EPC {j.epc}"
+                      + (f" · batch #{j.batch_id}" if j.batch_id else ""),
+            "shopify": False,
+        })
+
+    for al in session.scalars(
+        select(BarcodeAlias).where(or_(
+            BarcodeAlias.sku == sku, BarcodeAlias.alias_barcode == barcode
+        ))
+    ):
+        events.append({
+            "at": iso(al.created_at),
+            "type": "barcode-linked",
+            "worker": al.created_by,
+            "detail": f"{al.alias_barcode} → {al.barcode or al.sku}",
+            "shopify": False,
+        })
+
+    # Count observations: what the shelf actually held, per batch. These
+    # never change Shopify stock — they are the record a future (explicit)
+    # write-back would act on.
+    for item, batch in session.execute(
+        select(BatchItem, Batch)
+        .join(Batch, Batch.id == BatchItem.batch_id)
+        .where(BatchItem.sku == sku)
+    ):
+        detail = (
+            f"bin {batch.bin_name}: counted {item.qty_scanned}"
+            + (f" (expected {item.expected_qty})"
+               if item.expected_qty is not None else "")
+            + (f", {item.paired_count} tag(s) paired"
+               if item.paired_count else "")
+            + f" · batch #{batch.id} {batch.status}"
+        )
+        events.append({
+            "at": iso(batch.completed_at or batch.created_at),
+            "type": "batch-counted",
+            "worker": batch.created_by,
+            "detail": detail,
+            "shopify": False,  # counts are recorded, never pushed (yet)
+        })
+
+    for t in session.scalars(
+        select(ReviewTask).where(ReviewTask.sku == sku)
+    ):
+        events.append({
+            "at": iso(t.created_at),
+            "type": "review-opened",
+            "worker": t.created_by,
+            "detail": f"[{t.category}] {t.detail}",
+            "shopify": False,
+        })
+        if t.resolved_at:
+            events.append({
+                "at": iso(t.resolved_at),
+                "type": f"review-{t.status}",
+                "worker": t.resolved_by,
+                "detail": f"[{t.category}]"
+                          + (f" {t.resolution_note}"
+                             if t.resolution_note else ""),
+                "shopify": False,
+            })
+
+    events.sort(key=lambda e: e["at"] or "", reverse=True)
+
+    tag_count = session.scalar(
+        select(func.count()).select_from(RfidAssignment).where(or_(
+            RfidAssignment.sku == sku, RfidAssignment.barcode == barcode
+        ))
+    )
+    image_url = (product or {}).get("image_url")
+    if not image_url:
+        image_url = session.scalar(
+            select(BinMapEntry.image_url).where(BinMapEntry.sku == sku)
+        )
+    return {
+        "product": product,
+        "sku": sku,
+        "barcode": barcode,
+        "image_url": image_url,
+        "tag_count": tag_count,
+        "on_hand": _mirror_qty(session, sku),
+        "count": len(events),
+        "events": events,
+    }
+
+
 # ---------------------------------------------------------------- history ---
 @app.get("/api/history", dependencies=[Depends(require_user)])
 def history(

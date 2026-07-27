@@ -2424,7 +2424,11 @@ function renderHistory() {
       <td class="recent__meta" style="white-space:nowrap">${escapeHtml(fmtWhen(e.at))}</td>
       <td><span class="evtype">${escapeHtml(e.type)}</span></td>
       <td>${escapeHtml(e.worker || "—")}</td>
-      <td class="mono">${escapeHtml(e.sku || "—")}</td>
+      <td class="mono">${
+        e.sku
+          ? `<a href="#" class="hist-sku" data-sku="${escapeHtml(e.sku)}">${escapeHtml(e.sku)}</a>`
+          : "—"
+      }</td>
       <td>${escapeHtml(e.title || "—")}</td>
       <td class="recent__meta">${escapeHtml(e.detail || "")}</td>
       <td>${
@@ -2438,7 +2442,84 @@ function renderHistory() {
   body.querySelectorAll(".hist-undo").forEach((btn) => {
     btn.addEventListener("click", () => undoHistoryEvent(rows[+btn.dataset.idx], btn));
   });
+  body.querySelectorAll(".hist-sku").forEach((a) => {
+    a.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      openProductHistory(a.dataset.sku);
+    });
+  });
 }
+
+// --- Per-product history: the full paper trail for one SKU/barcode, each
+// event marked whether it touched Shopify or only this system. Counts are
+// observations — nothing here writes stock numbers anywhere.
+async function openProductHistory(term) {
+  const panel = document.getElementById("phist-panel");
+  const body = document.getElementById("phist-body");
+  document.getElementById("phist-term").value = term;
+  panel.hidden = false;
+  body.innerHTML =
+    '<tr><td colspan="5" class="inventory__empty">Loading…</td></tr>';
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  try {
+    const data = await apiJson(
+      `/api/product-history?term=${encodeURIComponent(term)}`
+    );
+    const p = data.product;
+    document.getElementById("phist-title").textContent = p
+      ? p.product_title + (p.variant_title ? ` (${p.variant_title})` : "")
+      : `(not in the catalog) ${term}`;
+    document.getElementById("phist-meta").textContent =
+      `SKU: ${data.sku || "—"} · Barcode: ${data.barcode || "—"}` +
+      (p ? ` · Bin: ${p.bin_location || "—"}` : "") +
+      ` · ${data.tag_count} tag(s) on file` +
+      (data.on_hand != null ? ` · on-hand ${data.on_hand}` : "");
+    const img = document.getElementById("phist-img");
+    if (data.image_url) {
+      img.src = data.image_url;
+      img.hidden = false;
+    } else {
+      img.hidden = true;
+      img.removeAttribute("src");
+    }
+    if (!data.events.length) {
+      body.innerHTML =
+        '<tr><td colspan="5" class="inventory__empty">No recorded events for this product yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = data.events
+      .map(
+        (e) => `<tr>
+        <td class="recent__meta" style="white-space:nowrap">${escapeHtml(fmtWhen(e.at))}</td>
+        <td><span class="evtype">${escapeHtml(e.type)}</span></td>
+        <td>${escapeHtml(e.worker || "—")}</td>
+        <td class="recent__meta">${escapeHtml(e.detail || "")}</td>
+        <td>${
+          e.shopify
+            ? '<span class="chip-status chip-status--done">Shopify ✓</span>'
+            : '<span class="chip-status chip-status--pending">local</span>'
+        }</td>
+      </tr>`
+      )
+      .join("");
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="5" class="inventory__empty">${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+document.getElementById("phist-open").addEventListener("click", () => {
+  const term = document.getElementById("phist-term").value.trim();
+  if (term) openProductHistory(term);
+});
+document.getElementById("phist-term").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    const term = e.target.value.trim();
+    if (term) openProductHistory(term);
+  }
+});
+document.getElementById("phist-close").addEventListener("click", () => {
+  document.getElementById("phist-panel").hidden = true;
+});
 
 // Undoable events carry an `undo` descriptor from the server. Today that's
 // barcode links (alias rows are live, so deleting one IS the undo — the

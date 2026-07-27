@@ -489,6 +489,28 @@
         <h2>History <span class="recent__note">(append-only — every event, old and new values)</span></h2>
         <input id="hist-search" class="recent__search" type="search" placeholder="Filter by SKU, product, worker, EPC…" autocomplete="off" />
       </div>
+      <div class="linkbox__form" style="margin-bottom:12px">
+        <input id="phist-term" class="linkbox__input" type="text" placeholder="Product history — enter a SKU or barcode (or click a SKU below)" autocomplete="off" />
+        <button class="reset" id="phist-open" type="button">Open product</button>
+      </div>
+      <section class="linkbox serialbox" id="phist-panel" hidden>
+        <div class="linkbox__product" style="margin-bottom:8px">
+          <img class="linkbox__img" id="phist-img" alt="" hidden />
+          <div>
+            <div class="linkbox__ptitle" id="phist-title">—</div>
+            <p class="linkbox__text" id="phist-meta"></p>
+          </div>
+        </div>
+        <div class="inventory__scroll">
+          <table class="inventory__table">
+            <thead><tr><th>When</th><th>Event</th><th>Who</th><th>Detail</th><th>Shopify</th></tr></thead>
+            <tbody id="phist-body"></tbody>
+          </table>
+        </div>
+        <div class="linkbox__actions" style="margin-top:10px">
+          <button class="reset" id="phist-close" type="button">Close</button>
+        </div>
+      </section>
       <div class="inventory__scroll">
         <table class="inventory__table">
           <thead>
