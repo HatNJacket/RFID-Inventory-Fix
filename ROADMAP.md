@@ -49,6 +49,9 @@ next bin.
   online/offline pill (heartbeat)
 - History: merged append-only timeline (assignments, edits, labels,
   aliases, batches, review tasks) + search + undo for barcode links
+- Per-product history: click any SKU in History (or look one up) →
+  product panel + full timeline of that product's events, each marked
+  Shopify ✓ (wrote to the store) or local (recorded here only)
 - Review: open-task inbox with resolve/dismiss
 - Audits: placeholder (recommended checks + recent C72 sweeps)
 - Inventory: product summary with live Shopify quantities
@@ -135,6 +138,14 @@ next bin.
 - On-metal / spacer sticker sourcing decision for problem SKUs
 
 ## 📌 Standing decisions
+
+- **NEVER auto-write inventory counts** — to Shopify or any inventory
+  system, from any device. Batch counts are observations; a future
+  write-back is a separate, explicit, operator-confirmed step and stays
+  OFF (SHOPIFY_WRITE_MODE) until testing is done. Correcting a display
+  problem means fixing where data is READ from, never overwriting stock.
+- Expected/shelf counts display Shopify ON-HAND (mirror On_Hand_Current),
+  not "available" (which goes negative on oversells).
 
 - Bins live in Shopify metafields (stock.bin → my_fields.bin_location);
   the TELCAN mirror's Bin_Name is empty store-wide
