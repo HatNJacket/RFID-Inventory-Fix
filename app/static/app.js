@@ -2194,7 +2194,34 @@ bEl.verifyCheck.addEventListener("click", async () => {
 
 bEl.complete.addEventListener("click", async () => {
   if (!batch) return;
-  if (!confirm(`Complete the batch for bin ${batch.bin_name}?`)) return;
+  // RFID check before finishing: every scanned box should have a tag
+  // paired ("entered into inventory using RFID"). Finishing short is
+  // allowed, but only past an explicit are-you-sure with the shortfall.
+  const unpaired = batchItems.filter(
+    (i) => i.resolved && i.paired_count < i.qty_scanned
+  );
+  const missingBoxes = unpaired.reduce(
+    (n, i) => n + (i.qty_scanned - i.paired_count),
+    0
+  );
+  let msg = `Complete the batch for bin ${batch.bin_name}?`;
+  if (unpaired.length) {
+    const names = unpaired
+      .slice(0, 6)
+      .map(
+        (i) =>
+          `• ${i.product_title || i.sku || i.scanned_code}: ` +
+          `${i.paired_count}/${i.qty_scanned} entered by RFID`
+      )
+      .join("\n");
+    msg =
+      `⚠ ${unpaired.length} product(s) — ${missingBoxes} box(es) — ` +
+      `have NOT been entered into inventory with RFID tags yet:\n\n` +
+      `${names}${unpaired.length > 6 ? "\n…" : ""}\n\n` +
+      `Are you sure you want to finish? The missing ones will be filed ` +
+      `in Review as incomplete pairing.`;
+  }
+  if (!confirm(msg)) return;
   bEl.complete.disabled = true;
   try {
     const data = await postJson(`/api/batches/${batch.id}/complete`, {

@@ -1330,15 +1330,39 @@ public class MainActivity extends Activity {
 
     private void finishBatch() {
         if (!inBatch()) return;
+        // RFID check: every scanned box should have a tag paired before the
+        // bin is finished. Short is allowed — but only past an explicit
+        // warning that leads with what's missing.
+        StringBuilder warn = new StringBuilder();
+        int unpaired = 0, missingBoxes = 0, warnLines = 0;
+        for (BItem b : bItems) {
+            if (!b.resolved || b.paired >= b.qty) continue;
+            unpaired++;
+            missingBoxes += b.qty - b.paired;
+            if (warnLines < 6) {
+                warn.append("• ").append(b.name()).append(": ")
+                        .append(b.paired).append("/").append(b.qty)
+                        .append(" entered by RFID\n");
+                warnLines++;
+            }
+        }
         StringBuilder sb = new StringBuilder();
-        int diffs = 0, unresolved = 0, unpaired = 0, lines = 0;
+        if (unpaired > 0) {
+            sb.append("⚠ ").append(unpaired).append(" product(s) — ")
+                    .append(missingBoxes).append(" box(es) — NOT entered "
+                    + "into inventory with RFID tags yet:\n\n")
+                    .append(warn);
+            if (unpaired > 6) sb.append("…\n");
+            sb.append("\nAre you sure? They'll be filed in Review as "
+                    + "incomplete pairing.\n\n——————\n");
+        }
+        int diffs = 0, unresolved = 0, lines = 0;
         for (BItem b : bItems) {
             if (!b.resolved) {
                 if (b.qty > 0) unresolved++;
                 continue;
             }
             if (b.qty == 0 && b.paired == 0) continue;
-            if (b.paired < b.qty) unpaired++;
             String delta;
             if (b.expected != null && b.qty != b.expected) {
                 int d = b.qty - b.expected;
@@ -1349,7 +1373,9 @@ public class MainActivity extends Activity {
                 delta = b.qty + " ✓";
             }
             if (lines < 25) {
-                sb.append(b.name()).append(":  ").append(delta).append("\n");
+                sb.append(b.name()).append(":  ").append(delta)
+                        .append("  · ").append(b.paired).append("/")
+                        .append(b.qty).append(" tagged").append("\n");
                 lines++;
             }
         }
@@ -1359,17 +1385,19 @@ public class MainActivity extends Activity {
                 + "be filed for Review.\n");
         if (unresolved > 0) sb.append(unresolved).append(" unknown "
                 + "barcode(s) will be filed for Review.\n");
-        if (unpaired > 0) sb.append(unpaired).append(" product(s) still "
-                + "have unpaired boxes.\n");
         if (diffs + unresolved + unpaired == 0) {
-            sb.append("Everything matches. Clean bin ✓\n");
+            sb.append("Everything matches and every box is tagged. "
+                    + "Clean bin ✓\n");
         }
         sb.append("\nNo Shopify stock numbers change — differences go to "
                 + "the Review tab for a decision.");
         new AlertDialog.Builder(this)
-                .setTitle("Finish bin " + batchBin + "?")
+                .setTitle(unpaired > 0
+                        ? "Finish bin " + batchBin + " with untagged boxes?"
+                        : "Finish bin " + batchBin + "?")
                 .setMessage(sb.toString())
-                .setPositiveButton("Finish", (d, w) -> new Thread(() -> {
+                .setPositiveButton(unpaired > 0 ? "Finish anyway" : "Finish",
+                        (d, w) -> new Thread(() -> {
                     try {
                         JSONObject body = new JSONObject().put("created_by",
                                 prefs.getString("device", "C72"));
