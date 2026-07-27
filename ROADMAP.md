@@ -140,8 +140,14 @@ next bin.
   write-back is a separate, explicit, operator-confirmed step and stays
   OFF (SHOPIFY_WRITE_MODE) until testing is done. Correcting a display
   problem means fixing where data is READ from, never overwriting stock.
-- Expected/shelf counts display Shopify ON-HAND (mirror On_Hand_Current),
-  not "available" (which goes negative on oversells).
+- Expected/shelf counts display Shopify ON-HAND, pulled LIVE from the
+  Shopify API (inventoryLevels quantities) — never from the TELCAN
+  mirror, whose inventory sync went stale (last update 2025-12-08) and
+  once served 8-month-old numbers. Mirror = fallback only when the API
+  is down.
+- ⚠ The TELCAN mirror sync appears DEAD since Dec 2025 (Steve to check
+  the sync job someday): barcode/title lookups still work (API fallback
+  covers post-Dec products), but mirror quantities are untrustworthy.
 
 - Bins live in Shopify metafields (stock.bin → my_fields.bin_location);
   the TELCAN mirror's Bin_Name is empty store-wide
