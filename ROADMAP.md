@@ -72,13 +72,15 @@ next bin.
 
 ## 🔶 In progress / blocked
 
-- **C72 barcode input = Bluetooth scanner** (2026-07-26): the built-in
-  imager test failed (no aimer light, instant DECODE_FAILURE — the unit
-  appears to lack the paid imager option). App v1.4 adds a BT-scanner
-  capture field in barcode mode (scanner pairs to the C72 as a keyboard).
-  ACTION (Steve): pair the barcode scanner to the C72 and test; report
-  the engine name v1.3+ shows in parentheses to fully close the imager
-  question.
+- **C72 batch workflow FIELD TEST** (app v1.5, deployed 2026-07-26):
+  the whole batch flow now runs on the C72 — BATCH… picker, COLLECT
+  (BT-scanner scans, outcome sounds, n/N tickers), PAIR (barcode selects,
+  trigger single-reads the sticker, undo), FINISH (stock-delta confirm).
+  Any browser with the same batch open mirrors it live (3s poll).
+  ACTION (Steve): install v1.5, pair the BT scanner, run one real bin
+  end to end.
+- Built-in imager: confirmed absent (no aimer light, instant
+  DECODE_FAILURE) — barcodes come from the BT scanner permanently.
 - **Print agent update on warehouse laptop** — ACTION (Steve): copy the
   repo's updated print_agent.py to the laptop and restart the agent
   (removes the old auto-Astronomik header rule).
