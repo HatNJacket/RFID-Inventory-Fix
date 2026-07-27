@@ -97,19 +97,12 @@ next bin.
 
 ## 🔜 Next up (the revamp — after the C72 barcode test)
 
-- Web batch UI restyled to MATCH the C72 view (Steve, 2026-07-26):
-  the browser's batch tagging should mirror the app — EasyScan-style
-  product cards (image, bold name, "SKU:"/"Barcode:" lines, two-number
-  tracker top-right), bin top-left / phase top-right header, list-first
-  layout; fold in the earlier revamp asks (clickable stage chips for
-  back-navigation, ding/other-ding/buzz sounds, green glow = exact
-  count, red glow = over). The C72 screen is now the design reference.
-- C72 v2.2 — tab bar becomes a slide-in SIDEBAR (Steve, 2026-07-26):
-  a single small button; tapping opens a drawer from the screen edge
-  OVER the content with the page behind greyed out (scrim); it closes
-  when a tab is chosen or the button is pressed again. The current
-  collapse leaves the bar's row height in place, so the list never
-  gains the space — the drawer fixes that by never occupying layout.
+- ✅ SHIPPED 2026-07-27: web batch UI mirrors the C72 (cards with
+  image/SKU/Barcode/tracker, green/red glow, ding/other-ding/buzz
+  sounds, clickable stage chips) and C72 v2.2 drawer (slide-in over
+  content with scrim, header row reclaims the old tab bar's space,
+  tones on the alarm stream so device media volume can't mute them).
+  Field test pending.
 
 - C72-first batch workflow (the 8-step flow):
   server endpoints for barcode-driven collect + pair; C72 app batch
