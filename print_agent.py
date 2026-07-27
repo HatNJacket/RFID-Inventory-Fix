@@ -64,9 +64,7 @@ LABEL_ZPL = """^XA
 ^LT{sd}
 {header}^CF0,30
 ^FO0,52^FB{pw},1,0,C^FD{sku}^FS
-{barcode_line}^CF0,30
-^FO0,{bin_y}^FB{pw},1,0,C^FDBIN: {bin}^FS
-^XZ
+{barcode_line}{bin_line}^XZ
 """
 
 HEADER_STORE = "^CF0,34\n^FO0,10^FB{pw},1,0,C^FDTelescopes Canada^FS\n"
@@ -182,6 +180,21 @@ def build_zpl(job: dict, encode_rfid: bool,
         barcode_line = BARCODE_LINE.format(
             bx=bx, barcode=barcode, module=module, pw=pw
         )
+    # Some products are one item split across shelves. The label leads with
+    # the bin these boxes are on and names the others, so a picker chasing
+    # the rest of the item isn't left guessing.
+    bin_text = clean(job.get("bin_location"))
+    others = clean(job.get("other_bins"), fallback="")
+    if others:
+        bin_line = (
+            f"^CF0,22\n^FO0,{ll - 52}^FB{pw},2,0,C"
+            f"^FDBIN: {bin_text}. Other: {others[:60]}^FS\n"
+        )
+    else:
+        bin_line = (
+            f"^CF0,30\n^FO0,{ll - 45}^FB{pw},1,0,C^FDBIN: {bin_text}^FS\n"
+        )
+
     return LABEL_ZPL.format(
         rfid_setup=RFID_ZPL.format(epc=job["epc"]) if encode_rfid else "",
         pw=pw,
@@ -189,10 +202,9 @@ def build_zpl(job: dict, encode_rfid: bool,
         sd=shift_down,
         sr=shift_right,
         header=header,
-        bin_y=ll - 45,
         sku=sku_text,
         barcode_line=barcode_line,
-        bin=clean(job.get("bin_location")),
+        bin_line=bin_line,
     )
 
 

@@ -2088,6 +2088,11 @@ function itemCard(item, mode) {
             : "⚠ unknown barcode"
       }</div>
       ${barcode ? `<div class="bcell__meta">Barcode: ${escapeHtml(barcode)}</div>` : ""}
+      ${
+        item.other_bins
+          ? `<div class="bcell__meta bcell__split">Also on ${escapeHtml(item.other_bins)} — this item is split across shelves</div>`
+          : ""
+      }
     </div>
     <span class="bcell__tracker">${tracker}</span>`;
   return li;

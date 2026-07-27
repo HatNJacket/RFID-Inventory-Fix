@@ -567,6 +567,7 @@ class PrintJobIn(BaseModel):
     sku: str | None = Field(default=None, max_length=100)
     barcode: str | None = Field(default=None, max_length=64)
     bin_location: str | None = Field(default=None, max_length=100)
+    other_bins: str | None = Field(default=None, max_length=255)
     label_name: str | None = Field(default=None, max_length=255)
     label_placement: str | None = Field(
         default=None, pattern="^(header|sku|both)$"
@@ -1373,22 +1374,29 @@ def _rebuild_bin_map() -> None:
                     "@LockTimeout=120000"
                 ))
             session.query(BinMapEntry).delete()
-            session.add_all(
-                BinMapEntry(
-                    sku=e["sku"],
-                    barcode=e["barcode"],
-                    product_title=(e["product_title"] or "")[:255] or None,
-                    variant_title=(e["variant_title"] or "")[:255] or None,
-                    shopify_variant_id=e["shopify_variant_id"],
-                    shopify_product_id=e["shopify_product_id"],
-                    bin=e["bin"][:100],
-                    qty=e["qty"],
-                    image_url=(e.get("image_url") or "")[:500] or None,
-                )
-                for e in entries
-            )
+            rows = []
+            for e in entries:
+                # A product split across shelves ("G2-1 & B17") belongs to
+                # BOTH bins — one row each, each naming the others.
+                bins = parse_bins(e["bin"]) or [e["bin"]]
+                for name in bins:
+                    others = [b for b in bins if b != name]
+                    rows.append(BinMapEntry(
+                        sku=e["sku"],
+                        barcode=e["barcode"],
+                        product_title=(e["product_title"] or "")[:255] or None,
+                        variant_title=(e["variant_title"] or "")[:255] or None,
+                        shopify_variant_id=e["shopify_variant_id"],
+                        shopify_product_id=e["shopify_product_id"],
+                        bin=name[:100],
+                        other_bins=(", ".join(others))[:255] or None,
+                        qty=e["qty"],
+                        image_url=(e.get("image_url") or "")[:500] or None,
+                    ))
+            session.add_all(rows)
             session.commit()
-        logger.info("bin map rebuilt: %d binned variants", len(entries))
+        logger.info("bin map rebuilt: %d binned variants -> %d bin rows",
+                    len(entries), len(rows))
     except Exception as error:
         logger.warning("bin map rebuild failed: %s", error)
     finally:
@@ -1430,6 +1438,45 @@ def _maybe_refresh_bin_map(force: bool = False,
         _bin_map_state["running"] = True
     threading.Thread(target=_rebuild_bin_map, daemon=True).start()
     return True
+
+
+# Some products are one sellable item split across shelves, and the bin
+# field says so: "G2-1 & B17", "MOUNT: B18-1, BATTERY: G1-4",
+# "SCOPE: B17-2, TOOL: G3-2, KIT: G3-2". Each of those is a real bin the
+# product legitimately lives in.
+_BIN_SPLIT_RE = re.compile(r"\s*(?:[&,;/+]|\band\b)\s*", re.I)
+
+
+def parse_bins(value: str | None) -> list[str]:
+    """Every bin named in a bin field, in order, de-duplicated. Part
+    labels ("MOUNT: B18-1") are dropped — the shelf code is what matters."""
+    if not value:
+        return []
+    bins: list[str] = []
+    seen: set = set()
+    for part in _BIN_SPLIT_RE.split(str(value)):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:  # "MOUNT: B18-1" -> "B18-1"
+            part = part.rsplit(":", 1)[-1].strip()
+        if not part or part.lower() == "no bin assigned":
+            continue
+        if part.lower() not in seen:
+            seen.add(part.lower())
+            bins.append(part)
+    return bins
+
+
+def bin_contains(value: str | None, wanted: str) -> bool:
+    """Is `wanted` one of the bins this product lives in?"""
+    target = (wanted or "").strip().lower()
+    return any(b.lower() == target for b in parse_bins(value))
+
+
+def bins_other_than(value: str | None, wanted: str) -> list[str]:
+    target = (wanted or "").strip().lower()
+    return [b for b in parse_bins(value) if b.lower() != target]
 
 
 # A well-formed bin is one letter + 1-99, a dash, then 1-99 (D2-2, E14-3).
@@ -1791,6 +1838,7 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
                 "sku": r.sku,
                 "barcode": r.barcode,
                 "bin_location": r.bin,
+                "other_bins": r.other_bins,
                 "expected_qty": r.qty,
                 "image_url": r.image_url,
             })
@@ -1819,9 +1867,13 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
                     continue
                 p["expected_qty"] = info["on_hand"]
                 actual = (info["bin"] or "").strip()
-                if actual and actual.lower() != wanted:
+                # Multi-bin products legitimately live here AND elsewhere.
+                if actual and not bin_contains(actual, wanted):
                     moved.append(f"{p.get('sku')}→{actual}")
                     continue
+                if actual:
+                    others = bins_other_than(actual, wanted)
+                    p["other_bins"] = ", ".join(others) if others else None
                 fresh.append(p)
             if moved:
                 logger.info("bin %s: %d product(s) moved since the map was "
@@ -1858,6 +1910,7 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
             sku=p.get("sku"),
             barcode=p.get("barcode"),
             bin_location=p.get("bin_location"),
+            other_bins=(p.get("other_bins") or "")[:255] or None,
             serial_prefix=sp.prefix if sp else None,
             image_url=(p.get("image_url") or "")[:500] or None,
             # Batch labels use the standard store header + SKU; Astronomik
@@ -2001,6 +2054,9 @@ def batch_scan(
             item.sku = product.get("sku")
             item.barcode = product.get("barcode")
             item.bin_location = product.get("bin_location")
+            others = bins_other_than(product.get("bin_location"),
+                                     batch.bin_name)
+            item.other_bins = (", ".join(others))[:255] if others else None
             item.serial_prefix = product.get("serial_prefix")
             item.image_url = (product.get("image_url") or "")[:500] or None
             # Batch labels print the store header + SKU (Astronomik naming
@@ -2026,11 +2082,13 @@ def batch_scan(
     # Bin mismatch is informational: the operator decides at the shelf
     # (keep saved bin / move it via the existing confirmed bin update).
     saved_bin = item.bin_location
+    # A product split across shelves ("G2-1 & B17") is legitimately here as
+    # long as this bin is one of the ones listed.
     bin_mismatch = bool(
         item.resolved
         and saved_bin
         and saved_bin not in MISSING_BIN_VALUES
-        and saved_bin.strip().lower() != batch.bin_name.strip().lower()
+        and not bin_contains(saved_bin, batch.bin_name)
     )
     return {
         "item": item.as_dict(),
@@ -2086,8 +2144,9 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
             if (
                 saved
                 and saved.lower() != "no bin assigned"
-                and saved.lower() != _get_batch(session, batch_id)
-                .bin_name.strip().lower()
+                and not bin_contains(
+                    saved, _get_batch(session, batch_id).bin_name
+                )
             ):
                 flags.append("wrong-bin")
         if flags:
@@ -2281,6 +2340,9 @@ def batch_queue_labels(
                     sku=item.sku,
                     barcode=item.barcode,
                     bin_location=batch.bin_name,
+                    # Split-shelf products print where their other boxes
+                    # are, so a picker isn't left hunting.
+                    other_bins=item.other_bins,
                     # Store header + SKU unless a preferred name exists:
                     # the batch item's own override first, else the
                     # product's saved label name (set in Check / History).

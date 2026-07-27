@@ -1033,6 +1033,7 @@ a { color: var(--accent); }
 }
 .bitem-arrow:disabled { opacity: 0.25; cursor: default; }
 .bcell__flags { color: var(--warn-ink); font-weight: 600; }
+.bcell__split { color: var(--accent); font-weight: 600; }
 
 /* status + event chips (print queue, history) */
 .chip-status {

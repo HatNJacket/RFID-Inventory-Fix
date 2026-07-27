@@ -227,6 +227,9 @@ class PrintJob(Base):
     product_title: Mapped[str] = mapped_column(String(255), nullable=False)
     variant_title: Mapped[str | None] = mapped_column(String(255))
     bin_location: Mapped[str | None] = mapped_column(String(100))
+    # Printed under the bin ("BIN: G2-1. Other: B17") for products whose
+    # boxes are split across shelves.
+    other_bins: Mapped[str | None] = mapped_column(String(255))
     shopify_variant_id: Mapped[str] = mapped_column(String(64), nullable=False)
     # 300 not 64: TELCAN-sourced ids are "handle:<shopify-handle>" and
     # handles run up to 255 chars.
@@ -262,6 +265,7 @@ class PrintJob(Base):
             "product_title": self.product_title,
             "variant_title": self.variant_title,
             "bin_location": self.bin_location,
+            "other_bins": self.other_bins,
             "shopify_variant_id": self.shopify_variant_id,
             "shopify_product_id": self.shopify_product_id,
             "label_name": self.label_name,
@@ -352,6 +356,8 @@ class BatchItem(Base):
     barcode: Mapped[str | None] = mapped_column(String(64))
     # The product's SAVED bin at scan time (labels use the batch's bin).
     bin_location: Mapped[str | None] = mapped_column(String(100))
+    # Other shelves this same product also lives on, comma-joined.
+    other_bins: Mapped[str | None] = mapped_column(String(255))
     serial_prefix: Mapped[str | None] = mapped_column(String(8))
     label_name: Mapped[str | None] = mapped_column(String(255))
     image_url: Mapped[str | None] = mapped_column(String(500))
@@ -378,6 +384,7 @@ class BatchItem(Base):
             "sku": self.sku,
             "barcode": self.barcode,
             "bin_location": self.bin_location,
+            "other_bins": self.other_bins,
             "serial_prefix": self.serial_prefix,
             "label_name": self.label_name,
             "image_url": self.image_url,
@@ -404,6 +411,9 @@ class BinMapEntry(Base):
     shopify_variant_id: Mapped[str | None] = mapped_column(String(64))
     shopify_product_id: Mapped[str | None] = mapped_column(String(300))
     bin: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    # One row per bin: a product split across shelves ("G2-1 & B17") gets a
+    # row for each, and each row names the others here.
+    other_bins: Mapped[str | None] = mapped_column(String(255))
     qty: Mapped[int | None] = mapped_column(Integer)
     image_url: Mapped[str | None] = mapped_column(String(500))
     updated_at: Mapped[datetime] = mapped_column(
