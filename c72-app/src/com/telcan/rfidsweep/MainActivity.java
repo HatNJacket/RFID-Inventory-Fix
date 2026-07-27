@@ -21,7 +21,9 @@ import android.media.ToneGenerator;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.WindowManager;
@@ -88,6 +90,8 @@ public class MainActivity extends Activity {
     private TextView countView;
     private TextView powerLabel;
     private SeekBar powerSeek;
+    private EditText btInput;
+    private volatile boolean decoderFailed = false;
     private Button modeBtn;
     private Button toggleBtn;
     private Button sendBtn;
@@ -134,6 +138,47 @@ public class MainActivity extends Activity {
         modeBtn = new Button(this);
         modeBtn.setOnClickListener(v -> toggleMode());
         root.addView(modeBtn);
+
+        // A paired Bluetooth barcode scanner acts as a keyboard: this field
+        // (barcode mode only) stays focused and catches its keystrokes, so
+        // the C72 works even without the built-in imager option.
+        btInput = new EditText(this);
+        btInput.setHint("Bluetooth scanner scans land here");
+        btInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        btInput.setShowSoftInputOnFocus(false); // no on-screen keyboard
+        btInput.setVisibility(android.view.View.GONE);
+        btInput.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int a, int b, int c) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                String text = s.toString();
+                if (text.contains("\n") || text.contains("\r")) {
+                    String code = text.replace("\n", "").replace("\r", "")
+                            .trim();
+                    btInput.setText("");
+                    if (!code.isEmpty()) {
+                        onBarcode(BarcodeDecoder.DECODE_SUCCESS, code);
+                    }
+                }
+            }
+        });
+        btInput.setOnEditorActionListener((v, actionId, ev) -> {
+            String code = btInput.getText().toString().trim();
+            btInput.setText("");
+            if (!code.isEmpty()) {
+                onBarcode(BarcodeDecoder.DECODE_SUCCESS, code);
+            }
+            return true;
+        });
+        root.addView(btInput);
 
         // Power: slider 1..30 plus recommended presets underneath. Only
         // affects the RFID antenna; the barcode imager doesn't use it.
@@ -244,6 +289,9 @@ public class MainActivity extends Activity {
                 : "MODE: RFID  (tap for barcode)");
         toggleBtn.setText(barcodeMode ? "SCAN BARCODE" : "START SCAN");
         sendBtn.setEnabled(!barcodeMode);
+        btInput.setVisibility(barcodeMode
+                ? android.view.View.VISIBLE : android.view.View.GONE);
+        if (barcodeMode) btInput.requestFocus();
         refreshList();
     }
 
@@ -368,14 +416,15 @@ public class MainActivity extends Activity {
             ui.post(() -> {
                 decoderOpening = false;
                 decoderReady = ready;
+                decoderFailed = !ready;
                 if (barcodeMode) {
                     status.setText(ready
                             ? "Barcode mode (" + engineInfo + ") — pull "
-                              + "the trigger to scan"
-                            : "Barcode engine FAILED to open ("
-                              + engineInfo + ") — force-stop "
-                              + "KeyboardEmulator (Settings > Apps), "
-                              + "reboot, reopen this app.");
+                              + "the trigger, or use the BT scanner"
+                            : "No built-in imager (" + engineInfo + ") — "
+                              + "pair your Bluetooth scanner (C72 "
+                              + "Settings > Bluetooth); its reads land "
+                              + "in the box above.");
                 }
             });
         }).start();
@@ -383,7 +432,13 @@ public class MainActivity extends Activity {
 
     private void scanBarcodeOnce() {
         if (!decoderReady) {
-            if (!decoderOpening) initBarcode();
+            if (decoderFailed) {
+                status.setText("No built-in imager on this unit — scan "
+                        + "with the Bluetooth scanner (its reads land in "
+                        + "the box above).");
+            } else if (!decoderOpening) {
+                initBarcode();
+            }
             return;
         }
         status.setText("Scanning… aim at the barcode");
@@ -409,6 +464,7 @@ public class MainActivity extends Activity {
             beep(true);
             status.setText("Read: " + code);
             refreshList();
+            if (barcodeMode) btInput.requestFocus();
         } else if (resultCode == BarcodeDecoder.DECODE_TIMEOUT) {
             beep(false);
             status.setText("No barcode read — try again");
