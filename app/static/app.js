@@ -2590,10 +2590,22 @@ async function openProductHistory(term) {
     );
     phistData = data;
     const p = data.product;
-    if (data.serial_prefix) {
+    // Preferred-name editor for EVERY cataloged product: serialized brands
+    // write through their serial record; everything else uses the per-SKU
+    // label-name store. Blank = standard "Telescopes Canada" header.
+    if (p) {
       document.getElementById("phist-serial").hidden = false;
       document.getElementById("phist-label-input").value =
-        data.serial_label || "";
+        phistEffectiveName() || "";
+      document.getElementById("phist-label-hint").textContent =
+        data.serial_prefix
+          ? "Preferred label name (serialized product) — printed at the " +
+            "top of every label, including Scan Station auto-prints. " +
+            "Long names print smaller to fit two lines:"
+          : "Preferred label name — printed at the top instead of " +
+            "“Telescopes Canada” when set here. Leave blank for " +
+            "the standard label. Long names print smaller:";
+      updateLabelPreview();
     }
     document.getElementById("phist-print").disabled = !p;
     document.getElementById("phist-title").textContent = p
@@ -2655,25 +2667,85 @@ document.getElementById("phist-overlay").addEventListener("click", (e) => {
     document.getElementById("phist-overlay").hidden = true;
 });
 
-// Preferred label name save — writes through to the serial-prefix record,
-// exactly like the Scan Station's Save button (future prints use it).
+// The name a label would print for this product right now (null = the
+// standard store header).
+function phistEffectiveName() {
+  if (!phistData) return null;
+  if (phistData.serial_prefix)
+    return phistData.serial_label_saved ? phistData.serial_label : null;
+  return phistData.custom_label;
+}
+
+// Miniature sticker mirrors the agent's real layout, including the
+// smaller font tiers long names trigger.
+function updateLabelPreview() {
+  if (!phistData) return;
+  const p = phistData.product || {};
+  const typed = document.getElementById("phist-label-input").value.trim();
+  const header = typed || "Telescopes Canada";
+  const el = document.getElementById("phist-prev-header");
+  el.textContent = header;
+  el.className =
+    "label-preview__header " +
+    (!typed || header.length <= 26
+      ? "label-preview__header--lg"
+      : header.length <= 56
+        ? "label-preview__header--md"
+        : "label-preview__header--sm");
+  document.getElementById("phist-prev-sku").textContent =
+    p.sku || phistData.sku || "";
+  document.getElementById("phist-prev-bc").textContent =
+    p.barcode || p.sku || phistData.barcode || "";
+  document.getElementById("phist-prev-bin").textContent =
+    "BIN: " + (p.bin_location || "—");
+}
+
+document
+  .getElementById("phist-label-input")
+  .addEventListener("input", updateLabelPreview);
+
+// Preferred label name save — serialized products write through their
+// serial record (Scan Station auto-prints use it too); others go to the
+// per-SKU label-name store. Blank clears back to the standard header.
 document.getElementById("phist-label-save").addEventListener("click", async () => {
-  if (!phistData || !phistData.serial_prefix) return;
+  if (!phistData) return;
   const name = document.getElementById("phist-label-input").value.trim();
   const msg = document.getElementById("phist-msg");
-  if (!name) return;
   try {
-    await apiJson(
-      `/api/serial-prefixes/${encodeURIComponent(phistData.serial_prefix)}/label`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ label_name: name }),
+    if (phistData.serial_prefix) {
+      if (!name) {
+        msg.textContent =
+          "Serialized products need a name — shorten it instead of clearing.";
+        return;
       }
-    );
-    phistData.serial_label = name;
-    phistData.serial_label_saved = true;
-    msg.textContent = "Name saved ✓ — new prints use it.";
+      await apiJson(
+        `/api/serial-prefixes/${encodeURIComponent(phistData.serial_prefix)}/label`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label_name: name }),
+        }
+      );
+      phistData.serial_label = name;
+      phistData.serial_label_saved = true;
+    } else {
+      await apiJson(
+        `/api/label-names/${encodeURIComponent(phistData.sku)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            label_name: name,
+            updated_by: operatorEl.value || null,
+          }),
+        }
+      );
+      phistData.custom_label = name || null;
+    }
+    updateLabelPreview();
+    msg.textContent = name
+      ? "Name saved ✓ — new prints use it."
+      : "Cleared ✓ — labels print the standard header.";
   } catch (err) {
     msg.textContent = err.message;
   }
@@ -2710,9 +2782,7 @@ document.getElementById("phist-print").addEventListener("click", async () => {
         sku: p.sku,
         barcode: p.barcode,
         bin_location: p.bin_location,
-        label_name: phistData.serial_label_saved
-          ? phistData.serial_label
-          : null,
+        label_name: phistEffectiveName(),
         requested_by: operator,
       }),
     });

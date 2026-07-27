@@ -39,6 +39,7 @@ from app.models import (
     BatchItem,
     BinMapEntry,
     EpcCapture,
+    LabelName,
     PrintJob,
     ReviewTask,
     RfidAssignment,
@@ -2146,6 +2147,38 @@ def get_capture(capture_id: int, session: Session = Depends(get_session)):
     return row.as_dict(with_epcs=True)
 
 
+# ------------------------------------------------------------ label names ---
+class LabelNameIn(BaseModel):
+    label_name: str = Field(default="", max_length=76)
+    updated_by: str | None = Field(default=None, max_length=100)
+
+
+@app.put("/api/label-names/{sku}", dependencies=[Depends(require_user)])
+def set_label_name(
+    sku: str, payload: LabelNameIn, session: Session = Depends(get_session)
+):
+    """Set (or clear, with a blank name) the preferred label header for a
+    non-serialized product. Local record only — labels pick it up on the
+    next print; nothing in Shopify changes."""
+    sku = sku.strip()
+    if not sku:
+        raise HTTPException(422, "SKU required.")
+    name = payload.label_name.strip()
+    row = session.get(LabelName, sku)
+    if not name:
+        if row is not None:
+            session.delete(row)
+            session.commit()
+        return {"sku": sku, "label_name": None}
+    if row is None:
+        row = LabelName(sku=sku)
+        session.add(row)
+    row.label_name = name
+    row.updated_by = payload.updated_by
+    session.commit()
+    return {"sku": sku, "label_name": name}
+
+
 # -------------------------------------------------------- product history ---
 @app.get("/api/product-history", dependencies=[Depends(require_user)])
 def product_history(term: str, session: Session = Depends(get_session)):
@@ -2301,6 +2334,7 @@ def product_history(term: str, session: Session = Depends(get_session)):
         select(SerialPrefix).where(SerialPrefix.sku == sku)
         .order_by(SerialPrefix.prefix)
     )
+    custom = session.get(LabelName, sku)
     return {
         "product": product,
         "sku": sku,
@@ -2314,6 +2348,8 @@ def product_history(term: str, session: Session = Depends(get_session)):
             if sp else None
         ),
         "serial_label_saved": bool(sp and sp.label_name),
+        # Non-serial products keep their preferred header here instead.
+        "custom_label": custom.label_name if custom else None,
         "count": len(events),
         "events": events,
     }

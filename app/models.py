@@ -389,6 +389,21 @@ class BinMapEntry(Base):
     )
 
 
+class LabelName(Base):
+    """Operator-preferred label header for NON-serialized products (serial
+    brands keep theirs on SerialPrefix). When set, panel prints put this
+    name at the top of the label instead of the store header."""
+
+    __tablename__ = "rfid_label_names"
+
+    sku: Mapped[str] = mapped_column(String(100), primary_key=True)
+    label_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(String(100))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class EpcCapture(Base):
     """One RFID sweep sent from the C72 companion app: the operator scans a
     shelf freely (everything held on the device), then hits Send once —
