@@ -89,11 +89,10 @@ next bin.
   end to end.
 - Built-in imager: confirmed absent (no aimer light, instant
   DECODE_FAILURE) — barcodes come from the BT scanner permanently.
-- **Print agent update on warehouse laptop** — ACTION (Steve): copy the
-  repo's updated print_agent.py to the laptop and restart the agent.
-  TWO fixes pending there now: the old auto-Astronomik header rule
-  removal, and the long-name font fix (ZPL overprints past its 2-line
-  cap — the overlapping-label bug stays until the laptop copy updates).
+- ~~Print agent update~~ RESOLVED 2026-07-27: the agent runs on the dev
+  laptop FROM this repo directory (scheduled task "RFID Print Agent" →
+  print_agent_loop.cmd), so agent fixes apply by restarting the process
+  (loop relaunches in 10s). Header rule + long-name font fixes are live.
 - **Inventory-check screenshot** — ACTION (Steve): attach it so the batch
   UX revamp matches the look of the old system.
 
