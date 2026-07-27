@@ -2703,6 +2703,9 @@ document.getElementById("bitem-oddapply").addEventListener("click", async () => 
       target: p.sku || p.barcode,
       new_barcode: it.scanned_code,
       changed_by: operatorEl.value || null,
+      // The operator just answered "are you absolutely sure?" above; the
+      // endpoint refuses to touch Shopify without this.
+      confirmed: true,
     });
     // The unresolved row's count has to be re-scanned against the real
     // product, so take it out of the batch.
