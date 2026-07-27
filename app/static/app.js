@@ -1703,6 +1703,31 @@ document.getElementById("binboard-sort").addEventListener("change", (e) => {
   renderBinBoard();
 });
 
+// Force a full re-read of bins from Shopify. Needed because Shopify can't
+// be asked "which products are in bin X" — only the whole catalog walk
+// finds products that MOVED INTO a bin.
+document.getElementById("binboard-refresh").addEventListener("click", async () => {
+  const btn = document.getElementById("binboard-refresh");
+  const countEl = document.getElementById("binboard-count");
+  btn.disabled = true;
+  const original = countEl.textContent;
+  countEl.textContent = "(re-reading bins from Shopify…)";
+  try {
+    await postJson("/api/bin-map/refresh", {});
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const s = await apiJson("/api/bin-map/status");
+      if (!s.refreshing) break;
+    }
+    await loadBinBoard();
+  } catch (err) {
+    countEl.textContent = original;
+    setBatchResult(err.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 let binFilterTimer;
 document.getElementById("binboard-filter").addEventListener("input", () => {
   clearTimeout(binFilterTimer);

@@ -1406,9 +1406,11 @@ def _bin_map_age(session: Session) -> float | None:
     return (datetime.now(timezone.utc) - newest).total_seconds()
 
 
-def _maybe_refresh_bin_map(force: bool = False) -> bool:
+def _maybe_refresh_bin_map(force: bool = False,
+                           max_age: float | None = None) -> bool:
     """Kick a background rebuild when the map is stale/empty. Returns True
-    if a rebuild is running after the call."""
+    if a rebuild is running after the call. `max_age` overrides the normal
+    TTL — batch start uses a short one so bin edits land quickly."""
     if config.check_shopify_env() or not database_configured():
         return False
     with _bin_map_lock:
@@ -1422,7 +1424,8 @@ def _maybe_refresh_bin_map(force: bool = False) -> bool:
         except Exception as error:
             logger.warning("bin map age check failed: %s", error)
             return False
-        if not force and age is not None and age < _BIN_MAP_TTL:
+        ttl = _BIN_MAP_TTL if max_age is None else max_age
+        if not force and age is not None and age < ttl:
             return False
         _bin_map_state["running"] = True
     threading.Thread(target=_rebuild_bin_map, daemon=True).start()
@@ -1670,6 +1673,14 @@ def bin_check(
     }
 
 
+@app.post("/api/bin-map/refresh", dependencies=[Depends(require_user)])
+def bin_map_refresh():
+    """Force a full re-read of every product's bin from Shopify. Takes
+    ~a minute in the background; poll /api/bin-map/status for progress."""
+    started = _maybe_refresh_bin_map(force=True)
+    return {"refreshing": started}
+
+
 @app.get("/api/bin-map/status", dependencies=[Depends(require_user)])
 def bin_map_status(session: Session = Depends(get_session)):
     age = _bin_map_age(session)
@@ -1786,20 +1797,42 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
     except Exception as error:
         logger.warning("bin pre-seed failed for %s: %s", payload.bin, error)
 
-    # The bin map's quantities are a cache (6h cycle); starting a batch is
-    # exactly when the numbers must be THIS minute's truth, so refresh the
-    # expected counts live from Shopify (bin-map values stay as fallback).
+    # The bin map is a cache; starting a batch is exactly when it must be
+    # THIS minute's truth. Re-check every seeded product live: refresh its
+    # count, and drop it if its bin has since changed in Shopify.
+    #
+    # (Products that moved INTO this bin can't be found this way — Shopify
+    # can't search variants by metafield value — so a background rebuild is
+    # kicked off too, and scanning such a box adds it correctly anyway.)
     if expected and not config.check_shopify_env():
         try:
-            live = shopify.get_on_hand_by_skus(
+            live = shopify.get_stock_info_by_skus(
                 [p["sku"] for p in expected if p.get("sku")]
             )
+            wanted = payload.bin.strip().lower()
+            fresh = []
+            moved = []
             for p in expected:
-                if p.get("sku") in live:
-                    p["expected_qty"] = live[p["sku"]]
+                info = live.get(p.get("sku") or "")
+                if info is None:
+                    fresh.append(p)
+                    continue
+                p["expected_qty"] = info["on_hand"]
+                actual = (info["bin"] or "").strip()
+                if actual and actual.lower() != wanted:
+                    moved.append(f"{p.get('sku')}→{actual}")
+                    continue
+                fresh.append(p)
+            if moved:
+                logger.info("bin %s: %d product(s) moved since the map was "
+                            "built: %s", payload.bin, len(moved),
+                            ", ".join(moved[:10]))
+            expected = fresh
         except Exception as error:
-            logger.warning("live on-hand refresh failed for bin %s: %s",
+            logger.warning("live bin/stock refresh failed for bin %s: %s",
                            payload.bin, error)
+    # Keep the map itself moving so newly-arrived products show up soon.
+    _maybe_refresh_bin_map(max_age=900)
 
     # Serialized brands print their operator-confirmed name; grab any
     # prefix rows for the seeded SKUs in one query.

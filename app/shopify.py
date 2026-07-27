@@ -401,23 +401,64 @@ _ON_HAND_BULK_QUERY = _ON_HAND_QUERY.replace(
 )
 
 
-def get_on_hand_by_skus(skus: list[str]) -> dict[str, int]:
-    """Live ON-HAND for a set of SKUs, ~25 per query. Used at batch
-    creation so the tickers reflect this minute's stock, not the bin-map
-    cache (which refreshes on a 6h cycle)."""
-    result: dict[str, int] = {}
+_STOCK_INFO_QUERY = """
+query StockInfo($search: String!) {
+  productVariants(first: 50, query: $search) {
+    nodes {
+      sku
+      inventoryQuantity
+      bin: metafield(namespace: "stock", key: "bin") { value }
+      inventoryItem {
+        inventoryLevels(first: 5) {
+          nodes { quantities(names: ["on_hand"]) { name quantity } }
+        }
+      }
+      product {
+        easyScanBin: metafield(namespace: "my_fields", key: "bin_location") {
+          value
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def get_stock_info_by_skus(skus: list[str]) -> dict[str, dict]:
+    """Live on-hand AND current bin for a set of SKUs, ~25 per query.
+
+    Used at batch creation so the shelf list reflects this minute rather
+    than the bin-map cache. (Shopify can't search variants BY a metafield
+    value — verified — so finding products that moved INTO a bin still
+    needs the full catalog walk.)"""
+    result: dict[str, dict] = {}
     cleaned = [s for s in {s.replace('"', "") for s in skus if s}]
     for i in range(0, len(cleaned), 25):
         chunk = cleaned[i:i + 25]
         search = " OR ".join(f'sku:"{s}"' for s in chunk)
-        data = query_shopify(_ON_HAND_BULK_QUERY, {"search": search})
+        data = query_shopify(_STOCK_INFO_QUERY, {"search": search})
         for v in data["productVariants"]["nodes"]:
-            if v["sku"]:
-                on_hand = _sum_on_hand(v)
-                result[v["sku"]] = (
+            if not v["sku"]:
+                continue
+            on_hand = _sum_on_hand(v)
+            bin_value = (v["bin"] or {}).get("value") or (
+                v["product"]["easyScanBin"] or {}
+            ).get("value")
+            result[v["sku"]] = {
+                "on_hand": (
                     on_hand if on_hand is not None else v["inventoryQuantity"]
-                )
+                ),
+                "bin": (bin_value or "").strip(),
+            }
     return result
+
+
+def get_on_hand_by_skus(skus: list[str]) -> dict[str, int]:
+    """Live ON-HAND only (kept for callers that don't care about bins)."""
+    return {
+        sku: info["on_hand"]
+        for sku, info in get_stock_info_by_skus(skus).items()
+    }
 
 
 def get_on_hand(sku: str) -> int | None:

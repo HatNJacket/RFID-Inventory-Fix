@@ -915,9 +915,19 @@ a { color: var(--accent); }
 
 /* Bin work board: to-do list wide on the left, recent history narrow
    on the right; stacks on narrow screens (iPad portrait). */
-.binboard { display: flex; gap: 12px; align-items: flex-start; }
-.binboard__todo { flex: 0 1 78%; min-width: 0; }
-.binboard__recent { flex: 1 1 22%; min-width: 0; }
+.binboard { display: flex; gap: 12px; align-items: stretch; }
+/* `hidden` alone loses to `display: flex` — without this the board never
+   disappears when a batch opens. */
+.binboard[hidden] { display: none; }
+.binboard__todo,
+.binboard__recent {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.binboard__todo .binlist,
+.binboard__recent .binlist { flex: 1; }
 @media (max-width: 720px) {
   .binboard { flex-wrap: wrap; }
   .binboard__todo, .binboard__recent { flex: 1 1 100%; }
