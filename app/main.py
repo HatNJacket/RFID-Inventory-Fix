@@ -1380,7 +1380,9 @@ def _rebuild_bin_map() -> None:
                 # BOTH bins — one row each, each naming the others.
                 bins = parse_bins(e["bin"]) or [e["bin"]]
                 for name in bins:
-                    others = [b for b in bins if b != name]
+                    # From this shelf's point of view — keeps repeats, so
+                    # two boxes on one shelf read as two.
+                    others = bins_other_than(e["bin"], name)
                     rows.append(BinMapEntry(
                         sku=e["sku"],
                         barcode=e["barcode"],
