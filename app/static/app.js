@@ -1558,12 +1558,34 @@ async function startBatch() {
 
 // Re-pull the batch from the server. The C72 (or another terminal) writes
 // every scan/pair server-side, so pulling is all "live" means.
+// Server status → the stage that status belongs to. Used to follow along
+// when another terminal (the C72) moves the batch forward.
+const STAGE_FOR_STATUS = {
+  collecting: "collect",
+  printing: "print",
+  pairing: "pair",
+};
+
 async function pullBatch(announce) {
   if (!batch) return;
   try {
+    const prevStatus = batch.status;
     const data = await apiJson(`/api/batches/${batch.id}`);
     batch = data.batch;
     batchItems = data.items;
+    // The C72 (or another browser) moved the batch on — follow it, so this
+    // screen doesn't sit on "1 Collect" while the scanner is pairing.
+    if (batch.status !== prevStatus) {
+      const target = STAGE_FOR_STATUS[batch.status];
+      if (target && target !== batchStage) {
+        showBatchStage(target);
+        setBatchResult(
+          `Followed the scanner to the ${target} step.`,
+          "ok"
+        );
+        return;
+      }
+    }
     if (batchStage === "collect") renderBatchItems();
     else if (batchStage === "pair") {
       renderPairItems();
@@ -1600,7 +1622,14 @@ function startBatchLive() {
       ae &&
       ae.tagName === "INPUT" &&
       ae.closest("#tab-batch") &&
-      !["batch-scan", "bpair-scan", "bverify-scan", "batch-bin"].includes(ae.id)
+      // The always-focused scan fields are transient — polling must not
+      // pause just because one has focus (it always does on those steps).
+      ![
+        "batch-scan",
+        "batch-pair-input",
+        "batch-verify-input",
+        "batch-bin",
+      ].includes(ae.id)
     )
       return;
     pullBatch(false);
@@ -1682,16 +1711,42 @@ function stopBatchPrintPoll() {
 
 document.getElementById("batch-refresh").addEventListener("click", refreshBatch);
 
+// Leave the batch open and go back to the bin list — the batch keeps its
+// counts and can be resumed from any device.
+document.getElementById("batch-switch").addEventListener("click", () => {
+  batch = null;
+  batchItems = [];
+  checkEntries = [];
+  ignoredBinItems = new Set();
+  stopBatchPrintPoll();
+  stopBatchLive();
+  enterBatchTab();
+  setBatchResult("Batch left open — pick it up any time.", "ok");
+});
+
 bEl.abandon.addEventListener("click", async () => {
   if (!batch) return;
-  if (!confirm(`Abandon the batch for bin ${batch.bin_name}? Collected counts are kept in History but the batch closes.`)) return;
+  const ties = batchItems.reduce((n, i) => n + (i.paired_count || 0), 0);
+  const msg = ties
+    ? `Abandon the batch for bin ${batch.bin_name}?\n\n${ties} tag(s) were ` +
+      `paired in this batch — those ties will be REMOVED so the products ` +
+      `aren't left tied to unverified labels. Counts stay in History.`
+    : `Abandon the batch for bin ${batch.bin_name}? Collected counts are ` +
+      `kept in History but the batch closes.`;
+  if (!confirm(msg)) return;
   try {
-    await postJson(`/api/batches/${batch.id}/abandon`, {});
+    const res = await postJson(`/api/batches/${batch.id}/abandon`, {
+      remove_ties: true,
+    });
+    if (res.ties_removed)
+      setBatchResult(`Batch abandoned — ${res.ties_removed} tie(s) released.`, "ok");
   } catch (err) {
     /* already closed is fine */
   }
   batch = null;
   batchItems = [];
+  checkEntries = [];
+  ignoredBinItems = new Set();
   stopBatchPrintPoll();
   stopBatchLive();
   enterBatchTab();
@@ -1940,20 +1995,43 @@ const FLAG_TEXT = {
   "count-mismatch": "count differs from Shopify",
   "unconfirmed-name": "serial name not confirmed",
   unresolved: "unknown barcode",
+  "wrong-bin": "saved bin is a different shelf",
 };
 
 let checkEntries = [];
 let bitemEntry = null;
 let bitemIdx = 0;
+// Wrong-bin warnings the operator chose to ignore for this batch only.
+let ignoredBinItems = new Set();
+// Odd-barcode rescue state (unresolved scans).
+let oddList = [];
+let oddIdx = 0;
+let bitemLabelMode = "header";
 
-async function loadBatchReview() {
+async function loadBatchReview(showAll) {
   const list = document.getElementById("bcheck-list");
   const empty = document.getElementById("bcheck-empty");
   empty.hidden = true;
   list.innerHTML = '<li class="recent__empty">Checking the batch…</li>';
   try {
     const data = await apiJson(`/api/batches/${batch.id}/review`);
-    checkEntries = data.items;
+    checkEntries = data.items
+      .map((e) => ({
+        ...e,
+        flags: e.flags.filter(
+          (f) => !(f === "wrong-bin" && ignoredBinItems.has(e.item.id))
+        ),
+      }))
+      .filter((e) => e.flags.length);
+    if (showAll) {
+      // "Review all products": every scanned product, flagged or not, so
+      // label names/SKUs can be edited before printing.
+      const flagged = new Map(checkEntries.map((e) => [e.item.id, e]));
+      checkEntries = labelItems().map(
+        (item) =>
+          flagged.get(item.id) || { item, flags: [], candidates: [] }
+      );
+    }
     list.innerHTML = "";
     if (!checkEntries.length) {
       empty.hidden = false;
@@ -1961,11 +2039,13 @@ async function loadBatchReview() {
     }
     checkEntries.forEach((entry) => {
       const li = itemCard(entry.item, "collect");
-      const flags = document.createElement("div");
-      flags.className = "bcell__meta bcell__flags";
-      flags.textContent =
-        "⚠ " + entry.flags.map((f) => FLAG_TEXT[f] || f).join(" · ");
-      li.querySelector(".bcell__info").append(flags);
+      if (entry.flags.length) {
+        const flags = document.createElement("div");
+        flags.className = "bcell__meta bcell__flags";
+        flags.textContent =
+          "⚠ " + entry.flags.map((f) => FLAG_TEXT[f] || f).join(" · ");
+        li.querySelector(".bcell__info").append(flags);
+      }
       li.style.cursor = "pointer";
       li.addEventListener("click", () => openBitem(entry));
       list.append(li);
@@ -2040,12 +2120,322 @@ function renderBitem() {
     document.getElementById("bitem-name").value = it.label_name || "";
   }
 
+  // Wrong shelf: saved bin differs from the bin being walked.
+  const binWarn = document.getElementById("bitem-binwarn");
+  binWarn.hidden = !bitemEntry.flags.includes("wrong-bin");
+  if (!binWarn.hidden) {
+    document.getElementById("bitem-bintext").innerHTML =
+      `Found here in <b>${escapeHtml(batch.bin_name)}</b>, but the system ` +
+      `has it in <b>${escapeHtml(it.bin_location || "?")}</b>.`;
+  }
+
+  // Unresolved barcode rescue.
+  const unres = document.getElementById("bitem-unresolved");
+  unres.hidden = it.resolved;
+  if (!unres.hidden) {
+    document.getElementById("bitem-oddwrap").hidden = true;
+  }
+
+  // Label format editor — every resolved product gets one.
+  const labelWrap = document.getElementById("bitem-labelwrap");
+  labelWrap.hidden = !it.resolved;
+  if (it.resolved) {
+    bitemLabelMode = it._labelPlacement || "header";
+    document.getElementById("bitem-labeltext").value = it._labelText || "";
+    updateBitemLabelMode();
+  }
+
   document.getElementById("bitem-qty").textContent = it.qty_scanned;
   document.getElementById("bitem-expected").textContent =
     it.expected_qty != null
       ? `boxes scanned · Shopify on-hand ${it.expected_qty}`
       : "boxes scanned";
 }
+
+// --- label format (Change Name / Change SKU / Change Both) ------------------
+const BITEM_MODES = ["header", "sku", "both"];
+const BITEM_MODE_TEXT = {
+  header: "Change Name",
+  sku: "Change SKU",
+  both: "Change Both",
+};
+
+function updateBitemLabelMode() {
+  document.getElementById("bitem-labelmode").textContent =
+    BITEM_MODE_TEXT[bitemLabelMode];
+  const it = bitemEntry ? bitemEntry.item : {};
+  const typed = document.getElementById("bitem-labeltext").value.trim();
+  const asHeader = typed && (bitemLabelMode === "header" || bitemLabelMode === "both");
+  const asSku = typed && (bitemLabelMode === "sku" || bitemLabelMode === "both");
+  const header = asHeader ? typed : "Telescopes Canada";
+  const el = document.getElementById("bitem-prev-header");
+  el.textContent = header;
+  el.className =
+    "label-preview__header " +
+    (!asHeader || header.length <= 26
+      ? "label-preview__header--lg"
+      : header.length <= 56
+        ? "label-preview__header--md"
+        : "label-preview__header--sm");
+  document.getElementById("bitem-prev-sku").textContent = asSku
+    ? typed
+    : it.sku || "";
+  document.getElementById("bitem-prev-bc").textContent =
+    it.barcode || it.sku || "";
+  document.getElementById("bitem-prev-bin").textContent =
+    "BIN: " + (batch ? batch.bin_name : "—");
+}
+
+document.getElementById("bitem-labelmode").addEventListener("click", () => {
+  bitemLabelMode =
+    BITEM_MODES[(BITEM_MODES.indexOf(bitemLabelMode) + 1) % BITEM_MODES.length];
+  updateBitemLabelMode();
+});
+document
+  .getElementById("bitem-labeltext")
+  .addEventListener("input", updateBitemLabelMode);
+document.getElementById("bitem-labelclear").addEventListener("click", () => {
+  document.getElementById("bitem-labeltext").value = "";
+  updateBitemLabelMode();
+  document.getElementById("bitem-labelsave").click();
+});
+
+document.getElementById("bitem-labelsave").addEventListener("click", async () => {
+  const it = bitemEntry.item;
+  const msg = document.getElementById("bitem-msg");
+  if (!it.sku) {
+    msg.textContent = "This product has no SKU to attach a label name to.";
+    return;
+  }
+  const name = document.getElementById("bitem-labeltext").value.trim();
+  try {
+    await apiJson(`/api/label-names/${encodeURIComponent(it.sku)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        label_name: name,
+        placement: bitemLabelMode,
+        updated_by: operatorEl.value || null,
+      }),
+    });
+    it._labelText = name;
+    it._labelPlacement = bitemLabelMode;
+    msg.textContent = name
+      ? `Saved ✓ — labels print this as the ${
+          bitemLabelMode === "both"
+            ? "name and SKU"
+            : bitemLabelMode === "sku"
+              ? "SKU line"
+              : "name"
+        }.`
+      : "Cleared ✓ — standard label.";
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+// --- wrong shelf: drop / move / ignore --------------------------------------
+document.getElementById("bitem-binwarn").addEventListener("click", async (ev) => {
+  const act = ev.target.dataset ? ev.target.dataset.act : null;
+  if (!act || !bitemEntry) return;
+  const it = bitemEntry.item;
+  const msg = document.getElementById("bitem-msg");
+  if (act === "ignore") {
+    ignoredBinItems.add(it.id);
+    document.getElementById("bitem-overlay").hidden = true;
+    setBatchResult(
+      "Ignored for this batch — it'll come up again next time.",
+      "ok"
+    );
+    loadBatchReview();
+    return;
+  }
+  if (act === "drop") {
+    if (
+      !confirm(
+        `Drop ${it.product_title || it.sku} from this batch? ` +
+          `Its ${it.qty_scanned} box(es) stop counting here and no labels ` +
+          `print for it — take them to bin ${it.bin_location}.`
+      )
+    )
+      return;
+    try {
+      await apiFetch(`/api/batches/${batch.id}/items/${it.id}`, {
+        method: "DELETE",
+      });
+      document.getElementById("bitem-overlay").hidden = true;
+      await pullBatch(false);
+      loadBatchReview();
+      setBatchResult("Dropped from this batch.", "ok");
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+    return;
+  }
+  if (act === "move") {
+    if (
+      !confirm(
+        `Update the bin on "${it.product_title}" in Shopify: ` +
+          `${it.bin_location || "(none)"} → ${batch.bin_name}?`
+      )
+    )
+      return;
+    try {
+      await postJson("/api/bin-updates", {
+        target: it.sku || it.barcode,
+        new_bin: batch.bin_name,
+        changed_by: operatorEl.value || null,
+      });
+      it.bin_location = batch.bin_name;
+      document.getElementById("bitem-overlay").hidden = true;
+      await pullBatch(false);
+      loadBatchReview();
+      setBatchResult(`Bin updated to ${batch.bin_name} in Shopify.`, "ok");
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+  }
+});
+
+// --- unresolved barcode rescue ---------------------------------------------
+function renderOdd() {
+  const wrap = document.getElementById("bitem-oddwrap");
+  if (!oddList.length) {
+    wrap.hidden = true;
+    document.getElementById("bitem-msg").textContent =
+      "No products in this bin have an odd barcode.";
+    return;
+  }
+  wrap.hidden = false;
+  const p = oddList[oddIdx];
+  document.getElementById("bitem-oddtitle").textContent =
+    (p.product_title || "(unknown)") +
+    (p.variant_title ? ` (${p.variant_title})` : "");
+  document.getElementById("bitem-oddmeta").textContent =
+    `SKU: ${p.sku || "—"} · current barcode: ${p.barcode || "(none)"} · ${p.reason}`;
+  const img = document.getElementById("bitem-oddimg");
+  if (p.image_url) {
+    img.src = p.image_url;
+    img.hidden = false;
+  } else {
+    img.hidden = true;
+    img.removeAttribute("src");
+  }
+  document.getElementById("bitem-oddpos").textContent =
+    `Candidate ${oddIdx + 1} of ${oddList.length}`;
+  const prev = document.getElementById("bitem-oddprev");
+  const next = document.getElementById("bitem-oddnext");
+  prev.style.visibility = oddList.length > 1 ? "visible" : "hidden";
+  next.style.visibility = oddList.length > 1 ? "visible" : "hidden";
+  prev.disabled = oddIdx === 0;
+  next.disabled = oddIdx >= oddList.length - 1;
+}
+
+async function loadOdd(recommendedOnly) {
+  const it = bitemEntry.item;
+  const code = it.scanned_code;
+  const msg = document.getElementById("bitem-msg");
+  msg.textContent = "Looking through this bin…";
+  try {
+    const data = await apiJson(
+      `/api/bins/${encodeURIComponent(batch.bin_name)}/odd-barcodes` +
+        `?scanned=${encodeURIComponent(code)}`
+    );
+    if (recommendedOnly) {
+      oddList = data.recommended ? [data.recommended] : [];
+    } else {
+      oddList = data.candidates;
+    }
+    oddIdx = 0;
+    msg.textContent = "";
+    renderOdd();
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+}
+
+document
+  .getElementById("bitem-odd")
+  .addEventListener("click", () => loadOdd(false));
+document
+  .getElementById("bitem-recommend")
+  .addEventListener("click", () => loadOdd(true));
+document.getElementById("bitem-oddprev").addEventListener("click", () => {
+  if (oddIdx > 0) {
+    oddIdx--;
+    renderOdd();
+  }
+});
+document.getElementById("bitem-oddnext").addEventListener("click", () => {
+  if (oddIdx < oddList.length - 1) {
+    oddIdx++;
+    renderOdd();
+  }
+});
+
+// Give the chosen product the barcode that wouldn't resolve. This is a real
+// Shopify write — the same audited overwrite the Scan Station uses.
+document.getElementById("bitem-oddapply").addEventListener("click", async () => {
+  const p = oddList[oddIdx];
+  const it = bitemEntry.item;
+  const msg = document.getElementById("bitem-msg");
+  if (!p) return;
+  if (
+    !confirm(
+      `Are you absolutely sure?\n\n` +
+        `"${p.product_title}"\n` +
+        `barcode ${p.barcode || "(none)"} → ${it.scanned_code}\n\n` +
+        `This changes the barcode in Shopify for real. Only do this if ` +
+        `the box in your hand IS this product.`
+    )
+  )
+    return;
+  try {
+    await postJson("/api/barcode-overwrites", {
+      target: p.sku || p.barcode,
+      new_barcode: it.scanned_code,
+      changed_by: operatorEl.value || null,
+    });
+    // The unresolved row's count has to be re-scanned against the real
+    // product, so take it out of the batch.
+    await apiFetch(`/api/batches/${batch.id}/items/${it.id}`, {
+      method: "DELETE",
+    });
+    document.getElementById("bitem-overlay").hidden = true;
+    await pullBatch(false);
+    loadBatchReview();
+    setBatchResult(
+      `Barcode updated in Shopify ✓ — now RE-SCAN those ` +
+        `${it.qty_scanned} box(es); they'll come up as ${p.product_title}.`,
+      "ok"
+    );
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+document.getElementById("bitem-drop").addEventListener("click", async () => {
+  const it = bitemEntry.item;
+  if (
+    !confirm(
+      `Remove this unresolved scan (${it.scanned_code}, ${it.qty_scanned} ` +
+        `box(es)) from the list? Nothing permanent changes — scanning it ` +
+        `again brings it back.`
+    )
+  )
+    return;
+  try {
+    await apiFetch(`/api/batches/${batch.id}/items/${it.id}`, {
+      method: "DELETE",
+    });
+    document.getElementById("bitem-overlay").hidden = true;
+    await pullBatch(false);
+    loadBatchReview();
+    setBatchResult("Removed from the list.", "ok");
+  } catch (err) {
+    document.getElementById("bitem-msg").textContent = err.message;
+  }
+});
 
 document.getElementById("bitem-prev").addEventListener("click", () => {
   if (bitemIdx > 0) {
@@ -2126,6 +2516,30 @@ async function bitemAdjust(delta) {
 }
 document.getElementById("bitem-minus").addEventListener("click", () => bitemAdjust(-1));
 document.getElementById("bitem-plus").addEventListener("click", () => bitemAdjust(1));
+
+document.getElementById("bcheck-all").addEventListener("click", () =>
+  loadBatchReview(true)
+);
+
+// Labels already printed? Jump to pairing without queueing a second run.
+document.getElementById("batch-skip-print").addEventListener("click", async () => {
+  if (!batch) return;
+  if (
+    !confirm(
+      `Skip printing for bin ${batch.bin_name} and go straight to pairing?` +
+        `\n\nUse this when the labels are already printed and applied.`
+    )
+  )
+    return;
+  try {
+    const b = await postJson(`/api/batches/${batch.id}/skip-print`, {});
+    batch.status = b.status;
+    showBatchStage("pair");
+    setBatchResult("Straight to pairing — no labels queued.", "ok");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+});
 
 document.getElementById("bitem-close").addEventListener("click", () => {
   document.getElementById("bitem-overlay").hidden = true;
@@ -2208,14 +2622,29 @@ function matchBatchItem(code) {
 }
 
 function renderPairCard() {
+  // Pairing is measured against LABELS PRINTED, not boxes scanned — those
+  // differ whenever a count was corrected after queueing.
+  const summary = document.getElementById("bpair-summary");
+  const target = batchItems.reduce(
+    (n, i) => n + (i.printed_count ?? i.qty_scanned),
+    0
+  );
+  const paired = batchItems.reduce((n, i) => n + i.paired_count, 0);
+  summary.textContent = `${paired} of ${target} printed label(s) paired${
+    target - paired > 0 ? ` · ${target - paired} to go` : " ✓"
+  }`;
+
   const item = batchItems.find((i) => i.id === pairActiveItemId);
   bEl.pairCard.hidden = !item;
   if (!item) return;
+  const goal = item.printed_count ?? item.qty_scanned;
   bEl.pairActive.textContent = itemDisplayName(item);
-  bEl.pairProgress.textContent = `${item.paired_count} of ${item.qty_scanned} tags paired · ${Math.max(
-    0,
-    item.qty_scanned - item.paired_count
-  )} remaining`;
+  bEl.pairProgress.textContent =
+    `${item.paired_count} of ${goal} printed label(s) paired · ` +
+    `${Math.max(0, goal - item.paired_count)} remaining` +
+    (item.printed_count != null && item.printed_count !== item.qty_scanned
+      ? ` (${item.qty_scanned} box(es) scanned)`
+      : "");
   bEl.pairUndo.disabled = !pairHistory.length;
 }
 
@@ -2225,6 +2654,10 @@ function renderPairItems() {
     .filter((i) => i.resolved && i.qty_scanned > 0)
     .forEach((item) => {
       const li = itemCard(item, "pair");
+      if (item.printed_count != null) {
+        const t = li.querySelector(".bcell__tracker");
+        if (t) t.textContent = `${item.paired_count}/${item.printed_count}`;
+      }
       li.addEventListener("click", () => {
         pairActiveItemId = item.id;
         renderPairItems();
@@ -2315,6 +2748,39 @@ bEl.pairUndo.addEventListener("click", async () => {
   bEl.pairInput.focus();
 });
 
+// Release every tie this batch made — for when a shelf needs re-pairing
+// from scratch (no reprinting, the labels are still good).
+document.getElementById("bpair-reset").addEventListener("click", async () => {
+  if (!batch) return;
+  const paired = batchItems.reduce((n, i) => n + i.paired_count, 0);
+  if (!paired) {
+    setBatchResult("Nothing paired in this batch yet.", "err");
+    return;
+  }
+  if (
+    !confirm(
+      `Release all ${paired} tag(s) paired in this batch?\n\nThe printed ` +
+        `labels stay valid — you just re-scan them onto their products. ` +
+        `Nothing in Shopify changes.`
+    )
+  )
+    return;
+  try {
+    const res = await postJson(`/api/batches/${batch.id}/unpair-all`, {});
+    pairHistory = [];
+    pairActiveItemId = null;
+    await pullBatch(false);
+    renderPairItems();
+    renderPairCard();
+    setBatchResult(
+      `${res.removed} tie(s) released — pair the shelf again.`,
+      "ok"
+    );
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+});
+
 bEl.toVerify.addEventListener("click", () => showBatchStage("verify"));
 
 // --- Stage 5: verify --------------------------------------------------------
@@ -2328,7 +2794,8 @@ bEl.verifyInput.addEventListener("keydown", (event) => {
 });
 
 // The C72 companion app sends its sweep to the server over Wi-Fi; this
-// pulls the most recent one into the verify set — no Bluetooth, no wedge.
+// pulls the most recent one into the verify set — no Bluetooth, no wedge —
+// then checks the bin straight away (pulling to not check was busywork).
 document.getElementById("bverify-pull").addEventListener("click", async () => {
   try {
     const cap = await apiJson("/api/epc-captures/latest");
@@ -2338,58 +2805,123 @@ document.getElementById("bverify-pull").addEventListener("click", async () => {
     setBatchResult(
       `Pulled sweep #${cap.id} from ${cap.device || "the C72"} ` +
         `(${cap.epc_count} tags, ${fmtWhen(cap.created_at)}) — ` +
-        `${verifyEpcs.size - before} new.`,
+        `${verifyEpcs.size - before} new. Checking…`,
       "ok"
     );
+    await runVerifyCheck();
   } catch (err) {
     setBatchResult(err.message, "err");
   }
 });
 
-bEl.verifyCheck.addEventListener("click", async () => {
+async function runVerifyCheck() {
   if (!batch) return;
+  const rep = await postJson(`/api/batches/${batch.id}/verify`, {
+    epcs: [...verifyEpcs],
+  });
+  // Per-product agreement: boxes scanned == tags paired == tags detected.
+  let boxesOk = true;
+  let pairedOk = true;
+  let detectedOk = true;
+  const rows = rep.items
+    .map((r) => {
+      const paired = r.paired_count === r.qty_scanned;
+      const detected = r.detected === r.paired_count;
+      if (r.qty_scanned !== r.paired_count) boxesOk = false;
+      if (!paired) pairedOk = false;
+      if (!detected) detectedOk = false;
+      return `<tr>
+        <td>${escapeHtml(r.product_title || "")}</td>
+        <td class="mono">${escapeHtml(r.sku || "—")}</td>
+        <td class="num">${r.qty_scanned}</td>
+        <td class="num${paired ? "" : " bexp--off"}">${r.paired_count}</td>
+        <td class="num${detected ? "" : " bexp--off"}">${r.detected}</td>
+        <td>${paired && detected ? "✓" : "⚠"}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const otherCount = rep.foreign.length + rep.unknown_epcs.length;
+  const otherRows = [
+    ...rep.foreign.map(
+      (f) =>
+        `<li>${escapeHtml(f.product_title || "?")} <span class="mono">${escapeHtml(f.epc)}</span>${
+          f.bin_location ? " · bin " + escapeHtml(f.bin_location) : ""
+        }</li>`
+    ),
+    ...rep.unknown_epcs.map(
+      (e) => `<li>Unknown tag <span class="mono">${escapeHtml(e)}</span></li>`
+    ),
+  ].join("");
+
+  // The verdict line states which of the three columns agree.
+  const mismatches = [];
+  if (!pairedOk) mismatches.push("tags paired ≠ boxes scanned");
+  if (!detectedOk) mismatches.push("tags detected ≠ tags paired");
+  const verdict = mismatches.length
+    ? `<p class="result result--err">⚠ Boxes / paired / detected do NOT all agree — ${mismatches.join(
+        " · "
+      )}. Check the ⚠ rows.</p>`
+    : `<p class="result result--ok">✓ Boxes, paired and detected all agree for every product.</p>`;
+
+  bEl.verifyReport.innerHTML = `
+    ${verdict}
+    <div class="inventory__scroll"><table class="inventory__table">
+      <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    ${
+      otherCount
+        ? `<div class="linkbox__actions" style="margin-top:8px">
+             <button class="reset" id="bverify-others" type="button">See other detected items (${otherCount})</button>
+           </div>
+           <ul class="recent__list" id="bverify-otherlist" hidden>${otherRows}</ul>`
+        : ""
+    }`;
+  const othersBtn = document.getElementById("bverify-others");
+  if (othersBtn)
+    othersBtn.addEventListener("click", () => {
+      const list = document.getElementById("bverify-otherlist");
+      list.hidden = !list.hidden;
+      othersBtn.textContent = list.hidden
+        ? `See other detected items (${otherCount})`
+        : "Hide other detected items";
+    });
+  return rep;
+}
+
+// "Check bin" is now a lookup: point the current sweep at ANY bin and see
+// what it says — handy when a stray tag might belong to a neighbour.
+bEl.verifyCheck.addEventListener("click", async () => {
+  const name = prompt(
+    "Check which bin against this sweep?",
+    batch ? batch.bin_name : ""
+  );
+  if (name === null) return;
+  const bin = name.trim();
+  if (!bin) return;
   bEl.verifyCheck.disabled = true;
   try {
-    const rep = await postJson(`/api/batches/${batch.id}/verify`, {
+    const rep = await postJson(`/api/bins/${encodeURIComponent(bin)}/check`, {
       epcs: [...verifyEpcs],
     });
     const rows = rep.items
-      .map((r) => {
-        const ok = r.detected >= r.paired_count && r.paired_count >= r.qty_scanned;
-        return `<tr>
+      .map(
+        (r) => `<tr>
           <td>${escapeHtml(r.product_title || "")}</td>
           <td class="mono">${escapeHtml(r.sku || "—")}</td>
-          <td class="num">${r.qty_scanned}</td>
-          <td class="num">${r.paired_count}</td>
-          <td class="num">${r.detected}</td>
-          <td>${ok ? "✓" : "⚠"}</td>
-        </tr>`;
-      })
+          <td class="num">${r.expected_qty ?? "—"}</td>
+          <td class="num">${r.tags_on_file}</td>
+          <td class="num${r.detected ? "" : " bexp--off"}">${r.detected}</td>
+        </tr>`
+      )
       .join("");
-    const extras = [];
-    if (rep.foreign.length) {
-      extras.push(
-        `<p class="result result--err">${rep.foreign.length} tag(s) from OTHER products detected: ` +
-          rep.foreign
-            .map((f) => `${escapeHtml(f.product_title || "?")} (${escapeHtml(f.epc)}${f.bin_location ? ", bin " + escapeHtml(f.bin_location) : ""})`)
-            .join("; ") +
-          `</p>`
-      );
-    }
-    if (rep.unknown_epcs.length) {
-      extras.push(
-        `<p class="result result--err">${rep.unknown_epcs.length} unknown tag(s): ` +
-          rep.unknown_epcs.map(escapeHtml).join(", ") +
-          `</p>`
-      );
-    }
     bEl.verifyReport.innerHTML = `
-      ${rep.ok ? '<p class="result result--ok">Bin verified ✓ — everything paired was detected.</p>' : ""}
+      <p class="result">Bin <b>${escapeHtml(rep.bin)}</b> checked against ${rep.swept} swept tag(s) — ${rep.count} product(s) on file there.</p>
       <div class="inventory__scroll"><table class="inventory__table">
-        <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table></div>
-      ${extras.join("")}`;
+        <thead><tr><th>Product</th><th>SKU</th><th class="num">On hand</th><th class="num">Tags on file</th><th class="num">Detected</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" class="inventory__empty">Nothing on file for that bin.</td></tr>'}</tbody>
+      </table></div>`;
   } catch (err) {
     setBatchResult(err.message, "err");
   } finally {
@@ -2972,6 +3504,30 @@ document.getElementById("phist-print").addEventListener("click", async () => {
 // scanned code simply stops resolving to that product).
 async function undoHistoryEvent(e, btn) {
   if (!e || !e.undo) return;
+  // Batch events: release every tag tie that batch created, in one go.
+  if (e.undo.kind === "batch-ties") {
+    if (
+      !confirm(
+        `Release all ${e.undo.ties} tag tie(s) from batch #${e.undo.batch_id} ` +
+          `(${e.title})?\n\nThe products stop being tied to those labels. ` +
+          `Nothing in Shopify changes, and the labels themselves stay valid.`
+      )
+    )
+      return;
+    btn.disabled = true;
+    try {
+      const res = await postJson(
+        `/api/batches/${e.undo.batch_id}/unpair-all`,
+        {}
+      );
+      await loadHistory();
+      alert(`${res.removed} tie(s) released.`);
+    } catch (err) {
+      btn.disabled = false;
+      alert(err.message);
+    }
+    return;
+  }
   if (e.undo.kind !== "barcode-alias") return;
   const alias = e.undo.alias_barcode;
   const target = e.sku || e.title || "that product";

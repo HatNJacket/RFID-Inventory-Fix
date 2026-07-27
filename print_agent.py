@@ -143,6 +143,12 @@ def build_zpl(job: dict, encode_rfid: bool,
         # Preferred name replaces the SKU line; the store header stays.
         header = HEADER_STORE.format(pw=pw)
         sku_text = label[:56]
+    elif label and placement == "both":
+        # Same name top and centre — for products whose SKU means nothing
+        # to a picker (short numeric SKUs).
+        size = 28 if len(label) <= 26 else 20 if len(label) <= 56 else 16
+        header = f"^CF0,{size}\n^FO0,4^FB{pw},2,0,C^FD{label[:76]}^FS\n"
+        sku_text = label[:56]
     elif label:
         # Preferred name replaces the store header. Font steps DOWN with
         # length: ZPL's ^FB does NOT clip text past its max line count —

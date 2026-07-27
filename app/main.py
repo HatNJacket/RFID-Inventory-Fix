@@ -568,7 +568,7 @@ class PrintJobIn(BaseModel):
     bin_location: str | None = Field(default=None, max_length=100)
     label_name: str | None = Field(default=None, max_length=255)
     label_placement: str | None = Field(
-        default=None, pattern="^(header|sku)$"
+        default=None, pattern="^(header|sku|both)$"
     )
     requested_by: str | None = Field(default=None, max_length=100)
 
@@ -1428,6 +1428,115 @@ def _maybe_refresh_bin_map(force: bool = False) -> bool:
     return True
 
 
+@app.get(
+    "/api/bins/{bin_name}/odd-barcodes", dependencies=[Depends(require_user)]
+)
+def bin_odd_barcodes(
+    bin_name: str,
+    scanned: str | None = None,
+    session: Session = Depends(get_session),
+):
+    """Products in a bin whose Shopify barcode isn't a real 13-digit code —
+    the usual reason a box scans as unresolved (the barcode field was left
+    as the SKU or a placeholder). Prime suspects first: barcode identical
+    to the SKU, then blank, then other odd lengths.
+
+    `scanned` (the code that wouldn't resolve) also returns `recommended`:
+    a product whose SKU matches it exactly."""
+    rows = session.scalars(
+        select(BinMapEntry)
+        .where(func.lower(BinMapEntry.bin) == bin_name.strip().lower())
+        .order_by(BinMapEntry.product_title)
+    ).all()
+
+    def odd(entry) -> bool:
+        bc = (entry.barcode or "").strip()
+        return not (len(bc) == 13 and bc.isdigit())
+
+    def rank(entry) -> tuple:
+        bc = (entry.barcode or "").strip()
+        sku = (entry.sku or "").strip()
+        if bc and sku and bc.lower() == sku.lower():
+            return (0,)  # barcode field holds the SKU — classic placeholder
+        if not bc:
+            return (1,)
+        return (2,)
+
+    candidates = sorted([e for e in rows if odd(e)], key=rank)
+    payload = [
+        {
+            "shopify_variant_id": e.shopify_variant_id,
+            "shopify_product_id": e.shopify_product_id,
+            "product_title": e.product_title,
+            "variant_title": e.variant_title,
+            "sku": e.sku,
+            "barcode": e.barcode,
+            "bin_location": e.bin,
+            "image_url": e.image_url,
+            "reason": (
+                "barcode is the SKU" if rank(e) == (0,)
+                else "no barcode set" if rank(e) == (1,)
+                else "barcode isn't 13 digits"
+            ),
+        }
+        for e in candidates
+    ]
+    recommended = None
+    if scanned:
+        term = scanned.strip().lower()
+        recommended = next(
+            (p for p in payload if (p["sku"] or "").lower() == term), None
+        )
+    return {
+        "count": len(payload),
+        "candidates": payload,
+        "recommended": recommended,
+    }
+
+
+class BinCheckIn(BaseModel):
+    epcs: list[str] = Field(default_factory=list, max_length=5000)
+
+
+@app.post("/api/bins/{bin_name}/check", dependencies=[Depends(require_user)])
+def bin_check(
+    bin_name: str,
+    payload: BinCheckIn,
+    session: Session = Depends(get_session),
+):
+    """What a sweep says about ANY bin: for every product Shopify expects
+    there, how many of its tags on file were detected. Read-only."""
+    swept = {(e or "").strip().upper() for e in payload.epcs if e}
+    rows = session.scalars(
+        select(BinMapEntry)
+        .where(func.lower(BinMapEntry.bin) == bin_name.strip().lower())
+        .order_by(BinMapEntry.product_title)
+    ).all()
+    report = []
+    for e in rows:
+        if not e.sku:
+            continue
+        tags = session.scalars(
+            select(RfidAssignment).where(RfidAssignment.sku == e.sku)
+        ).all()
+        detected = [t for t in tags if t.rfid_id.upper() in swept]
+        report.append({
+            "sku": e.sku,
+            "product_title": e.product_title,
+            "variant_title": e.variant_title,
+            "image_url": e.image_url,
+            "expected_qty": e.qty,
+            "tags_on_file": len(tags),
+            "detected": len(detected),
+        })
+    return {
+        "bin": bin_name.strip(),
+        "swept": len(swept),
+        "count": len(report),
+        "items": report,
+    }
+
+
 @app.get("/api/bin-map/status", dependencies=[Depends(require_user)])
 def bin_map_status(session: Session = Depends(get_session)):
     age = _bin_map_age(session)
@@ -1544,6 +1653,21 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
     except Exception as error:
         logger.warning("bin pre-seed failed for %s: %s", payload.bin, error)
 
+    # The bin map's quantities are a cache (6h cycle); starting a batch is
+    # exactly when the numbers must be THIS minute's truth, so refresh the
+    # expected counts live from Shopify (bin-map values stay as fallback).
+    if expected and not config.check_shopify_env():
+        try:
+            live = shopify.get_on_hand_by_skus(
+                [p["sku"] for p in expected if p.get("sku")]
+            )
+            for p in expected:
+                if p.get("sku") in live:
+                    p["expected_qty"] = live[p["sku"]]
+        except Exception as error:
+            logger.warning("live on-hand refresh failed for bin %s: %s",
+                           payload.bin, error)
+
     # Serialized brands print their operator-confirmed name; grab any
     # prefix rows for the seeded SKUs in one query.
     sp_by_sku: dict[str, SerialPrefix] = {}
@@ -1626,7 +1750,23 @@ def list_batches(
 def get_batch(batch_id: int, session: Session = Depends(get_session)):
     batch = _get_batch(session, batch_id)
     items = _batch_items(session, batch_id)
-    return {"batch": batch.as_dict(), "items": [i.as_dict() for i in items]}
+    # How many labels this batch actually printed per product — the pair
+    # step compares tags paired against labels printed, not boxes scanned.
+    printed: dict = {}
+    for job in session.scalars(
+        select(PrintJob).where(
+            PrintJob.batch_id == batch_id,
+            PrintJob.status.in_(("pending", "printing", "done")),
+        )
+    ):
+        if job.sku:
+            printed[job.sku] = printed.get(job.sku, 0) + 1
+    payload = []
+    for item in items:
+        d = item.as_dict()
+        d["printed_count"] = printed.get(item.sku or "", 0)
+        payload.append(d)
+    return {"batch": batch.as_dict(), "items": payload}
 
 
 class BatchScanIn(BaseModel):
@@ -1773,6 +1913,17 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                 sp = session.get(SerialPrefix, item.serial_prefix)
                 if sp is not None and sp.label_name is None:
                     flags.append("unconfirmed-name")
+            # Saved bin differs from the bin being walked: the boxes are on
+            # the wrong shelf (or the record is). Never blocks — the
+            # operator picks move / relabel here / ignore.
+            saved = (item.bin_location or "").strip()
+            if (
+                saved
+                and saved.lower() != "no bin assigned"
+                and saved.lower() != _get_batch(session, batch_id)
+                .bin_name.strip().lower()
+            ):
+                flags.append("wrong-bin")
         if flags:
             flagged.append({
                 "item": item.as_dict(),
@@ -1933,6 +2084,24 @@ def batch_queue_labels(
     for item in _batch_items(session, batch_id):
         if not item.resolved or not item.shopify_variant_id:
             continue
+        # Preferred name, in order: this batch item's own override, the
+        # serial brand's confirmed name, then the product's saved label
+        # name (Check step / History panel). None = store header + SKU.
+        label_name = None
+        label_placement = "header"
+        if item.serial_prefix:
+            sp = session.get(SerialPrefix, item.serial_prefix)
+            if sp is not None and sp.label_name:
+                label_name = sp.label_name
+        if label_name is None and item.sku:
+            custom = session.get(LabelName, item.sku)
+            if custom is not None:
+                label_name = custom.label_name
+                label_placement = custom.placement or "header"
+        if label_name is None and item.label_name and (
+            item.label_name != item.sku
+        ):
+            label_name = item.label_name
         for _ in range(item.qty_scanned):
             jobs.append(
                 PrintJob(
@@ -1946,14 +2115,11 @@ def batch_queue_labels(
                     sku=item.sku,
                     barcode=item.barcode,
                     bin_location=batch.bin_name,
-                    # Store header + SKU unless the operator typed a real
-                    # custom name (the field defaults to the SKU, which is
-                    # not a header override).
-                    label_name=(
-                        item.label_name
-                        if item.label_name and item.label_name != item.sku
-                        else None
-                    ),
+                    # Store header + SKU unless a preferred name exists:
+                    # the batch item's own override first, else the
+                    # product's saved label name (set in Check / History).
+                    label_name=label_name,
+                    label_placement=label_placement,
                     requested_by=payload.requested_by or batch.created_by,
                 )
             )
@@ -2006,6 +2172,7 @@ def batch_pair(
         barcode=item.barcode,
         bin_location=batch.bin_name,
         assigned_by=payload.created_by,
+        batch_id=batch.id,
     )
     assignment.suspect = (
         re.fullmatch(r"[0-9A-Fa-f]{24}", payload.epc) is None
@@ -2079,6 +2246,9 @@ def batch_verify(
     batch = _get_batch(session, batch_id)
     items = [i for i in _batch_items(session, batch_id) if i.resolved]
     epcs = {e.strip().upper() for e in payload.epcs if e and e.strip()}
+    if epcs and batch.verified_at is None:
+        batch.verified_at = datetime.now(timezone.utc)
+        session.commit()
 
     assignments = {}
     if epcs:
@@ -2207,17 +2377,142 @@ def batch_complete(
     }
 
 
+def _unpair_batch(session: Session, batch_id: int) -> int:
+    """Remove every tag tie this batch created and zero its paired counts.
+    Returns how many ties were removed. Local records only — no Shopify."""
+    rows = session.scalars(
+        select(RfidAssignment).where(RfidAssignment.batch_id == batch_id)
+    ).all()
+    for row in rows:
+        session.delete(row)
+    for item in _batch_items(session, batch_id):
+        item.paired_count = 0
+    session.commit()
+    return len(rows)
+
+
+class AbandonIn(BaseModel):
+    remove_ties: bool = True
+
+
 @app.post(
     "/api/batches/{batch_id}/abandon", dependencies=[Depends(require_user)]
 )
-def batch_abandon(batch_id: int, session: Session = Depends(get_session)):
+def batch_abandon(
+    batch_id: int,
+    payload: AbandonIn | None = None,
+    session: Session = Depends(get_session),
+):
+    """Close a batch without completing it. By default the tag ties this
+    batch created are removed too — an abandoned bin shouldn't leave
+    products tied to labels that were never verified."""
     batch = _get_batch(session, batch_id)
     if batch.status == "done":
         raise HTTPException(409, "This batch is already done.")
+    removed = 0
+    if payload is None or payload.remove_ties:
+        removed = _unpair_batch(session, batch_id)
     batch.status = "abandoned"
     batch.completed_at = datetime.now(timezone.utc)
     session.commit()
+    result = batch.as_dict()
+    result["ties_removed"] = removed
+    return result
+
+
+@app.post(
+    "/api/batches/{batch_id}/unpair-all",
+    dependencies=[Depends(require_user)],
+)
+def batch_unpair_all(batch_id: int, session: Session = Depends(get_session)):
+    """Undo the pairing step: every tag this batch tied is released so the
+    shelf can be re-scanned. Labels already printed stay valid."""
+    _get_batch(session, batch_id)
+    removed = _unpair_batch(session, batch_id)
+    return {"removed": removed}
+
+
+@app.post(
+    "/api/batches/{batch_id}/skip-print",
+    dependencies=[Depends(require_user)],
+)
+def batch_skip_print(batch_id: int, session: Session = Depends(get_session)):
+    """Go straight to pairing without queueing labels — for bins whose
+    labels are already printed and applied."""
+    batch = _get_batch(session, batch_id)
+    if batch.status in ("done", "abandoned"):
+        raise HTTPException(409, f"This batch is {batch.status}.")
+    batch.status = "pairing"
+    session.commit()
     return batch.as_dict()
+
+
+@app.delete(
+    "/api/batches/{batch_id}/items/{item_id}",
+    status_code=204,
+    dependencies=[Depends(require_user)],
+)
+def batch_item_delete(
+    batch_id: int, item_id: int, session: Session = Depends(get_session)
+):
+    """Drop a row from the batch (an unresolved barcode you don't want
+    counted, or a product that belongs on another shelf). Any tags already
+    tied to it are released with it."""
+    _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    if item.sku:
+        for row in session.scalars(
+            select(RfidAssignment).where(
+                RfidAssignment.batch_id == batch_id,
+                RfidAssignment.sku == item.sku,
+            )
+        ):
+            session.delete(row)
+    session.delete(item)
+    session.commit()
+
+
+class UnlinkedIn(BaseModel):
+    epcs: list[str] = Field(min_length=1, max_length=2000)
+
+
+@app.post(
+    "/api/batches/{batch_id}/unlinked",
+    dependencies=[Depends(require_user)],
+)
+def batch_unlinked(
+    batch_id: int,
+    payload: UnlinkedIn,
+    session: Session = Depends(get_session),
+):
+    """Given a sweep, report which tags aren't tied to anything yet — the
+    unreadable-label rescue: sweep the shelf, find the orphan, tie it."""
+    _get_batch(session, batch_id)
+    epcs = []
+    seen: set = set()
+    for raw in payload.epcs:
+        epc = (raw or "").strip().upper()
+        if epc and epc not in seen:
+            seen.add(epc)
+            epcs.append(epc)
+    taken = {
+        r.rfid_id.upper(): r
+        for r in session.scalars(
+            select(RfidAssignment).where(RfidAssignment.rfid_id.in_(epcs))
+        )
+    }
+    unlinked = [e for e in epcs if e not in taken]
+    return {
+        "swept": len(epcs),
+        "unlinked": unlinked,
+        "linked": [
+            {"epc": e, "product_title": taken[e].product_title,
+             "sku": taken[e].sku}
+            for e in epcs if e in taken
+        ],
+    }
 
 
 # ------------------------------------------------------------ review tasks ---
@@ -2326,7 +2621,7 @@ def get_capture(capture_id: int, session: Session = Depends(get_session)):
 # ------------------------------------------------------------ label names ---
 class LabelNameIn(BaseModel):
     label_name: str = Field(default="", max_length=76)
-    placement: str = Field(default="header", pattern="^(header|sku)$")
+    placement: str = Field(default="header", pattern="^(header|sku|both)$")
     updated_by: str | None = Field(default=None, max_length=100)
 
 
@@ -2621,14 +2916,37 @@ def history(
     for b in session.scalars(
         select(Batch).order_by(Batch.id.desc()).limit(limit)
     ):
+        # Every batch event can release that batch's tag ties in one click.
+        tie_count = session.scalar(
+            select(func.count()).select_from(RfidAssignment)
+            .where(RfidAssignment.batch_id == b.id)
+        ) or 0
+        undo = (
+            {"kind": "batch-ties", "batch_id": b.id, "ties": tie_count}
+            if tie_count else None
+        )
         events.append({
             "at": iso(b.created_at),
             "type": "batch-started",
             "worker": b.created_by,
             "sku": None,
             "title": f"Bin {b.bin_name}",
-            "detail": f"Batch #{b.id}",
+            "detail": f"Batch #{b.id}"
+                      + (f" · {tie_count} tag(s) tied" if tie_count else ""),
+            "undo": undo,
         })
+        if b.verified_at:
+            events.append({
+                "at": iso(b.verified_at),
+                "type": "batch-verified",
+                "worker": b.created_by,
+                "sku": None,
+                "title": f"Bin {b.bin_name}",
+                "detail": f"Batch #{b.id} swept and checked"
+                          + (f" · {tie_count} tag(s) tied" if tie_count
+                             else ""),
+                "undo": undo,
+            })
         if b.completed_at:
             events.append({
                 "at": iso(b.completed_at),
@@ -2637,7 +2955,10 @@ def history(
                 "worker": b.created_by,
                 "sku": None,
                 "title": f"Bin {b.bin_name}",
-                "detail": f"Batch #{b.id}",
+                "detail": f"Batch #{b.id}"
+                          + (f" · {tie_count} tag(s) still tied"
+                             if tie_count else ""),
+                "undo": undo,
             })
 
     for t in session.scalars(

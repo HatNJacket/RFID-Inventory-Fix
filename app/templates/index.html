@@ -333,6 +333,7 @@
             <span class="stage" data-stage="verify">5 Verify</span>
           </div>
           <button class="reset" id="batch-refresh" type="button" title="Re-pull this batch from the server — use it when the iPad and PC have the same batch open">Refresh</button>
+          <button class="reset" id="batch-switch" type="button" title="Leave this batch open and go back to the bin list">All batches</button>
           <button class="reset" id="batch-abandon" type="button">Abandon</button>
         </div>
         <div class="result" id="batch-result" role="status" aria-live="polite"></div>
@@ -364,7 +365,11 @@
           </section>
           <p class="linkbox__text" id="bcheck-empty" hidden>Nothing needs checking ✓</p>
           <ul class="batch__items" id="bcheck-list"></ul>
-          <button class="print__btn" id="batch-queue" type="button">Next step → queue labels to print</button>
+          <div class="linkbox__actions">
+            <button class="reset" id="bcheck-all" type="button" title="Open every scanned product, not just the flagged ones — edit label names/SKUs here">Review all products…</button>
+            <button class="reset" id="batch-skip-print" type="button" title="Labels are already printed — go straight to pairing">Skip printing → pair</button>
+            <button class="print__btn" id="batch-queue" type="button">Next step → queue labels to print</button>
+          </div>
         </div>
 
         <!-- Check-item editor (modal): candidates arrows + counts + name -->
@@ -390,6 +395,60 @@
                   <div class="linkbox__form">
                     <input id="bitem-name" class="linkbox__input" type="text" maxlength="76" autocomplete="off" spellcheck="false" />
                     <button class="reset" id="bitem-name-save" type="button">Save name</button>
+                  </div>
+                </div>
+
+                <!-- Wrong shelf: saved bin differs from the bin being walked -->
+                <div class="binwarn" id="bitem-binwarn" hidden>
+                  <span id="bitem-bintext"></span>
+                  <button class="reset" data-act="drop" type="button">Belongs elsewhere — drop from this batch</button>
+                  <button class="reset" data-act="move" type="button">Move product to this bin (Shopify)</button>
+                  <button class="reset" data-act="ignore" type="button">Ignore for this batch</button>
+                </div>
+
+                <!-- Unresolved barcode rescue -->
+                <div id="bitem-unresolved" hidden>
+                  <p class="linkbox__extra-label">This barcode isn't on any product. Usually the product's Shopify barcode was left as its SKU or a placeholder — find it below and give it the scanned barcode:</p>
+                  <div class="linkbox__actions">
+                    <button class="reset" id="bitem-odd" type="button">Show products in this bin with odd barcodes</button>
+                    <button class="reset" id="bitem-recommend" type="button">Show recommended product</button>
+                    <button class="reset" id="bitem-drop" type="button">Remove this scan from the list</button>
+                  </div>
+                  <div id="bitem-oddwrap" hidden>
+                    <div class="bitem-nav">
+                      <button class="reset bitem-arrow" id="bitem-oddprev" type="button">&larr;</button>
+                      <div class="bitem-body">
+                        <div class="linkbox__product">
+                          <img class="linkbox__img" id="bitem-oddimg" alt="" hidden />
+                          <div>
+                            <div class="linkbox__ptitle" id="bitem-oddtitle">—</div>
+                            <p class="linkbox__text" id="bitem-oddmeta"></p>
+                          </div>
+                        </div>
+                        <p class="linkbox__text" id="bitem-oddpos"></p>
+                        <button class="print__btn" id="bitem-oddapply" type="button">Give this product the scanned barcode</button>
+                      </div>
+                      <button class="reset bitem-arrow" id="bitem-oddnext" type="button">&rarr;</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Label format: name / SKU / both -->
+                <div id="bitem-labelwrap" hidden>
+                  <p class="linkbox__extra-label">Label format — what prints on this product's stickers:</p>
+                  <div class="linkbox__form">
+                    <button class="reset" id="bitem-labelmode" type="button">Change Name</button>
+                    <span class="phist-inputwrap">
+                      <input id="bitem-labeltext" class="linkbox__input" type="text" maxlength="76" autocomplete="off" spellcheck="false" placeholder="Leave blank for the standard label" />
+                      <button class="phist-clear" id="bitem-labelclear" type="button" title="Clear — print the standard label">✕</button>
+                    </span>
+                    <button class="reset" id="bitem-labelsave" type="button">Save</button>
+                  </div>
+                  <div class="label-preview" id="bitem-preview">
+                    <div class="label-preview__header label-preview__header--lg" id="bitem-prev-header">Telescopes Canada</div>
+                    <div class="label-preview__sku" id="bitem-prev-sku"></div>
+                    <div class="label-preview__bc" id="bitem-prev-bc"></div>
+                    <div class="label-preview__bin" id="bitem-prev-bin"></div>
                   </div>
                 </div>
                 <div class="linkbox__form" style="margin-top:8px">
@@ -439,8 +498,12 @@
             <p class="linkbox__text" id="bpair-progress">—</p>
             <button class="reset" id="bpair-undo" type="button">Undo last tag</button>
           </div>
+          <p class="linkbox__text" id="bpair-summary"></p>
           <ul class="batch__items" id="bpair-items"></ul>
-          <button class="print__btn" id="batch-to-verify" type="button">All tags applied → verify bin</button>
+          <div class="linkbox__actions">
+            <button class="reset" id="bpair-reset" type="button" title="Release every tag this batch tied so the shelf can be re-scanned">Undo ALL pairing…</button>
+            <button class="print__btn" id="batch-to-verify" type="button">All tags applied → verify bin</button>
+          </div>
         </div>
 
         <!-- Stage 5: verify -->

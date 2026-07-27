@@ -11,7 +11,7 @@ authoritative and you can re-sync them later if a product is renamed.
 """
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, func  # noqa: F401
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -54,10 +54,15 @@ class RfidAssignment(Base):
         Boolean, nullable=False, default=False, server_default="0"
     )
 
+    # The bin batch this tie came from, when it came from one. Lets a batch
+    # be un-tied wholesale (abandon, or "undo pairing" to re-scan a shelf).
+    batch_id: Mapped[int | None] = mapped_column(Integer, index=True)
+
     def as_dict(self) -> dict:
         return {
             "id": self.id,
             "suspect": self.suspect,
+            "batch_id": self.batch_id,
             "rfid_id": self.rfid_id,
             "shopify_variant_id": self.shopify_variant_id,
             "shopify_product_id": self.shopify_product_id,
@@ -294,6 +299,10 @@ class Batch(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    # Stamped the first time the operator runs the Verify sweep.
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
     def as_dict(self) -> dict:
         return {
@@ -306,6 +315,9 @@ class Batch(Base):
             ),
             "completed_at": (
                 self.completed_at.isoformat() if self.completed_at else None
+            ),
+            "verified_at": (
+                self.verified_at.isoformat() if self.verified_at else None
             ),
         }
 

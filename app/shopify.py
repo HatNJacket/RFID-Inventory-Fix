@@ -396,6 +396,30 @@ query OnHand($search: String!) {
 """
 
 
+_ON_HAND_BULK_QUERY = _ON_HAND_QUERY.replace(
+    "productVariants(first: 5", "productVariants(first: 50"
+)
+
+
+def get_on_hand_by_skus(skus: list[str]) -> dict[str, int]:
+    """Live ON-HAND for a set of SKUs, ~25 per query. Used at batch
+    creation so the tickers reflect this minute's stock, not the bin-map
+    cache (which refreshes on a 6h cycle)."""
+    result: dict[str, int] = {}
+    cleaned = [s for s in {s.replace('"', "") for s in skus if s}]
+    for i in range(0, len(cleaned), 25):
+        chunk = cleaned[i:i + 25]
+        search = " OR ".join(f'sku:"{s}"' for s in chunk)
+        data = query_shopify(_ON_HAND_BULK_QUERY, {"search": search})
+        for v in data["productVariants"]["nodes"]:
+            if v["sku"]:
+                on_hand = _sum_on_hand(v)
+                result[v["sku"]] = (
+                    on_hand if on_hand is not None else v["inventoryQuantity"]
+                )
+    return result
+
+
 def get_on_hand(sku: str) -> int | None:
     """Live ON-HAND for one SKU (sum across locations); None if the SKU
     isn't found. Used for shelf expectations — never trust the mirror's
