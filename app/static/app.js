@@ -2257,6 +2257,25 @@ function batchSound(kind) {
 
 // One card renderer for collect and pair lists — the C72 view is the
 // design reference (image | bold name + labeled lines, tracker top-right).
+// --- multi-box products vs bundles ------------------------------------------
+// Two listings can fill the same several box slots for opposite reasons: one
+// product shipped in three cartons, or a bundle whose "boxes" are really
+// separate products with their own listings and their own tags. The server
+// guesses from the catalog's own convention ("BUNDLE: ...", SKU "91519+93973")
+// and the operator corrects it here, holding the actual box.
+const BIN_SPLIT_RE = /\s*(?:[&,;/+]|\band\b)\s*/i;
+
+function boxSlots(item) {
+  const count = (v) =>
+    String(v || "")
+      .split(BIN_SPLIT_RE)
+      .map((p) => p.trim())
+      .filter(Boolean).length;
+  // Scanned rows carry the whole metafield in bin_location; seeded rows carry
+  // only this shelf, with the rest in other_bins. Whichever says "more".
+  return Math.max(count(item.bin_location), 1 + count(item.other_bins));
+}
+
 function itemCard(item, mode) {
   const li = document.createElement("li");
   li.className = "bcell";
@@ -2296,7 +2315,15 @@ function itemCard(item, mode) {
       ${barcode ? `<div class="bcell__meta">Barcode: ${escapeHtml(barcode)}</div>` : ""}
       ${
         item.other_bins
-          ? `<div class="bcell__meta bcell__split">Also on ${escapeHtml(item.other_bins)} — this item is split across shelves</div>`
+          ? `<div class="bcell__meta bcell__split">${
+              item.kind === "bundle"
+                ? `Components on ${escapeHtml(item.other_bins)} — a bundle, not a box of its own`
+                : `Also on ${escapeHtml(item.other_bins)} — ${
+                    item.kind === "multi_box"
+                      ? `ships as ${boxSlots(item)} boxes`
+                      : "this item is split across shelves"
+                  }`
+            }</div>`
           : ""
       }
     </div>
@@ -2403,8 +2430,67 @@ function renderBatchItems() {
       );
       li.append(warn);
     }
+    // Anything filling more than one box slot needs an answer before labels
+    // print, and only the person holding the box can give it.
+    if (item.resolved && item.other_bins) li.append(kindRow(item));
     bEl.items.append(li);
   });
+}
+
+function kindRow(item) {
+  const bundle = item.kind === "bundle";
+  const row = document.createElement("div");
+  row.className = "kindrow" + (bundle ? " kindrow--bundle" : "");
+  const n = boxSlots(item);
+  row.innerHTML = `
+    <span class="kindrow__what">${
+      bundle
+        ? "Bundle — made of separate products, so nothing here gets a tag"
+        : `Multi-box product — ${n} boxes, one label each`
+    }</span>
+    <button class="reset" type="button" data-act="toggle">${
+      bundle ? "No — it's one product in " + n + " boxes" : "No — it's a bundle"
+    }</button>
+    ${
+      bundle
+        ? `<button class="reset" type="button" data-act="drop">Drop from RFID entirely</button>`
+        : ""
+    }`;
+  row.querySelector('[data-act="toggle"]').addEventListener("click", () =>
+    setItemKind(item, bundle ? "multi_box" : "bundle", false)
+  );
+  const drop = row.querySelector('[data-act="drop"]');
+  if (drop) {
+    drop.addEventListener("click", () => {
+      if (
+        !confirm(
+          `Drop "${itemDisplayName(item)}" from the RFID system?\n\n` +
+            `It won't be added to future batches and will never be ` +
+            `labelled. Its component products are unaffected — they keep ` +
+            `their own tags.\n\nYou can undo this from the product's panel ` +
+            `in History.`
+        )
+      )
+        return;
+      setItemKind(item, "bundle", true);
+    });
+  }
+  return row;
+}
+
+async function setItemKind(item, kind, excluded) {
+  try {
+    const data = await postJson(
+      `/api/batches/${batch.id}/items/${item.id}/kind`,
+      // Blank is fine — the server falls back to whoever started the batch.
+      { kind, excluded, updated_by: operatorEl.value.trim() || null }
+    );
+    setBatchResult(data.message, "ok");
+    await pullBatch(false);
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+  bEl.scan.focus();
 }
 
 async function adjustItemQty(item, qty) {
@@ -2463,6 +2549,7 @@ function labelItems() {
 }
 
 const FLAG_TEXT = {
+  bundle: "a bundle — no box of its own to tag",
   ambiguous: "barcode matches several listings",
   "count-mismatch": "count differs from Shopify",
   "unconfirmed-name": "serial name not confirmed",
@@ -2612,6 +2699,10 @@ function renderBitem() {
     document.getElementById("bitem-oddwrap").hidden = true;
   }
 
+  // Bundle: flagged here so the call gets made before labels print.
+  const bundleWrap = document.getElementById("bitem-bundlewrap");
+  bundleWrap.hidden = it.kind !== "bundle";
+
   // Label format editor — every resolved product gets one.
   const labelWrap = document.getElementById("bitem-labelwrap");
   labelWrap.hidden = !it.resolved;
@@ -2628,7 +2719,10 @@ function renderBitem() {
       : "boxes scanned";
   // Reprinting one product's labels only makes sense once it resolved.
   document.getElementById("bitem-refreshwrap").hidden = !it.resolved;
-  document.getElementById("bitem-printwrap").hidden = !it.resolved;
+  // A bundle has no box to put a label on, and the server refuses the
+  // print — so don't offer a button that can only fail.
+  document.getElementById("bitem-printwrap").hidden =
+    !it.resolved || it.kind === "bundle";
   document.getElementById("bitem-printqty").value = 1;
 }
 
@@ -2816,6 +2910,31 @@ async function bitemRecheck() {
     msg.textContent = err.message;
   }
 }
+
+// Bundle decisions from the Check step. Both change the list (a bundle stops
+// being labelled; a drop removes the row), so close the editor and reload.
+async function bitemSetKind(kind, excluded) {
+  await setItemKind(bitemEntry.item, kind, excluded);
+  document.getElementById("bitem-overlay").hidden = true;
+  loadBatchReview();
+}
+
+document
+  .getElementById("bitem-kind-multi")
+  .addEventListener("click", () => bitemSetKind("multi_box", false));
+
+document.getElementById("bitem-kind-drop").addEventListener("click", () => {
+  const it = bitemEntry.item;
+  if (
+    !confirm(
+      `Drop "${itemDisplayName(it)}" from the RFID system?\n\n` +
+        `It won't be added to future batches and will never be labelled. ` +
+        `Its component products are unaffected — they keep their own tags.`
+    )
+  )
+    return;
+  bitemSetKind("bundle", true);
+});
 
 document
   .getElementById("bitem-recheck")

@@ -370,6 +370,10 @@ class BatchItem(Base):
     paired_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # "multi_box" | "bundle" | None (single-box, nothing to decide). A
+    # snapshot of the ProductKind answer at scan time so the row travels
+    # with its own verdict.
+    kind: Mapped[str | None] = mapped_column(String(16))
 
     def as_dict(self) -> dict:
         return {
@@ -391,6 +395,7 @@ class BatchItem(Base):
             "qty_scanned": self.qty_scanned,
             "expected_qty": self.expected_qty,
             "paired_count": self.paired_count,
+            "kind": self.kind,
         }
 
 
@@ -435,6 +440,37 @@ class LabelName(Base):
     # "header" (replaces the store name) or "sku" (replaces the SKU line).
     placement: Mapped[str] = mapped_column(
         String(10), nullable=False, default="header", server_default="header"
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(100))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ProductKind(Base):
+    """Why one listing occupies several box slots: is it ONE product that
+    ships as several boxes, or a BUNDLE whose "boxes" are really separate
+    products that each have their own listing?
+
+    The two look identical in the bin metafield ("B18-1, G3-3"), but they
+    need opposite handling — a multi-box product wants a tag on every box,
+    while a bundle has no physical box of its own and must not be tagged at
+    all (its components are tagged as themselves). The catalog usually says
+    which is which (title "BUNDLE: ...", SKU "91519+93973"), so this table
+    only stores the operator's answer where the guess is wrong or absent.
+
+    Keyed by SKU so it is set once and every later batch already knows."""
+
+    __tablename__ = "rfid_product_kinds"
+
+    sku: Mapped[str] = mapped_column(String(100), primary_key=True)
+    # "multi_box" (tag every box) or "bundle" (tag nothing).
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Bundles that shouldn't be in the RFID system at all: never seeded into
+    # a batch, never labelled. Kept as a row, not a delete, so it can come
+    # back if the call was wrong.
+    excluded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
     )
     updated_by: Mapped[str | None] = mapped_column(String(100))
     updated_at: Mapped[datetime] = mapped_column(

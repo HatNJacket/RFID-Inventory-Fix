@@ -810,6 +810,28 @@ body {
 }
 .binwarn .reset { padding: 5px 10px; font-size: 12px; }
 
+/* Multi-box vs bundle. Quieter than .binwarn: usually the guess is right,
+   so this states what will happen and offers the correction — it is not an
+   error. Bundles get the warn colour because they print nothing. */
+.kindrow {
+  flex-basis: 100%;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--card-2);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+.kindrow--bundle {
+  color: var(--warn-ink);
+  background: var(--warn-bg);
+}
+.kindrow__what { flex: 1 1 auto; min-width: 180px; }
+.kindrow .reset { padding: 5px 10px; font-size: 12px; }
+
 /* batch cells restyled to mirror the C72 app: image | name + labeled
    SKU/Barcode lines, two-number tracker pinned top-right, glow borders */
 .stage { cursor: pointer; }

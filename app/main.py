@@ -13,6 +13,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
@@ -42,6 +43,7 @@ from app.models import (
     HiddenBin,
     LabelName,
     PrintJob,
+    ProductKind,
     ReviewTask,
     RfidAssignment,
     SerialPrefix,
@@ -1550,6 +1552,50 @@ def parse_bin_parts(value: str | None) -> list[str]:
     return parts
 
 
+# A listing that occupies several box slots is either one product shipped in
+# several boxes or a bundle of separate products. The catalog almost always
+# says which: bundles are titled "BUNDLE: ..." and their SKUs are composites
+# of the component SKUs ("91519+93973", "91523-BUNDLE-SkyPortal").
+_BUNDLE_SKU_RE = re.compile(r"\+|-BUNDLE-", re.I)
+
+
+def guess_product_kind(
+    product_title: str | None, sku: str | None, bin_value: str | None
+) -> str | None:
+    """'bundle' | 'multi_box' | None. None means there is nothing to decide:
+    the product occupies a single box slot, so it is just a normal product.
+
+    A guess, not a verdict — the operator can override it per SKU, because
+    nothing stops someone creating a bundle that skips the convention."""
+    if len(parse_bin_parts(bin_value)) < 2:
+        return None
+    title = (product_title or "").strip()
+    if title.upper().startswith("BUNDLE:") or "BUNDLE:" in title.upper():
+        return "bundle"
+    if sku and _BUNDLE_SKU_RE.search(sku):
+        return "bundle"
+    return "multi_box"
+
+
+def resolve_product_kind(
+    session: Session,
+    product_title: str | None,
+    sku: str | None,
+    bin_value: str | None,
+) -> tuple[str | None, bool]:
+    """The effective (kind, excluded) for a product: the operator's saved
+    answer wins over the guess, since they have the box in their hands."""
+    guess = guess_product_kind(product_title, sku, bin_value)
+    if not sku:
+        return guess, False
+    saved = session.get(ProductKind, sku)
+    if saved is None:
+        return guess, False
+    # A saved answer applies even when the bin metafield has since changed
+    # to a single slot — the operator saw the physical goods.
+    return saved.kind, bool(saved.excluded)
+
+
 def parse_bins(value: str | None) -> list[str]:
     """The distinct shelves a product lives on — for bin membership and
     for listing a bin's contents once each."""
@@ -1924,6 +1970,11 @@ def _apply_product_to_item(
     image = (product.get("image_url") or "")[:500]
     if image:
         item.image_url = image
+    # Multi-box product or bundle? Only meaningful when the listing occupies
+    # more than one box slot; the operator's saved answer wins over the guess.
+    item.kind, _ = resolve_product_kind(
+        session, item.product_title, item.sku, saved
+    )
     qty = _mirror_qty(session, item.sku)
     if qty is not None:
         item.expected_qty = qty
@@ -2035,8 +2086,22 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
             sp_by_sku.setdefault(sp.sku, sp)
 
     items = []
+    dropped: list[str] = []
     for p in expected:
         sp = sp_by_sku.get(p.get("sku") or "")
+        # The whole bin metafield, not just this shelf: counting box slots
+        # is what tells a multi-box product from a bundle.
+        full_bin = ", ".join(
+            x for x in (p.get("bin_location"), p.get("other_bins")) if x
+        )
+        kind, excluded = resolve_product_kind(
+            session, p.get("product_title"), p.get("sku"), full_bin
+        )
+        # Bundles the operator dropped from the RFID system have no physical
+        # box to tag — seeding them would just re-raise a settled question.
+        if excluded:
+            dropped.append(p.get("sku") or "")
+            continue
         items.append(BatchItem(
             batch_id=batch.id,
             scanned_code=(p.get("barcode") or p.get("sku") or "")[:64],
@@ -2056,7 +2121,11 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
             label_name=None,
             qty_scanned=0,
             expected_qty=p.get("expected_qty"),
+            kind=kind,
         ))
+    if dropped:
+        logger.info("bin %s: skipped %d excluded bundle(s): %s",
+                    payload.bin, len(dropped), ", ".join(dropped[:10]))
     session.add_all(items)
     session.commit()
     session.refresh(batch)
@@ -2242,6 +2311,10 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
         if not item.resolved:
             flags.append("unresolved")
         else:
+            # A bundle occupying box slots is a decision waiting to happen:
+            # tag nothing, or drop it from the system for good.
+            if item.kind == "bundle":
+                flags.append("bundle")
             code = item.barcode or item.scanned_code
             if code:
                 try:
@@ -2438,6 +2511,101 @@ def batch_item_resolve(
     }
 
 
+class ItemKindIn(BaseModel):
+    kind: Literal["multi_box", "bundle"]
+    # Bundles only: drop this product out of the RFID system altogether.
+    excluded: bool = False
+    updated_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/batches/{batch_id}/items/{item_id}/kind",
+    dependencies=[Depends(require_user)],
+)
+def set_item_kind(
+    batch_id: int,
+    item_id: int,
+    payload: ItemKindIn,
+    session: Session = Depends(get_session),
+):
+    """Say whether a listing that fills several box slots is ONE product in
+    several boxes or a BUNDLE of separate products. Saved against the SKU,
+    so every later batch already knows.
+
+    A bundle has no box of its own — its components are tagged as
+    themselves — so it queues no labels. `excluded` goes further and keeps
+    it out of future batches entirely."""
+    batch = _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    if payload.excluded and payload.kind != "bundle":
+        raise HTTPException(
+            422, "Only a bundle can be dropped from the RFID system."
+        )
+    if payload.kind == "bundle" and item.paired_count:
+        raise HTTPException(
+            409,
+            f"{item.paired_count} RFID tag(s) are already paired to this "
+            f"row. Unpair them first — marking it a bundle would leave "
+            f"tags pointing at something with no box to be on.",
+        )
+
+    # Remembered per SKU; without one there is nothing to key on, so the
+    # answer can only apply to this row.
+    if item.sku:
+        saved = session.get(ProductKind, item.sku)
+        if saved is None:
+            saved = ProductKind(sku=item.sku, kind=payload.kind)
+            session.add(saved)
+        saved.kind = payload.kind
+        saved.excluded = payload.excluded
+        saved.updated_by = payload.updated_by or batch.created_by
+        saved.updated_at = datetime.now(timezone.utc)
+
+    # Same product may have several rows in this batch (a rescued unresolved
+    # scan, say) — they all describe the same physical thing.
+    rows = [
+        i for i in _batch_items(session, batch_id)
+        if i.id == item.id or (item.sku and i.sku == item.sku)
+    ]
+    for row in rows:
+        row.kind = payload.kind
+
+    removed = False
+    if payload.excluded:
+        for row in rows:
+            if not row.paired_count:
+                session.delete(row)
+                removed = True
+
+    session.commit()
+    name = item.product_title or item.sku or item.scanned_code
+    if payload.excluded:
+        message = (
+            f"{name} dropped from the RFID system — it won't be seeded into "
+            f"future batches or labelled. Undo it from the product's panel "
+            f"in History."
+        )
+    elif payload.kind == "bundle":
+        message = (
+            f"{name} marked as a bundle — no labels will print for it; its "
+            f"component products get tagged as themselves."
+        )
+    else:
+        message = (
+            f"{name} marked as a multi-box product — one label per box, as "
+            f"scanned."
+        )
+    return {
+        "kind": payload.kind,
+        "excluded": payload.excluded,
+        "removed": removed,
+        "item": None if removed else item.as_dict(),
+        "message": message,
+    }
+
+
 class ItemQtyIn(BaseModel):
     qty: int = Field(ge=0, le=500)
 
@@ -2546,6 +2714,13 @@ def batch_item_labels(
             422, "That row never resolved to a product, so there's nothing "
                  "to put on a label."
         )
+    if item.kind == "bundle":
+        raise HTTPException(
+            422,
+            "This is marked as a bundle — it has no box of its own to put a "
+            "tag on. Print the label from one of its component products, or "
+            "switch it to 'multi-box product' if that's wrong.",
+        )
     label_name, placement = _label_name_for(session, item)
     jobs = [
         PrintJob(
@@ -2592,8 +2767,16 @@ def batch_queue_labels(
             f"{batch.status}). Reprint individual labels from Print Queue.",
         )
     jobs = []
+    skipped_bundles: list[str] = []
     for item in _batch_items(session, batch_id):
         if not item.resolved or not item.shopify_variant_id:
+            continue
+        # A bundle is an inventory construct, not a box: its components are
+        # tagged as themselves, so labelling it would put a second tag on a
+        # box that already has one.
+        if item.kind == "bundle":
+            if item.qty_scanned:
+                skipped_bundles.append(item.product_title or item.sku or "?")
             continue
         label_name, label_placement = _label_name_for(session, item)
         for _ in range(item.qty_scanned):
@@ -2621,11 +2804,24 @@ def batch_queue_labels(
                 )
             )
     if not jobs:
+        if skipped_bundles:
+            raise HTTPException(
+                422,
+                "Everything scanned here is marked as a bundle, and bundles "
+                "aren't labelled — their component products are tagged "
+                "instead. Switch one to 'multi-box product' if that's wrong.",
+            )
         raise HTTPException(422, "No resolved products with boxes to label.")
     session.add_all(jobs)
     batch.status = "printing"
     session.commit()
-    return {"count": len(jobs), "batch": batch.as_dict()}
+    return {
+        "count": len(jobs),
+        "batch": batch.as_dict(),
+        # Named, not silently dropped: skipping a label is exactly the kind
+        # of thing that should never be a surprise at the printer.
+        "skipped_bundles": skipped_bundles,
+    }
 
 
 class PairIn(BaseModel):

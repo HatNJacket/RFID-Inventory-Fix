@@ -465,6 +465,15 @@
                   <button class="reset" data-act="ignore" type="button">Ignore for this batch</button>
                 </div>
 
+                <!-- Bundle: nothing physical to tag -->
+                <div id="bitem-bundlewrap" hidden>
+                  <p class="linkbox__extra-label">This is a bundle — its boxes are really its component products, which get tagged as themselves, so no label will print for it. If that's wrong and it's actually one product shipped in several boxes, say so. If it should never be tagged again, drop it from the RFID system.</p>
+                  <div class="linkbox__actions">
+                    <button class="reset" id="bitem-kind-multi" type="button" title="Treat it as one product in several boxes — one label per box">It's one product in several boxes</button>
+                    <button class="reset" id="bitem-kind-drop" type="button" title="Never seed or label this product again">Drop from the RFID system</button>
+                  </div>
+                </div>
+
                 <!-- Unresolved barcode rescue -->
                 <div id="bitem-unresolved" hidden>
                   <p class="linkbox__extra-label">This barcode isn't on any product. Usually the product's Shopify barcode was left as its SKU or a placeholder. Already fixed it in Shopify? Hit re-check. Otherwise find the product below and give it the scanned barcode:</p>
