@@ -1317,36 +1317,192 @@ async function unassign(rfid, li) {
 // --- Inventory tab ----------------------------------------------------------
 let inventoryRows = [];
 
+// A text box that drops a list of the values actually present, narrowing
+// as you type. Selection is exact-match filtering; free text narrows the
+// list without filtering the table until something is picked.
+function makeCombo(id, onPick) {
+  const root = document.getElementById(id);
+  const input = root.querySelector(".combo__input");
+  const list = root.querySelector(".combo__list");
+  const clear = root.querySelector(".combo__clear");
+  let options = [];
+  let value = "";
+
+  function close() {
+    list.hidden = true;
+  }
+
+  function open() {
+    const typed = input.value.trim().toLowerCase();
+    const shown = options.filter(
+      (o) => !typed || o.label.toLowerCase().includes(typed)
+    );
+    list.innerHTML = "";
+    if (!shown.length) {
+      list.innerHTML = '<li class="combo__none">No matches</li>';
+    } else {
+      shown.slice(0, 200).forEach((o) => {
+        const li = document.createElement("li");
+        if (o.label === value) li.classList.add("combo--on");
+        li.innerHTML =
+          escapeHtml(o.label) +
+          (o.count != null
+            ? `<span class="combo__count">${o.count}</span>`
+            : "");
+        li.addEventListener("mousedown", (ev) => {
+          ev.preventDefault(); // don't blur before we read the click
+          value = o.label;
+          input.value = o.label;
+          close();
+          onPick(value);
+        });
+        list.append(li);
+      });
+    }
+    list.hidden = false;
+  }
+
+  input.addEventListener("focus", open);
+  input.addEventListener("input", () => {
+    open();
+    // Typing a value that exactly matches an option applies it; otherwise
+    // clearing the box clears the filter.
+    const typed = input.value.trim();
+    const exact = options.find(
+      (o) => o.label.toLowerCase() === typed.toLowerCase()
+    );
+    const next = exact ? exact.label : "";
+    if (next !== value) {
+      value = next;
+      onPick(value);
+    }
+  });
+  input.addEventListener("blur", () => setTimeout(close, 120));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      close();
+      input.blur();
+    }
+  });
+  clear.addEventListener("click", () => {
+    input.value = "";
+    value = "";
+    close();
+    onPick("");
+    input.focus();
+  });
+
+  return {
+    setOptions(next) {
+      options = next;
+      // A chosen value that no longer exists shouldn't hide everything.
+      if (value && !options.some((o) => o.label === value)) {
+        value = "";
+        input.value = "";
+        onPick("");
+      }
+    },
+    get value() {
+      return value;
+    },
+  };
+}
+
+let invBinCombo = null;
+let invVendorCombo = null;
+let invBinFilter = "";
+let invVendorFilter = "";
+
 async function loadInventory() {
   const body = document.getElementById("inv-body");
   try {
     const res = await apiFetch("/api/inventory/summary");
     if (!res.ok) {
       body.innerHTML =
-        '<tr><td colspan="6" class="inventory__empty">Could not load inventory.</td></tr>';
+        '<tr><td colspan="7" class="inventory__empty">Could not load inventory.</td></tr>';
       return;
     }
-    inventoryRows = (await res.json()).products;
+    const data = await res.json();
+    inventoryRows = data.products;
+    // Offer only values that exist, with how many products each covers.
+    const countBy = (key) => {
+      const m = new Map();
+      inventoryRows.forEach((p) => {
+        if (p[key]) m.set(p[key], (m.get(p[key]) || 0) + 1);
+      });
+      return m;
+    };
+    const binCounts = countBy("bin_location");
+    const vendorCounts = countBy("vendor");
+    if (invBinCombo)
+      invBinCombo.setOptions(
+        (data.bins || []).map((b) => ({ label: b, count: binCounts.get(b) }))
+      );
+    if (invVendorCombo)
+      invVendorCombo.setOptions(
+        (data.vendors || []).map((v) => ({
+          label: v,
+          count: vendorCounts.get(v),
+        }))
+      );
     renderInventory();
   } catch (err) {
     body.innerHTML =
-      '<tr><td colspan="6" class="inventory__empty">Network error.</td></tr>';
+      '<tr><td colspan="7" class="inventory__empty">Network error.</td></tr>';
   }
 }
 
 function renderInventory() {
   const body = document.getElementById("inv-body");
+  const countEl = document.getElementById("inv-count");
   const q = document.getElementById("inv-search").value.trim().toLowerCase();
-  const rows = q
-    ? inventoryRows.filter((p) =>
-        [p.product_title, p.variant_title, p.sku, p.barcode, p.bin_location]
-          .filter(Boolean)
-          .some((v) => String(v).toLowerCase().includes(q))
+  let rows = inventoryRows.filter((p) => {
+    if (
+      invBinFilter &&
+      (p.bin_location || "").toLowerCase() !== invBinFilter.toLowerCase()
+    )
+      return false;
+    if (
+      invVendorFilter &&
+      (p.vendor || "").toLowerCase() !== invVendorFilter.toLowerCase()
+    )
+      return false;
+    if (!q) return true;
+    return [p.product_title, p.variant_title, p.sku, p.barcode, p.vendor]
+      .filter(Boolean)
+      .some((v) => String(v).toLowerCase().includes(q));
+  });
+
+  const sort = document.getElementById("inv-sort").value;
+  const byText = (a, b, key) =>
+    String(a[key] || "￿").localeCompare(String(b[key] || "￿"),
+      undefined, { numeric: true, sensitivity: "base" });
+  rows = [...rows];
+  if (sort === "vendor")
+    // Products with no vendor sort last rather than pretending to be "".
+    rows.sort((a, b) => byText(a, b, "vendor") ||
+      byText(a, b, "product_title"));
+  else if (sort === "product") rows.sort((a, b) => byText(a, b, "product_title"));
+  else if (sort === "bin") rows.sort((a, b) => byText(a, b, "bin_location"));
+  else if (sort === "tags") rows.sort((a, b) => b.tag_count - a.tag_count);
+  else
+    rows.sort((a, b) =>
+      String(b.last_assigned_at || "").localeCompare(
+        String(a.last_assigned_at || "")
       )
-    : inventoryRows;
+    );
+
+  const filtered = invBinFilter || invVendorFilter || q;
+  countEl.textContent = filtered
+    ? `(${rows.length} of ${inventoryRows.length})`
+    : `(${inventoryRows.length})`;
+
   if (!rows.length) {
-    body.innerHTML =
-      '<tr><td colspan="6" class="inventory__empty">No products yet — assign or print a first tag.</td></tr>';
+    body.innerHTML = `<tr><td colspan="7" class="inventory__empty">${
+      filtered
+        ? "Nothing matches those filters."
+        : "No products yet — assign or print a first tag."
+    }</td></tr>`;
     return;
   }
   body.innerHTML = rows
@@ -1364,6 +1520,7 @@ function renderInventory() {
         : "—";
       return `<tr>
         <td>${title}</td>
+        <td>${escapeHtml(p.vendor || "—")}</td>
         <td class="mono">${escapeHtml(p.sku || "—")}</td>
         <td>${p.bin_location && p.bin_location !== "No bin assigned"
           ? `<span class="inventory__bin">${escapeHtml(p.bin_location)}</span>`
@@ -1381,6 +1538,16 @@ document.getElementById("inv-search").addEventListener("input", () => {
   clearTimeout(invSearchTimer);
   invSearchTimer = setTimeout(renderInventory, 150);
 });
+
+invBinCombo = makeCombo("combo-bin", (v) => {
+  invBinFilter = v;
+  renderInventory();
+});
+invVendorCombo = makeCombo("combo-vendor", (v) => {
+  invVendorFilter = v;
+  renderInventory();
+});
+document.getElementById("inv-sort").addEventListener("change", renderInventory);
 
 let searchTimer;
 el.search.addEventListener("input", () => {

@@ -1312,14 +1312,48 @@ def inventory_summary(session: Session = Depends(get_session)):
                 r.last_assigned_at.isoformat() if r.last_assigned_at else None
             ),
             "shopify_qty": None,
+            "vendor": None,
         }
         for r in rows
     ]
     products.sort(key=lambda p: p["last_assigned_at"] or "", reverse=True)
 
+    # Vendor (the brand) for filtering and sorting. The bin map holds it
+    # live from Shopify; the TELCAN mirror covers anything not binned.
+    # Some products genuinely have no vendor set — those stay blank.
+    vendor_by_sku: dict = {}
+    try:
+        for sku, vendor in session.execute(
+            select(BinMapEntry.sku, BinMapEntry.vendor)
+            .where(BinMapEntry.vendor.isnot(None))
+        ):
+            if sku:
+                vendor_by_sku.setdefault(sku, vendor)
+    except Exception as error:
+        logger.warning("vendor lookup (bin map) failed: %s", error)
+
     # Enrich with live stock counts from the TELCAN catalog mirror.
     skus = [p["sku"] for p in products if p["sku"]]
     if skus and session.get_bind().dialect.name == "mssql":
+        # Mirror fallback for vendors the bin map didn't cover.
+        missing = [s for s in skus if s not in vendor_by_sku]
+        if missing:
+            try:
+                for r in session.execute(
+                    text(
+                        "SELECT v.Variant_SKU AS sku, MAX(p.Vendor) AS vendor "
+                        "FROM dbo.Shopify_Variants v "
+                        "JOIN dbo.Shopify_Products p "
+                        "  ON p.Handle_ID = v.Handle_ID "
+                        "WHERE v.Variant_SKU IN :skus "
+                        "GROUP BY v.Variant_SKU"
+                    ).bindparams(bindparam("skus", expanding=True)),
+                    {"skus": missing},
+                ):
+                    if r.vendor:
+                        vendor_by_sku.setdefault(r.sku, r.vendor)
+            except Exception as error:
+                logger.warning("vendor lookup (mirror) failed: %s", error)
         try:
             qty_rows = session.execute(
                 text(
@@ -1346,7 +1380,27 @@ def inventory_summary(session: Session = Depends(get_session)):
         except RuntimeError as error:
             logger.warning("live quantity fetch failed: %s", error)
 
-    return {"count": len(products), "products": products}
+    for p in products:
+        p["vendor"] = vendor_by_sku.get(p["sku"])
+
+    return {
+        "count": len(products),
+        "products": products,
+        # Everything the filters can offer, so the UI doesn't have to
+        # derive them and can show them sorted.
+        "bins": sorted(
+            {
+                p["bin_location"] for p in products
+                if p["bin_location"] and p["bin_location"] not in
+                MISSING_BIN_VALUES
+            },
+            key=lambda b: b.lower(),
+        ),
+        "vendors": sorted(
+            {p["vendor"] for p in products if p["vendor"]},
+            key=lambda v: v.lower(),
+        ),
+    }
 
 
 @app.post(
@@ -1420,6 +1474,7 @@ def _rebuild_bin_map() -> None:
                         other_bins=(", ".join(others))[:255] or None,
                         qty=e["qty"],
                         image_url=(e.get("image_url") or "")[:500] or None,
+                        vendor=(e.get("vendor") or "")[:150] or None,
                     ))
             session.add_all(rows)
             session.commit()

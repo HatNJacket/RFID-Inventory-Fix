@@ -319,6 +319,7 @@ query AllBins($cursor: String) {
       product {
         id
         title
+        vendor
         featuredImage { url }
         easyScanBin: metafield(namespace: "my_fields", key: "bin_location") {
           value
@@ -386,6 +387,7 @@ def fetch_all_variant_bins() -> list[dict]:
                 "qty": on_hand if on_hand is not None
                        else v["inventoryQuantity"],
                 "image_url": image,
+                "vendor": (v["product"].get("vendor") or "").strip() or None,
             })
         if not page["pageInfo"]["hasNextPage"]:
             return results

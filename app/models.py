@@ -416,6 +416,8 @@ class BinMapEntry(Base):
     other_bins: Mapped[str | None] = mapped_column(String(255))
     qty: Mapped[int | None] = mapped_column(Integer)
     image_url: Mapped[str | None] = mapped_column(String(500))
+    # Shopify's product vendor — the brand, for filtering/sorting.
+    vendor: Mapped[str | None] = mapped_column(String(150), index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

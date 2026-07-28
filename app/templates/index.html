@@ -277,14 +277,45 @@
     <!-- Inventory tab -->
     <section class="inventory" id="tab-inventory" hidden>
       <div class="recent__head">
-        <h2>Products in the RFID system</h2>
-        <input id="inv-search" class="recent__search" type="search" placeholder="Filter by product, SKU, bin…" autocomplete="off" />
+        <h2>Products in the RFID system <span class="recent__note" id="inv-count"></span></h2>
+        <input id="inv-search" class="recent__search" type="search" placeholder="Search product, SKU, barcode…" autocomplete="off" />
+      </div>
+      <div class="invfilters">
+        <label class="invfilter">
+          <span class="invfilter__label">Bin</span>
+          <span class="combo" id="combo-bin">
+            <input class="linkbox__input combo__input" id="inv-bin" type="text"
+                   placeholder="Any bin" autocomplete="off" spellcheck="false" />
+            <button class="combo__clear" type="button" title="Clear">✕</button>
+            <ul class="combo__list" hidden></ul>
+          </span>
+        </label>
+        <label class="invfilter">
+          <span class="invfilter__label">Vendor</span>
+          <span class="combo" id="combo-vendor">
+            <input class="linkbox__input combo__input" id="inv-vendor" type="text"
+                   placeholder="Any vendor" autocomplete="off" spellcheck="false" />
+            <button class="combo__clear" type="button" title="Clear">✕</button>
+            <ul class="combo__list" hidden></ul>
+          </span>
+        </label>
+        <label class="invfilter">
+          <span class="invfilter__label">Sort</span>
+          <select id="inv-sort" class="reset">
+            <option value="recent">Most recent tag</option>
+            <option value="vendor">Vendor A→Z</option>
+            <option value="product">Product A→Z</option>
+            <option value="bin">Bin</option>
+            <option value="tags">Most tags</option>
+          </select>
+        </label>
       </div>
       <div class="inventory__scroll">
         <table class="inventory__table">
           <thead>
             <tr>
               <th>Product</th>
+              <th>Vendor</th>
               <th>SKU</th>
               <th>Bin</th>
               <th class="num">Tags</th>
@@ -293,7 +324,7 @@
             </tr>
           </thead>
           <tbody id="inv-body">
-            <tr><td colspan="6" class="inventory__empty">Loading…</td></tr>
+            <tr><td colspan="7" class="inventory__empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>

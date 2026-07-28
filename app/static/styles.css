@@ -913,6 +913,66 @@ a { color: var(--accent); }
 }
 .label-preview__bin { font-size: 13px; font-weight: 600; }
 
+/* Inventory filter row: type-ahead comboboxes + a sort picker */
+.invfilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin: 0 0 12px;
+}
+.invfilter { display: flex; flex-direction: column; gap: 4px; }
+.invfilter__label {
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+}
+.invfilter select { padding: 7px 10px; font-size: 13px; }
+
+/* A text box that drops a filtered list as you type. Built rather than
+   using <datalist>, whose behaviour on iPad Safari is unreliable. */
+.combo { position: relative; display: inline-flex; align-items: center; }
+.combo__input { min-width: 190px; padding-right: 26px; }
+.combo__clear {
+  position: absolute;
+  right: 6px;
+  background: none;
+  border: none;
+  color: var(--ink-dim);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+}
+.combo__clear:hover { color: var(--danger-ink, #d72c0d); }
+.combo__list {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.combo__list li {
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.combo__list li:hover,
+.combo__list li.combo--on { background: var(--accent-soft); color: var(--accent); }
+.combo__list li.combo__none { color: var(--ink-dim); cursor: default; }
+.combo__count { color: var(--ink-dim); font-size: 11px; float: right; }
+
 /* Bin work board: to-do list wide on the left, recent history narrow
    on the right; stacks on narrow screens (iPad portrait). */
 .binboard { display: flex; gap: 12px; align-items: stretch; }
