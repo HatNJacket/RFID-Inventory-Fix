@@ -421,6 +421,20 @@ public class MainActivity extends Activity {
         gl.topMargin = dp(14);
         drawerPanel.addView(gearBtn, gl);
 
+        // Which build is actually on this device. Read from the package
+        // manager rather than a constant, so it can never disagree with the
+        // APK that's installed - the whole point is to answer "did that
+        // install take?" without guesswork.
+        TextView ver = new TextView(this);
+        ver.setText("TC RFID Sweep  v" + appVersion());
+        ver.setTextSize(11);
+        ver.setTextColor(Color.parseColor("#777777"));
+        LinearLayout.LayoutParams vl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        vl.topMargin = dp(10);
+        drawerPanel.addView(ver, vl);
+
         drawerScrim.addView(drawerPanel, new FrameLayout.LayoutParams(
                 dp(210), FrameLayout.LayoutParams.MATCH_PARENT,
                 Gravity.START));
@@ -2856,6 +2870,17 @@ public class MainActivity extends Activity {
                 }).start())
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /** versionName + versionCode of the APK actually installed. */
+    private String appVersion() {
+        try {
+            android.content.pm.PackageInfo pi = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0);
+            return pi.versionName + " (" + pi.versionCode + ")";
+        } catch (Exception e) {
+            return "?";
+        }
     }
 
     // ---------------------------------------------------------- side trip ---
