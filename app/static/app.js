@@ -2504,6 +2504,10 @@ async function loadBatchReview(showAll) {
           flagged.get(item.id) || { item, flags: [], candidates: [] }
       );
     }
+    // Only offer the bulk re-check when there's something unknown to re-check.
+    document.getElementById("bcheck-recheck").hidden = !checkEntries.some(
+      (e) => !e.item.resolved
+    );
     list.innerHTML = "";
     if (!checkEntries.length) {
       empty.hidden = false;
@@ -2623,6 +2627,7 @@ function renderBitem() {
       ? `boxes scanned · Shopify on-hand ${it.expected_qty}`
       : "boxes scanned";
   // Reprinting one product's labels only makes sense once it resolved.
+  document.getElementById("bitem-refreshwrap").hidden = !it.resolved;
   document.getElementById("bitem-printwrap").hidden = !it.resolved;
   document.getElementById("bitem-printqty").value = 1;
 }
@@ -2769,6 +2774,96 @@ document.getElementById("bitem-binwarn").addEventListener("click", async (ev) =>
     } catch (err) {
       msg.textContent = err.message;
     }
+  }
+});
+
+// --- re-check against Shopify ----------------------------------------------
+// The answer to "the product had no barcode, so I set one in Shopify — now
+// what": ask the server to look the row up again instead of making the
+// operator re-scan the boxes. Read-only; nothing is written to the store.
+function recheckItem(item) {
+  return apiJson(`/api/batches/${batch.id}/items/${item.id}/resolve`, {
+    method: "POST",
+  });
+}
+
+async function bitemRecheck() {
+  const it = bitemEntry.item;
+  const msg = document.getElementById("bitem-msg");
+  msg.textContent = "Asking Shopify again…";
+  try {
+    const data = await recheckItem(it);
+    if (!data.resolved) {
+      msg.textContent = data.message;
+      return;
+    }
+    // A plain refresh of an already-resolved product: stay put and show the
+    // updated details. Anything structural (it just resolved, or it merged
+    // into another row) changes the list, so close and let it reload.
+    if (data.was_resolved && !data.merged) {
+      bitemEntry.item = data.item;
+      renderBitem();
+      msg.textContent = data.message;
+      await pullBatch(false);
+      loadBatchReview();
+      return;
+    }
+    document.getElementById("bitem-overlay").hidden = true;
+    await pullBatch(false);
+    loadBatchReview();
+    setBatchResult(data.message, "ok");
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+}
+
+document
+  .getElementById("bitem-recheck")
+  .addEventListener("click", bitemRecheck);
+document
+  .getElementById("bitem-refresh")
+  .addEventListener("click", bitemRecheck);
+
+// Same thing for every unknown barcode at once — one at a time so a bin
+// full of them doesn't fire twenty Shopify lookups in parallel.
+document.getElementById("bcheck-recheck").addEventListener("click", async () => {
+  const btn = document.getElementById("bcheck-recheck");
+  const rows = checkEntries.filter((e) => !e.item.resolved).map((e) => e.item);
+  if (!rows.length) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  let fixed = 0;
+  const stuck = [];
+  try {
+    for (let i = 0; i < rows.length; i++) {
+      btn.textContent = `Re-checking ${i + 1} of ${rows.length}…`;
+      try {
+        const data = await recheckItem(rows[i]);
+        if (data.resolved) fixed += 1;
+        else stuck.push(rows[i].scanned_code);
+      } catch (err) {
+        stuck.push(rows[i].scanned_code);
+      }
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+  await pullBatch(false);
+  loadBatchReview();
+  if (fixed && !stuck.length) {
+    setBatchResult(`Re-checked ✓ — ${fixed} now resolved.`, "ok");
+  } else if (fixed) {
+    setBatchResult(
+      `${fixed} now resolved ✓ — still unknown: ${stuck.join(", ")}.`,
+      "ok"
+    );
+  } else {
+    setBatchResult(
+      `Still nothing in Shopify for ${stuck.join(", ")}. If you just ` +
+        `changed a barcode there, give it a few seconds and try again.`,
+      "err"
+    );
   }
 });
 

@@ -424,6 +424,7 @@
           <p class="linkbox__text" id="bcheck-empty" hidden>Nothing needs checking ✓</p>
           <ul class="batch__items" id="bcheck-list"></ul>
           <div class="linkbox__actions">
+            <button class="reset" id="bcheck-recheck" type="button" hidden title="Look every unknown barcode up in Shopify again — use it after fixing barcodes there">↻ Re-check unknown barcodes</button>
             <button class="reset" id="bcheck-all" type="button" title="Open every scanned product, not just the flagged ones — edit label names/SKUs here">Review all products…</button>
             <button class="reset" id="batch-skip-print" type="button" title="Labels are already printed — go straight to pairing">Skip printing → pair</button>
             <button class="print__btn" id="batch-queue" type="button">Next step → queue labels to print</button>
@@ -466,8 +467,9 @@
 
                 <!-- Unresolved barcode rescue -->
                 <div id="bitem-unresolved" hidden>
-                  <p class="linkbox__extra-label">This barcode isn't on any product. Usually the product's Shopify barcode was left as its SKU or a placeholder — find it below and give it the scanned barcode:</p>
+                  <p class="linkbox__extra-label">This barcode isn't on any product. Usually the product's Shopify barcode was left as its SKU or a placeholder. Already fixed it in Shopify? Hit re-check. Otherwise find the product below and give it the scanned barcode:</p>
                   <div class="linkbox__actions">
+                    <button class="print__btn" id="bitem-recheck" type="button" title="Look this barcode up in Shopify again — use it after setting the barcode there">↻ Re-check Shopify for this barcode</button>
                     <button class="reset" id="bitem-odd" type="button">Show products in this bin with odd barcodes</button>
                     <button class="reset" id="bitem-recommend" type="button">Show recommended product</button>
                     <button class="reset" id="bitem-drop" type="button">Remove this scan from the list</button>
@@ -516,6 +518,9 @@
                     <button type="button" id="bitem-plus">+</button>
                   </span>
                   <span class="linkbox__text" id="bitem-expected"></span>
+                </div>
+                <div class="linkbox__actions" id="bitem-refreshwrap" hidden>
+                  <button class="reset" id="bitem-refresh" type="button" title="Re-read this product from Shopify — after changing its barcode, bin or stock there">↻ Refresh this product from Shopify</button>
                 </div>
                 <div class="linkbox__form" id="bitem-printwrap" style="margin-top:8px">
                   <input id="bitem-printqty" class="linkbox__input" type="number" min="1" max="50" value="1" style="max-width:80px" />

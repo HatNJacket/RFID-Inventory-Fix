@@ -1892,6 +1892,43 @@ def _mirror_qty(session: Session, sku: str | None) -> int | None:
         return None
 
 
+def _apply_product_to_item(
+    session: Session, item: BatchItem, product: dict, batch: Batch
+) -> None:
+    """Copy a resolved product onto a batch row. Shared by the scan path (a
+    brand-new row) and the Check step's re-check (a row that stayed
+    unresolved until the operator set the barcode in Shopify), so both end
+    up with identical snapshots."""
+    item.resolved = True
+    item.shopify_variant_id = product.get("shopify_variant_id")
+    item.shopify_product_id = product.get("shopify_product_id")
+    item.product_title = product.get("product_title")
+    item.variant_title = product.get("variant_title")
+    item.sku = product.get("sku")
+    item.barcode = product.get("barcode")
+    item.bin_location = product.get("bin_location")
+    # "Other bins" only means something when this bin is genuinely one of
+    # the product's — otherwise it's simply on the wrong shelf, and calling
+    # that a split would be a lie.
+    saved = product.get("bin_location")
+    if bin_contains(saved, batch.bin_name):
+        others = bins_other_than(saved, batch.bin_name)
+        item.other_bins = (", ".join(others))[:255] if others else None
+    else:
+        item.other_bins = None
+    # These three only overwrite when the lookup actually carried a value:
+    # a re-check must never wipe a learned serial prefix, a cached image or
+    # a known count just because one live call came back thin.
+    if product.get("serial_prefix"):
+        item.serial_prefix = product["serial_prefix"]
+    image = (product.get("image_url") or "")[:500]
+    if image:
+        item.image_url = image
+    qty = _mirror_qty(session, item.sku)
+    if qty is not None:
+        item.expected_qty = qty
+
+
 class BatchIn(BaseModel):
     bin: str = Field(max_length=100)
     created_by: str | None = Field(default=None, max_length=100)
@@ -2147,29 +2184,10 @@ def batch_scan(
             batch_id=batch.id, scanned_code=code[:64], qty_scanned=0
         )
         if product is not None:
-            item.resolved = True
-            item.shopify_variant_id = product.get("shopify_variant_id")
-            item.shopify_product_id = product.get("shopify_product_id")
-            item.product_title = product.get("product_title")
-            item.variant_title = product.get("variant_title")
-            item.sku = product.get("sku")
-            item.barcode = product.get("barcode")
-            item.bin_location = product.get("bin_location")
-            # "Other bins" only means something when this bin is genuinely
-            # one of the product's — otherwise it's simply on the wrong
-            # shelf, and calling that a split would be a lie.
-            saved = product.get("bin_location")
-            if bin_contains(saved, batch.bin_name):
-                others = bins_other_than(saved, batch.bin_name)
-                item.other_bins = (", ".join(others))[:255] if others else None
-            else:
-                item.other_bins = None
-            item.serial_prefix = product.get("serial_prefix")
-            item.image_url = (product.get("image_url") or "")[:500] or None
+            _apply_product_to_item(session, item, product, batch)
             # Batch labels print the store header + SKU (Astronomik naming
             # lives in Scan Station), so no per-item label name here.
             item.label_name = None
-            item.expected_qty = _mirror_qty(session, item.sku)
         else:
             item.resolved = False
             item.product_title = f"Unresolved: {code}"
@@ -2327,6 +2345,97 @@ def batch_item_reassign(
     session.commit()
     session.refresh(item)
     return {"item": item.as_dict(), "merged": False}
+
+
+@app.post(
+    "/api/batches/{batch_id}/items/{item_id}/resolve",
+    dependencies=[Depends(require_user)],
+)
+def batch_item_resolve(
+    batch_id: int, item_id: int, session: Session = Depends(get_session)
+):
+    """Look this row up in Shopify again, right now. The Check step's answer
+    to "the product had no barcode set, so I set it in Shopify — now what":
+    an unresolved row turns into a real product without re-scanning the
+    boxes, and an already-resolved row refreshes its title/bin/count.
+
+    Read-only as far as the store is concerned — nothing is written to
+    Shopify here, so this needs no write gate."""
+    batch = _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    code = (item.scanned_code or item.barcode or item.sku or "").strip()
+    if not code:
+        raise HTTPException(422, "This row has no barcode or SKU to look up.")
+
+    was_resolved = bool(item.resolved)
+    product = None
+    try:
+        product = product_by_barcode(code)
+    except HTTPException as error:
+        if error.status_code != 404:
+            raise
+
+    if product is None:
+        # Not a failure — the operator asked a question and the answer is
+        # "still nothing". Shopify's search index trails an edit by a few
+        # seconds, so trying again shortly is genuinely worth suggesting.
+        return {
+            "resolved": False,
+            "merged": False,
+            "was_resolved": was_resolved,
+            "item": item.as_dict(),
+            "message": (
+                f"Shopify still has no product with barcode or SKU {code}. "
+                "If you just changed it there, give it a few seconds and try "
+                "again — the store's search takes a moment to catch up."
+            ),
+        }
+
+    # Its other boxes may already have scanned fine under the real product:
+    # merge into that row instead of leaving two rows for one product.
+    sku = product.get("sku")
+    existing = next(
+        (
+            i for i in _batch_items(session, batch_id)
+            if i.id != item.id and i.resolved and sku and i.sku == sku
+        ),
+        None,
+    )
+    title = product.get("product_title") or sku or code
+    if existing is not None:
+        moved = item.qty_scanned
+        existing.qty_scanned += item.qty_scanned
+        existing.paired_count += item.paired_count
+        session.delete(item)
+        session.commit()
+        session.refresh(existing)
+        return {
+            "resolved": True,
+            "merged": True,
+            "was_resolved": was_resolved,
+            "item": existing.as_dict(),
+            "message": (
+                f"Resolved to {title} — its {moved} box(es) merged into the "
+                f"row already in this batch ({existing.qty_scanned} total)."
+            ),
+        }
+
+    _apply_product_to_item(session, item, product, batch)
+    session.commit()
+    session.refresh(item)
+    return {
+        "resolved": True,
+        "merged": False,
+        "was_resolved": was_resolved,
+        "item": item.as_dict(),
+        "message": (
+            f"Refreshed from Shopify ✓ — {title}."
+            if was_resolved
+            else f"Resolved to {title} ✓ — {item.qty_scanned} box(es) kept."
+        ),
+    }
 
 
 class ItemQtyIn(BaseModel):
