@@ -93,6 +93,49 @@
            without scrolling -->
       <div class="result" id="result" role="status" aria-live="polite"></div>
 
+      <!-- Case code: a barcode that means "N units of one product" -->
+      <section class="linkbox casebox" id="casebox" hidden>
+        <div class="linkbox__title" id="casebox-title">Box of multiple products</div>
+        <p class="linkbox__text" id="casebox-intro"></p>
+
+        <div id="casebox-view" hidden>
+          <div class="linkbox__product">
+            <span class="casebox__mult" id="casebox-mult"></span>
+            <img class="linkbox__img" id="casebox-img" alt="" hidden />
+            <div>
+              <div class="linkbox__ptitle" id="casebox-ptitle">—</div>
+              <p class="linkbox__text" id="casebox-pmeta"></p>
+            </div>
+          </div>
+          <p class="linkbox__text casebox__note" id="casebox-note" hidden></p>
+          <div class="linkbox__actions">
+            <button class="reset" id="casebox-edit" type="button">Edit this box</button>
+            <button class="reset" id="casebox-forget" type="button">Not a box — remove this</button>
+            <button class="print__btn" id="casebox-done" type="button">Done</button>
+          </div>
+        </div>
+
+        <div id="casebox-form" hidden>
+          <p class="linkbox__extra-label">What's inside, and how many? Enter the product's SKU or its own barcode:</p>
+          <div class="linkbox__form">
+            <input id="casebox-sku" class="linkbox__input" type="text" placeholder="SKU or barcode of the product inside" autocomplete="off" spellcheck="false" />
+            <button class="reset" id="casebox-find" type="button">Find product</button>
+          </div>
+          <p class="linkbox__text" id="casebox-found"></p>
+          <div class="linkbox__form">
+            <label class="linkbox__text" for="casebox-units">Units per box</label>
+            <input id="casebox-units" class="linkbox__input" type="number" min="2" max="500" value="8" style="max-width:90px" />
+          </div>
+          <p class="linkbox__extra-label">Scan note — shown every time this barcode is scanned, on the web and on the C72:</p>
+          <input id="casebox-notein" class="linkbox__input" type="text" maxlength="255" placeholder="e.g. Case of 8 — open before tagging" autocomplete="off" />
+          <div class="linkbox__actions">
+            <button class="print__btn" id="casebox-save" type="button">Save this box</button>
+            <button class="reset" id="casebox-cancel" type="button">Cancel</button>
+          </div>
+        </div>
+        <p class="linkbox__text" id="casebox-msg"></p>
+      </section>
+
       <!-- Multi-box filter set registration -->
       <section class="linkbox setbox" id="setbox" hidden>
         <div class="linkbox__title">Possible filter set</div>
@@ -121,6 +164,7 @@
         </div>
         <div class="linkbox__actions">
           <button class="reset" id="set-single" type="button">It's a single product</button>
+          <button class="reset" id="set-case" type="button" title="This barcode is a case holding several of one product">It's a box of multiple products</button>
           <button class="reset" id="set-cancel" type="button">Cancel</button>
         </div>
       </section>
@@ -175,6 +219,7 @@
           <button class="reset" id="alias-overwrite" type="button" hidden
                   title="Adopt the scanned barcode as this product's real barcode in Shopify, instead of keeping it as a separate linked barcode.">Replace product barcode…</button>
           <button class="reset" id="alias-unlink" type="button" hidden>Unlink this barcode</button>
+          <button class="reset" id="alias-case" type="button" title="This barcode is a case holding several of one product">It's a box of multiple products</button>
           <button class="reset" id="alias-cancel" type="button">Cancel</button>
         </div>
 

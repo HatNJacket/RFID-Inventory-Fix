@@ -162,6 +162,13 @@ def build_zpl(job: dict, encode_rfid: bool,
     else:
         header = HEADER_STORE.format(pw=pw)
 
+    # A sealed case carries ONE tag but holds several units, so the centre
+    # line has to say so ("8 x 93581") — otherwise the sticker reads as a
+    # single item. Applied last, after any preferred name has had its say.
+    case_units = job.get("case_units")
+    if case_units:
+        sku_text = f"{case_units} x {sku_text}"[:56]
+
     barcode = clean(job.get("barcode"), fallback="")
     if not barcode:
         # No barcode on file: encode the SKU instead — the app's scan field

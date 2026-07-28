@@ -39,6 +39,7 @@ from app.models import (
     Batch,
     BatchItem,
     BinMapEntry,
+    CaseCode,
     EpcCapture,
     HiddenBin,
     LabelName,
@@ -226,6 +227,135 @@ def _enrich_bin_from_shopify(
         )
 
     return product
+
+
+def _case_payload(session: Session, code: str) -> dict | None:
+    """The case behind a scanned code, with the product it contains resolved
+    fresh. Returned by every scan path so the warning follows the BARCODE
+    rather than being re-implemented per tab."""
+    row = session.get(CaseCode, code.strip())
+    if row is None:
+        return None
+    product = None
+    try:
+        product = product_by_barcode(row.sku)
+    except HTTPException:
+        product = None
+    return {
+        "barcode": row.barcode,
+        "sku": row.sku,
+        "units": row.units,
+        "scan_note": row.scan_note,
+        "product_title": (
+            (product or {}).get("product_title") or row.product_title
+        ),
+        "product": product,
+        # Ready-made one-liner so the C72 and the web never drift apart.
+        "summary": (
+            f"{row.units} x {row.sku}"
+            + (f" · {(product or {}).get('product_title')}" if product else "")
+            + (f" -> {(product or {}).get('bin_location')}"
+               if product and product.get("bin_location") else "")
+        ),
+    }
+
+
+def _case_for(session: Session, code: str | None) -> dict | None:
+    if not code:
+        return None
+    try:
+        return _case_payload(session, code)
+    except Exception as error:  # never let a case lookup break a scan
+        logger.warning("case lookup failed for %s: %s", code, error)
+        return None
+
+
+@app.get("/api/cases/{barcode}", dependencies=[Depends(require_user)])
+def get_case(barcode: str, session: Session = Depends(get_session)):
+    """Is this scanned code a case? Used by the C72's Find Bin and by any
+    client that needs the answer on its own."""
+    case = _case_payload(session, barcode)
+    if case is None:
+        raise HTTPException(404, "That barcode isn't a known case.")
+    return case
+
+
+class CaseIn(BaseModel):
+    barcode: str = Field(max_length=64)
+    # What one case contains. Always N of a single product by design.
+    sku: str = Field(max_length=100)
+    units: int = Field(ge=2, le=500)
+    scan_note: str | None = Field(default=None, max_length=255)
+    created_by: str | None = Field(default=None, max_length=100)
+
+    @field_validator("barcode", "sku")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post("/api/cases", status_code=201, dependencies=[Depends(require_user)])
+def upsert_case(payload: CaseIn, session: Session = Depends(get_session)):
+    """Record that a barcode is a case of N units of one product. Local
+    only — nothing about a case is written to Shopify."""
+    code = payload.barcode.strip()
+    # Refuse to shadow a real listing: if the code already resolves, calling
+    # it a case would quietly change what an existing barcode means.
+    existing_product = None
+    try:
+        existing_product = product_by_barcode(code)
+    except HTTPException as error:
+        if error.status_code != 404:
+            raise
+    if existing_product is not None:
+        raise HTTPException(
+            409,
+            f"{code} is already a real product "
+            f"({existing_product.get('sku')}) — a case code has to be a "
+            f"barcode Shopify doesn't know.",
+        )
+
+    product = None
+    try:
+        product = product_by_barcode(payload.sku)
+    except HTTPException as error:
+        if error.status_code != 404:
+            raise
+    if product is None:
+        raise HTTPException(
+            404, f"No product found for {payload.sku} — check the SKU."
+        )
+
+    row = session.get(CaseCode, code)
+    if row is None:
+        row = CaseCode(barcode=code, sku=product.get("sku") or payload.sku)
+        session.add(row)
+    row.sku = product.get("sku") or payload.sku
+    row.units = payload.units
+    row.scan_note = (payload.scan_note or "").strip() or None
+    row.product_title = (product.get("product_title") or "")[:255] or None
+    row.created_by = row.created_by or payload.created_by
+    row.updated_at = datetime.now(timezone.utc)
+    session.commit()
+    return {
+        "case": row.as_dict(),
+        "message": (
+            f"{code} recorded as {row.units} x {row.sku} "
+            f"({row.product_title or 'unnamed'})."
+        ),
+    }
+
+
+@app.delete("/api/cases/{barcode}", dependencies=[Depends(require_user)])
+def delete_case(barcode: str, session: Session = Depends(get_session)):
+    row = session.get(CaseCode, barcode.strip())
+    if row is None:
+        raise HTTPException(404, "No such case code.")
+    session.delete(row)
+    session.commit()
+    return {"deleted": barcode.strip()}
 
 
 @app.get(
@@ -1302,6 +1432,34 @@ def inventory_summary(session: Session = Depends(get_session)):
         ).group_by(RfidAssignment.sku, RfidAssignment.barcode)
     ).all()
 
+    # A tag on a sealed case stands for several units, so tags no longer
+    # equal units. Both numbers are reported: the total, and how it splits
+    # ("2 + 8x1" = two loose, plus one case of eight).
+    case_tags: dict = {}
+    for sku, barcode, units, n in session.execute(
+        select(
+            RfidAssignment.sku, RfidAssignment.barcode,
+            RfidAssignment.case_units, func.count().label("n"),
+        )
+        .where(RfidAssignment.case_units.isnot(None))
+        .group_by(RfidAssignment.sku, RfidAssignment.barcode,
+                  RfidAssignment.case_units)
+    ):
+        case_tags.setdefault((sku, barcode), []).append((units or 0, n))
+
+    def _units_for(r) -> dict:
+        cases = case_tags.get((r.sku, r.barcode), [])
+        if not cases:
+            return {"unit_count": r.tag_count, "unit_breakdown": None}
+        packed = sum(units * n for units, n in cases)
+        case_tag_count = sum(n for _, n in cases)
+        loose = r.tag_count - case_tag_count
+        parts = [str(loose)] + [f"{units}x{n}" for units, n in cases]
+        return {
+            "unit_count": loose + packed,
+            "unit_breakdown": " + ".join(parts),
+        }
+
     products = [
         {
             "sku": r.sku,
@@ -1310,6 +1468,7 @@ def inventory_summary(session: Session = Depends(get_session)):
             "variant_title": r.variant_title,
             "bin_location": r.bin_location,
             "tag_count": r.tag_count,
+            **_units_for(r),
             "last_assigned_at": (
                 r.last_assigned_at.isoformat() if r.last_assigned_at else None
             ),
@@ -1938,6 +2097,21 @@ def _mirror_qty(session: Session, sku: str | None) -> int | None:
         return None
 
 
+def _units_on_shelf(item: BatchItem) -> int:
+    """Stock this row represents. Loose boxes are one unit each; a sealed
+    case is one box but `case_units` units — Shopify counts the units, so
+    this is what any count comparison must use."""
+    return item.qty_scanned + item.case_count * (item.case_units or 0)
+
+
+def _units_breakdown(item: BatchItem) -> str | None:
+    """"2 + 8x1" — loose units, then units-per-case times cases. Only when a
+    case is involved; otherwise the single total says everything."""
+    if not item.case_count or not item.case_units:
+        return None
+    return f"{item.qty_scanned} + {item.case_units}x{item.case_count}"
+
+
 def _apply_product_to_item(
     session: Session, item: BatchItem, product: dict, batch: Batch
 ) -> None:
@@ -2197,6 +2371,9 @@ def get_batch(batch_id: int, session: Session = Depends(get_session)):
 
 class BatchScanIn(BaseModel):
     code: str = Field(max_length=64)
+    # Only meaningful when the code is a known case. Absent = the operator
+    # hasn't been asked yet, so the scan pauses and asks.
+    case_action: Literal["open", "sealed"] | None = None
 
     @field_validator("code")
     @classmethod
@@ -2223,9 +2400,26 @@ def batch_scan(
         raise HTTPException(409, f"This batch is {batch.status}.")
 
     code = payload.code
+
+    # A case code is not a product. Ask once whether the box is being opened,
+    # because the answer changes the count, the labels and the tags — then
+    # carry on as a scan of the product INSIDE.
+    case = _case_for(session, code)
+    if case is not None and payload.case_action is None:
+        return {
+            "needs_case_decision": True,
+            "case": case,
+            "item": None,
+            "message": (
+                f"{code} is a case of {case['units']} x {case['sku']}"
+                + (f" — {case['scan_note']}" if case.get("scan_note") else "")
+            ),
+        }
+
+    lookup = case["sku"] if case is not None else code
     product = None
     try:
-        product = product_by_barcode(code)
+        product = product_by_barcode(lookup)
     except HTTPException as error:
         if error.status_code != 404:
             raise
@@ -2250,7 +2444,11 @@ def batch_scan(
 
     if item is None:
         item = BatchItem(
-            batch_id=batch.id, scanned_code=code[:64], qty_scanned=0
+            batch_id=batch.id,
+            # Remember the product's own code, not the case's, so the row
+            # re-checks and reprints against something Shopify recognises.
+            scanned_code=(lookup if case is not None else code)[:64],
+            qty_scanned=0,
         )
         if product is not None:
             _apply_product_to_item(session, item, product, batch)
@@ -2269,7 +2467,16 @@ def batch_scan(
         if not item.serial_prefix:
             item.serial_prefix = product["serial_prefix"]
 
-    item.qty_scanned += 1
+    if case is None:
+        item.qty_scanned += 1
+    elif payload.case_action == "open":
+        # Opened: the units go on the shelf individually, so they behave
+        # exactly like that many loose boxes.
+        item.qty_scanned += case["units"]
+    else:
+        # Sealed: ONE box, one label, one tag — but worth `units` of stock.
+        item.case_count += 1
+        item.case_units = case["units"]
     session.commit()
     session.refresh(item)
 
@@ -2288,6 +2495,9 @@ def batch_scan(
         "item": item.as_dict(),
         "bin_mismatch": bin_mismatch,
         "serial_note": (product or {}).get("serial_note"),
+        # Present whenever a case was scanned, so the note shows here too.
+        "case": case,
+        "case_action": payload.case_action if case is not None else None,
     }
 
 
@@ -2304,7 +2514,11 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
     _get_batch(session, batch_id)
     flagged = []
     for item in _batch_items(session, batch_id):
-        if item.qty_scanned == 0 and item.paired_count == 0:
+        if (
+            item.qty_scanned == 0
+            and item.case_count == 0
+            and item.paired_count == 0
+        ):
             continue  # untouched pre-seeded rows need no checking
         flags = []
         candidates: list[dict] = []
@@ -2328,7 +2542,7 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                     candidates = []
             if (
                 item.expected_qty is not None
-                and item.qty_scanned != item.expected_qty
+                and _units_on_shelf(item) != item.expected_qty
             ):
                 flags.append("count-mismatch")
             if item.serial_prefix:
@@ -2837,11 +3051,19 @@ def batch_queue_labels(
                 skipped_bundles.append(item.product_title or item.sku or "?")
             continue
         label_name, label_placement = _label_name_for(session, item)
-        for _ in range(item.qty_scanned):
+        # One label per loose box, plus one per sealed case. The case labels
+        # carry their unit count so the sticker reads "8 x 93581" and nobody
+        # mistakes the box for a single item.
+        per_label_units = (
+            [None] * item.qty_scanned
+            + [item.case_units] * item.case_count
+        )
+        for units in per_label_units:
             jobs.append(
                 PrintJob(
                     epc=_new_epc(),
                     status="pending",
+                    case_units=units,
                     batch_id=batch.id,
                     shopify_variant_id=item.shopify_variant_id,
                     shopify_product_id=item.shopify_product_id,
@@ -2913,6 +3135,12 @@ def batch_pair(
     if not item.resolved:
         raise HTTPException(422, "That item never resolved to a product.")
 
+    # Labels were queued loose boxes first, then sealed cases; pairing walks
+    # the same order, so once the loose ones are tied the remaining tags are
+    # the case labels and each stands for `case_units` units.
+    on_a_case = (
+        item.case_count > 0 and item.paired_count >= item.qty_scanned
+    )
     assignment = RfidAssignment(
         rfid_id=payload.epc,
         shopify_variant_id=item.shopify_variant_id,
@@ -2922,6 +3150,7 @@ def batch_pair(
         sku=item.sku,
         barcode=item.barcode,
         bin_location=batch.bin_name,
+        case_units=item.case_units if on_a_case else None,
         assigned_by=payload.created_by,
         batch_id=batch.id,
     )
@@ -3113,21 +3342,25 @@ def batch_complete(
             continue
         if (
             item.expected_qty is not None
-            and item.qty_scanned != item.expected_qty
+            and _units_on_shelf(item) != item.expected_qty
         ):
             tasks.append(ReviewTask(
                 category="inventory-check",
                 sku=item.sku,
                 product_title=name,
                 detail=(
-                    f"Bin {batch.bin_name}: {item.qty_scanned} box(es) "
-                    f"scanned but Shopify on-hand is {item.expected_qty}. "
+                    f"Bin {batch.bin_name}: {_units_on_shelf(item)} unit(s) "
+                    + (f"({_units_breakdown(item)}) "
+                       if _units_breakdown(item) else "")
+                    + f"counted but Shopify on-hand is {item.expected_qty}. "
                     f"Recommend a product-specific count."
                 )[:500],
                 batch_id=batch.id,
                 created_by=payload.created_by,
             ))
-        if item.paired_count < item.qty_scanned:
+        # Labels (and therefore tags) = loose boxes + sealed cases, which is
+        # not the unit count once a case is involved.
+        if item.paired_count < item.qty_scanned + item.case_count:
             tasks.append(ReviewTask(
                 category="pairing-incomplete",
                 sku=item.sku,

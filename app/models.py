@@ -42,6 +42,10 @@ class RfidAssignment(Base):
     sku: Mapped[str | None] = mapped_column(String(100))
     barcode: Mapped[str | None] = mapped_column(String(64), index=True)
     bin_location: Mapped[str | None] = mapped_column(String(100))
+    # Units this ONE tag stands for. None/1 = a single item, the normal
+    # case; 8 = the tag is on a sealed case of 8. Counting reads units,
+    # display keeps the two apart ("10" = "2 + 8x1").
+    case_units: Mapped[int | None] = mapped_column(Integer)
 
     assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -71,6 +75,7 @@ class RfidAssignment(Base):
             "sku": self.sku,
             "barcode": self.barcode,
             "bin_location": self.bin_location,
+            "case_units": self.case_units,
             "assigned_at": (
                 self.assigned_at.isoformat() if self.assigned_at else None
             ),
@@ -242,6 +247,10 @@ class PrintJob(Base):
     # the SKU line above the barcode. NULL = header (back-compat).
     label_placement: Mapped[str | None] = mapped_column(String(10))
 
+    # Units this label's tag stands for. Set only for a sealed case, where
+    # the label has to say "8 x 93581" so nobody treats the box as one item.
+    case_units: Mapped[int | None] = mapped_column(Integer)
+
     requested_by: Mapped[str | None] = mapped_column(String(100))
     error: Mapped[str | None] = mapped_column(String(500))
 
@@ -270,6 +279,8 @@ class PrintJob(Base):
             "shopify_product_id": self.shopify_product_id,
             "label_name": self.label_name,
             "label_placement": self.label_placement,
+            # The agent prints "8 x SKU" when this is set.
+            "case_units": self.case_units,
             "requested_by": self.requested_by,
             "error": self.error,
             "created_at": (
@@ -375,6 +386,17 @@ class BatchItem(Base):
     # with its own verdict.
     kind: Mapped[str | None] = mapped_column(String(16))
 
+    # Sealed cases counted into this row. Until now qty_scanned was boxes
+    # AND labels AND tags AND units all at once; a case of 8 breaks that —
+    # it is one box, one label, one tag, but eight units. So loose boxes
+    # stay in qty_scanned and sealed cases are counted separately:
+    #   units  = qty_scanned + case_count * case_units
+    #   labels = qty_scanned + case_count
+    case_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    case_units: Mapped[int | None] = mapped_column(Integer)
+
     def as_dict(self) -> dict:
         return {
             "id": self.id,
@@ -396,6 +418,13 @@ class BatchItem(Base):
             "expected_qty": self.expected_qty,
             "paired_count": self.paired_count,
             "kind": self.kind,
+            "case_count": self.case_count,
+            "case_units": self.case_units,
+            # Precomputed so every client shows the same two numbers rather
+            # than each reinventing the arithmetic.
+            "units_total": self.qty_scanned
+            + self.case_count * (self.case_units or 0),
+            "labels_total": self.qty_scanned + self.case_count,
         }
 
 
@@ -445,6 +474,45 @@ class LabelName(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class CaseCode(Base):
+    """A barcode that is not a listing at all: the manufacturer's case /
+    inner-pack code, meaning "N units of one product". Scanning it used to
+    come back empty, which is how a worker ends up holding a box nobody can
+    place.
+
+    Kept local because these codes genuinely aren't in Shopify (verified for
+    0234935810 — a case of 8 × 93581, whose own barcode is 050234935814).
+    Defining one never writes anything to the store."""
+
+    __tablename__ = "rfid_case_codes"
+
+    barcode: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # What's inside, and how many. One product per case by design.
+    sku: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    units: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Free text shown on EVERY surface that resolves this code — the whole
+    # point is that the warning follows the barcode, not the tab.
+    scan_note: Mapped[str | None] = mapped_column(String(255))
+    product_title: Mapped[str | None] = mapped_column(String(255))
+    created_by: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def as_dict(self) -> dict:
+        return {
+            "barcode": self.barcode,
+            "sku": self.sku,
+            "units": self.units,
+            "scan_note": self.scan_note,
+            "product_title": self.product_title,
+            "created_by": self.created_by,
+        }
 
 
 class ProductKind(Base):

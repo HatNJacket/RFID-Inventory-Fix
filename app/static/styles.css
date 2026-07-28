@@ -829,6 +829,28 @@ body {
   background: var(--warn-bg);
 }
 .kindrow__what { flex: 1 1 auto; min-width: 180px; }
+
+/* Cases: one tag, several units. The breakdown is deliberately quieter than
+   the total — the total is the number that matters, the split is the
+   explanation, and both carry a hover hint in words. */
+.inv__cases,
+.bcell__cases {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+  cursor: help;
+}
+.bcell__cases { margin-top: 2px; }
+/* "8 ×" ahead of the normal product preview. */
+.casebox__mult {
+  font-size: 22px;
+  font-weight: 750;
+  color: var(--accent);
+  font-family: var(--mono);
+  align-self: center;
+  padding-right: 4px;
+}
+.casebox__note { color: var(--warn-ink); }
 .kindrow .reset { padding: 5px 10px; font-size: 12px; }
 
 /* batch cells restyled to mirror the C72 app: image | name + labeled

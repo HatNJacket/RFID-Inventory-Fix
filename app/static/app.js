@@ -288,6 +288,16 @@ el.barcode.addEventListener("keydown", async (event) => {
       const body = await res.json().catch(() => ({}));
       const info =
         body.detail && typeof body.detail === "object" ? body.detail : null;
+      // A known case code answers the question outright — show what's in
+      // the box instead of any "unknown barcode" window.
+      const known = await apiFetch(
+        `/api/cases/${encodeURIComponent(barcode)}`
+      ).catch(() => null);
+      if (known && known.ok) {
+        showCaseScan(await known.json());
+        setResult("That's a box of multiple products.", "ok");
+        return;
+      }
       // Unknown serial-shaped scans might be one filter of a multi-box
       // set — offer the set flow first (one click bails to the normal
       // unknown-barcode window). Known-prefix problems keep their window.
@@ -446,6 +456,182 @@ el.serialLabelInput.addEventListener("keydown", (event) => {
     // Same idea as after printing: next action is scanning the tag.
     el.rfid.focus();
   }
+});
+
+// --- Case codes -------------------------------------------------------------
+// A barcode that isn't a listing at all but the manufacturer's case code:
+// "8 x 93581". Scanning one used to come back empty, which is how a box ends
+// up in someone's hands with nowhere to put it. The record lives against the
+// BARCODE, so the note follows the scan onto every surface instead of each
+// tab inventing its own message.
+let caseCode = null;      // the code being viewed/defined
+let caseProduct = null;   // the product chosen as contents
+
+function closeCasebox() {
+  document.getElementById("casebox").hidden = true;
+  caseCode = null;
+  caseProduct = null;
+}
+
+function showCaseScan(data) {
+  closeLinkbox();
+  closeSetbox();
+  caseCode = data.barcode;
+  const box = document.getElementById("casebox");
+  box.hidden = false;
+  document.getElementById("casebox-view").hidden = false;
+  document.getElementById("casebox-form").hidden = true;
+  document.getElementById("casebox-msg").textContent = "";
+  document.getElementById("casebox-title").textContent =
+    "Box of multiple products";
+  document.getElementById("casebox-intro").textContent =
+    `${data.barcode} isn't a product of its own — it's a box holding ` +
+    `${data.units} of one.`;
+  // "8 x" in front of the normal preview, per the product it contains.
+  document.getElementById("casebox-mult").textContent = `${data.units} ×`;
+  const p = data.product || {};
+  const img = document.getElementById("casebox-img");
+  if (p.image_url) {
+    img.src = p.image_url;
+    img.hidden = false;
+  } else {
+    img.hidden = true;
+    img.removeAttribute("src");
+  }
+  document.getElementById("casebox-ptitle").textContent =
+    data.product_title || data.sku;
+  document.getElementById("casebox-pmeta").textContent =
+    `SKU: ${data.sku}` +
+    (p.bin_location ? ` · Bin: ${p.bin_location}` : "") +
+    (p.barcode ? ` · Item barcode: ${p.barcode}` : "");
+  const note = document.getElementById("casebox-note");
+  note.hidden = !data.scan_note;
+  note.textContent = data.scan_note ? `⚠ ${data.scan_note}` : "";
+  batchSound("other");
+}
+
+function openCaseForm(code, existing) {
+  closeLinkbox();
+  closeSetbox();
+  caseCode = code;
+  caseProduct = null;
+  const box = document.getElementById("casebox");
+  box.hidden = false;
+  document.getElementById("casebox-view").hidden = true;
+  document.getElementById("casebox-form").hidden = false;
+  document.getElementById("casebox-msg").textContent = "";
+  document.getElementById("casebox-found").textContent = "";
+  document.getElementById("casebox-title").textContent =
+    existing ? "Edit this box" : "Box of multiple products";
+  document.getElementById("casebox-intro").textContent =
+    `${code} — record what's inside so every scan of it says so.`;
+  document.getElementById("casebox-sku").value = existing ? existing.sku : "";
+  document.getElementById("casebox-units").value = existing
+    ? existing.units
+    : 8;
+  document.getElementById("casebox-notein").value =
+    existing && existing.scan_note ? existing.scan_note : "";
+  document.getElementById("casebox-sku").focus();
+}
+
+async function caseFindProduct() {
+  const term = document.getElementById("casebox-sku").value.trim();
+  const found = document.getElementById("casebox-found");
+  if (!term) return;
+  found.textContent = "Looking up…";
+  try {
+    const p = await apiJson(
+      `/api/products/by-barcode/${encodeURIComponent(term)}`
+    );
+    caseProduct = p;
+    found.textContent =
+      `✓ ${p.product_title} · SKU ${p.sku}` +
+      (p.bin_location ? ` · Bin ${p.bin_location}` : "");
+  } catch (err) {
+    caseProduct = null;
+    found.textContent = `No product found for "${term}".`;
+  }
+}
+
+document.getElementById("casebox-find").addEventListener("click", caseFindProduct);
+document.getElementById("casebox-sku").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    caseFindProduct();
+  }
+});
+
+document.getElementById("casebox-save").addEventListener("click", async () => {
+  const msg = document.getElementById("casebox-msg");
+  const sku = (caseProduct && caseProduct.sku)
+    || document.getElementById("casebox-sku").value.trim();
+  if (!sku) {
+    msg.textContent = "Say which product is inside first.";
+    return;
+  }
+  try {
+    const res = await postJson("/api/cases", {
+      barcode: caseCode,
+      sku,
+      units: Number(document.getElementById("casebox-units").value) || 0,
+      scan_note:
+        document.getElementById("casebox-notein").value.trim() || null,
+      created_by: operatorEl.value.trim() || null,
+    });
+    msg.textContent = res.message;
+    const fresh = await apiJson(`/api/cases/${encodeURIComponent(caseCode)}`);
+    showCaseScan(fresh);
+    document.getElementById("casebox-msg").textContent = res.message;
+  } catch (err) {
+    msg.textContent = err.message;
+  }
+});
+
+document.getElementById("casebox-edit").addEventListener("click", async () => {
+  try {
+    const c = await apiJson(`/api/cases/${encodeURIComponent(caseCode)}`);
+    openCaseForm(caseCode, c);
+  } catch (err) {
+    document.getElementById("casebox-msg").textContent = err.message;
+  }
+});
+
+document.getElementById("casebox-forget").addEventListener("click", async () => {
+  if (
+    !confirm(
+      `Stop treating ${caseCode} as a box of multiple products?\n\n` +
+        `Scanning it will go back to coming up empty.`
+    )
+  )
+    return;
+  try {
+    await apiJson(`/api/cases/${encodeURIComponent(caseCode)}`, {
+      method: "DELETE",
+    });
+    closeCasebox();
+    resetFlow();
+    setResult("That barcode is no longer a box.", "ok");
+  } catch (err) {
+    document.getElementById("casebox-msg").textContent = err.message;
+  }
+});
+
+// Both unknown-barcode windows can hand off to the case form — that is how
+// a new case code gets recorded in the first place.
+document.getElementById("set-case").addEventListener("click", () => {
+  openCaseForm(setSerials[0], null);
+});
+document.getElementById("alias-case").addEventListener("click", () => {
+  openCaseForm(aliasCandidate || el.barcode.value.trim(), null);
+});
+
+document.getElementById("casebox-cancel").addEventListener("click", () => {
+  closeCasebox();
+  resetFlow();
+});
+document.getElementById("casebox-done").addEventListener("click", () => {
+  closeCasebox();
+  resetFlow();
 });
 
 // --- Foreign-barcode linking ------------------------------------------------
@@ -1525,7 +1711,13 @@ function renderInventory() {
         <td>${p.bin_location && p.bin_location !== "No bin assigned"
           ? `<span class="inventory__bin">${escapeHtml(p.bin_location)}</span>`
           : "—"}</td>
-        <td class="num">${p.tag_count}</td>
+        <td class="num">${
+          p.unit_breakdown
+            ? `${p.unit_count}<div class="inv__cases" title="${escapeHtml(
+                caseHint(p)
+              )}">${escapeHtml(p.unit_breakdown)}</div>`
+            : p.tag_count
+        }</td>
         <td class="num">${p.shopify_qty ?? "—"}</td>
         <td>${escapeHtml(when)}</td>
       </tr>`;
@@ -2276,6 +2468,29 @@ function boxSlots(item) {
   return Math.max(count(item.bin_location), 1 + count(item.other_bins));
 }
 
+// Spell the "2 + 8x1" shorthand out in words, for the hover hint.
+function caseHint(p) {
+  const parts = String(p.unit_breakdown || "").split(" + ");
+  const loose = parts.shift();
+  const cases = parts
+    .map((seg) => {
+      const [units, n] = seg.split("x");
+      return `${n} box${n === "1" ? "" : "es"} of ${units}`;
+    })
+    .join(", ");
+  return (
+    `${p.unit_count} units on the shelf: ${loose} on their own, plus ` +
+    `${cases}. Shopify counts ${p.unit_count}.`
+  );
+}
+
+// "2 + 8x1" — loose units, then units-per-case times cases. Null unless a
+// sealed case is involved, because otherwise the total says it all.
+function unitBreakdown(item) {
+  if (!item || !item.case_count || !item.case_units) return null;
+  return `${item.qty_scanned} + ${item.case_units}x${item.case_count}`;
+}
+
 function itemCard(item, mode) {
   const li = document.createElement("li");
   li.className = "bcell";
@@ -2285,17 +2500,21 @@ function itemCard(item, mode) {
     if (item.qty_scanned > 0 && item.paired_count >= item.qty_scanned)
       li.classList.add("bcell--exact");
   } else if (item.expected_qty != null) {
-    if (item.qty_scanned === item.expected_qty && item.qty_scanned > 0)
+    // Compare UNITS to Shopify's on-hand — a sealed case is one box but
+    // several units, so boxes would read short.
+    const units = item.units_total != null ? item.units_total : item.qty_scanned;
+    if (units === item.expected_qty && units > 0)
       li.classList.add("bcell--exact");
-    else if (item.qty_scanned > item.expected_qty)
-      li.classList.add("bcell--over");
+    else if (units > item.expected_qty) li.classList.add("bcell--over");
   }
+  const units = item.units_total != null ? item.units_total : item.qty_scanned;
+  const labels = item.labels_total != null ? item.labels_total : item.qty_scanned;
   const tracker =
     mode === "pair"
-      ? `${item.paired_count}/${Math.max(item.qty_scanned, item.paired_count)}`
+      ? `${item.paired_count}/${Math.max(labels, item.paired_count)}`
       : item.expected_qty != null
-        ? `${item.qty_scanned}/${item.expected_qty}`
-        : `${item.qty_scanned}`;
+        ? `${units}/${item.expected_qty}`
+        : `${units}`;
   const barcode = item.barcode || item.scanned_code;
   li.innerHTML = `
     ${
@@ -2313,6 +2532,13 @@ function itemCard(item, mode) {
             : "⚠ unknown barcode"
       }</div>
       ${barcode ? `<div class="bcell__meta">Barcode: ${escapeHtml(barcode)}</div>` : ""}
+      ${
+        unitBreakdown(item)
+          ? `<div class="bcell__meta bcell__cases" title="${escapeHtml(
+              `${item.qty_scanned} loose box(es) plus ${item.case_count} sealed case(s) of ${item.case_units} — ${item.labels_total} label(s) in total`
+            )}">${escapeHtml(unitBreakdown(item))} — ${item.labels_total} label(s)</div>`
+          : ""
+      }
       ${
         item.other_bins
           ? `<div class="bcell__meta bcell__split">${
@@ -2348,7 +2574,26 @@ bEl.scan.addEventListener("keydown", async (event) => {
   if (!code || !batch) return;
   setBatchResult("Looking up…", "busy");
   try {
-    const data = await postJson(`/api/batches/${batch.id}/scan`, { code });
+    let data = await postJson(`/api/batches/${batch.id}/scan`, { code });
+    // A case code pauses the scan to ask one question, because opening the
+    // box or not changes the count, the labels and the tags.
+    if (data.needs_case_decision) {
+      batchSound("other");
+      const c = data.case;
+      const opened = confirm(
+        `${c.barcode} is a box of ${c.units} × ${c.sku}\n` +
+          `${c.product_title || ""}\n` +
+          (c.scan_note ? `\n⚠ ${c.scan_note}\n` : "") +
+          `\nAre you opening it?\n\n` +
+          `OK  — opened: counts ${c.units} units and prints ${c.units} labels.\n` +
+          `Cancel — left sealed: counts ${c.units} units but prints ONE ` +
+          `label reading "${c.units} x ${c.sku}".`
+      );
+      data = await postJson(`/api/batches/${batch.id}/scan`, {
+        code,
+        case_action: opened ? "open" : "sealed",
+      });
+    }
     const item = data.item;
     const existing = batchItems.findIndex((i) => i.id === item.id);
     const wasListed = existing >= 0;
@@ -2369,6 +2614,16 @@ bEl.scan.addEventListener("keydown", async (event) => {
       setBatchResult(
         `⚠ ${data.serial_note} — ${itemDisplayName(item)}: ${item.qty_scanned} scanned.`,
         "err"
+      );
+    } else if (data.case) {
+      // Say both numbers: a case makes units and labels diverge.
+      setBatchResult(
+        (data.case.scan_note ? `⚠ ${data.case.scan_note} — ` : "") +
+          `${itemDisplayName(item)} — ${item.units_total} unit(s)` +
+          (unitBreakdown(item) ? ` (${unitBreakdown(item)})` : "") +
+          `, ${item.labels_total} label(s)` +
+          (data.case_action === "sealed" ? " — box left sealed." : "."),
+        data.case.scan_note ? "err" : "ok"
       );
     } else {
       setBatchResult(
