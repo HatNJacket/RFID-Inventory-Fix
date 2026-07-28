@@ -1916,6 +1916,11 @@ async function loadBinBoard() {
 }
 
 let showHiddenBins = false;
+// Odd-named bins (not the usual "B19-2" shape) are a known backlog — 76 of
+// them last count — and they crowd out the bins actually worth working.
+// Remembered, because someone clearing normal bins wants them gone every
+// session, not just this one.
+let hideOddBins = localStorage.getItem("hideOddBins") === "1";
 let binSort = "products";
 
 // Eye / crossed-out eye, drawn inline so there's no icon dependency.
@@ -1963,9 +1968,16 @@ function renderBinBoard() {
     binBoard.todo.filter(
       (b) =>
         (showHiddenBins || !b.hidden) &&
+        (!hideOddBins || !b.malformed) &&
         (!q || b.bin.toLowerCase().includes(q))
     )
   );
+  // How many the odd-name filter is actually holding back right now — the
+  // store-wide malformed_count includes done and hidden bins, so quoting it
+  // here would claim to be hiding bins that were never in this list.
+  const oddInList = binBoard.todo.filter(
+    (b) => b.malformed && (showHiddenBins || !b.hidden)
+  ).length;
   countEl.textContent =
     `(${binBoard.todo_count} of ${binBoard.total_bins} left · ` +
     `${binBoard.done_bins} done` +
@@ -1980,14 +1992,24 @@ function renderBinBoard() {
     : `${ICON_EYE}<span>Show hidden${
         binBoard.hidden_count ? ` (${binBoard.hidden_count})` : ""
       }</span>`;
+  const oddBtn = document.getElementById("binboard-oddfilter");
+  oddBtn.innerHTML = hideOddBins
+    ? `${ICON_EYE}<span>Show odd names${oddInList ? ` (${oddInList})` : ""}</span>`
+    : `${ICON_EYE_OFF}<span>Hide odd names${
+        oddInList ? ` (${oddInList})` : ""
+      }</span>`;
+  // Nothing to offer when every bin is well named.
+  oddBtn.hidden = !oddInList && !hideOddBins;
   list.innerHTML = "";
   if (!rows.length) {
     list.innerHTML = `<li class="recent__empty">${
       q
         ? "No bins match that."
-        : binBoard.hidden_count && !showHiddenBins
-          ? `Nothing left to do — ${binBoard.hidden_count} bin(s) are hidden.`
-          : "Every bin has been done ✓"
+        : hideOddBins && oddInList
+          ? `Nothing left but ${oddInList} odd-named bin(s), which are hidden.`
+          : binBoard.hidden_count && !showHiddenBins
+            ? `Nothing left to do — ${binBoard.hidden_count} bin(s) are hidden.`
+            : "Every bin has been done ✓"
     }</li>`;
     return;
   }
@@ -2054,6 +2076,12 @@ function renderBinBoard() {
 
 document.getElementById("binboard-showhidden").addEventListener("click", () => {
   showHiddenBins = !showHiddenBins;
+  renderBinBoard();
+});
+
+document.getElementById("binboard-oddfilter").addEventListener("click", () => {
+  hideOddBins = !hideOddBins;
+  localStorage.setItem("hideOddBins", hideOddBins ? "1" : "0");
   renderBinBoard();
 });
 
