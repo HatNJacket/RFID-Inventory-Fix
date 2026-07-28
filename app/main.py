@@ -358,6 +358,66 @@ def delete_case(barcode: str, session: Session = Depends(get_session)):
     return {"deleted": barcode.strip()}
 
 
+def _drop_stale_mirror_matches(
+    code: str, products: list[dict], allow_empty: bool = False
+) -> list[dict]:
+    """Discard TELCAN matches whose barcode the live catalog contradicts.
+
+    The mirror's sync has been dead for months, so it can still hold a
+    barcode that has since moved to another product — 93406 carrying
+    93405's barcode made scanning the Sony adapter resolve to the Canon,
+    and made the pair look like one item. The bin map IS rebuilt from live
+    Shopify, so when it knows that SKU's barcode and that barcode is not
+    what was just scanned, the mirror's claim is provably out of date.
+
+    Only applies to matches made BY barcode: a lookup by SKU legitimately
+    returns a product whose barcode differs from the search term."""
+    if not products or not code:
+        return products
+    wanted = code.strip()
+    by_barcode = [
+        p for p in products
+        if (p.get("barcode") or "").strip() == wanted
+    ]
+    if not by_barcode:
+        return products          # matched by SKU/alias — nothing to check
+    try:
+        from app.database import get_engine
+
+        with Session(get_engine()) as session:
+            live: dict = {}
+            for sku, bc in session.execute(
+                select(BinMapEntry.sku, BinMapEntry.barcode)
+                .where(BinMapEntry.sku.isnot(None))
+            ):
+                if sku and sku not in live:
+                    live[sku] = (bc or "").strip()
+    except Exception as error:
+        logger.warning("stale-mirror check unavailable: %s", error)
+        return products
+
+    kept = []
+    for p in products:
+        sku = (p.get("sku") or "").strip()
+        matched_by_barcode = (p.get("barcode") or "").strip() == wanted
+        known = live.get(sku)
+        if matched_by_barcode and known and known != wanted:
+            logger.info(
+                "dropping stale mirror match: %s claims barcode %s but the "
+                "live catalog has %s", sku, wanted, known
+            )
+            continue
+        kept.append(p)
+    # Single-lookup callers WANT an empty result: it drops them through to
+    # the live Shopify lookup, which has the right answer. The candidate
+    # list is different — if the live catalog disagreed with every option,
+    # showing the mirror's guesses plus the ambiguity flag beats showing
+    # nothing at all.
+    if not kept and not allow_empty:
+        return products
+    return kept
+
+
 @app.get(
     "/api/products/by-barcode/{barcode}",
     dependencies=[Depends(require_user)],
@@ -376,6 +436,12 @@ def product_by_barcode(barcode: str):
         try:
             product = _lookup_db(barcode)
 
+            # The mirror can hand back a product whose barcode has since
+            # moved elsewhere; the live-sourced bin map catches that.
+            if product is not None and not _drop_stale_mirror_matches(
+                barcode, [product], allow_empty=True
+            ):
+                product = None
             if product is not None:
                 return _enrich_bin_from_shopify(
                     product=product,
@@ -533,6 +599,9 @@ def products_by_barcode_all(code: str) -> list[dict]:
 
             with Session(get_engine()) as session:
                 candidates = catalog.lookup_barcode_all(session, code)
+            # A stale mirror barcode makes two unrelated products look like
+            # one listing with two variants; the live bin map settles it.
+            candidates = _drop_stale_mirror_matches(code, candidates)
         except Exception as error:
             logger.warning("TELCAN multi-lookup failed: %s", error)
     if not candidates and mode in ("auto", "api") and api_ok:
