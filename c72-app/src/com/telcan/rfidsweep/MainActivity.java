@@ -173,6 +173,10 @@ public class MainActivity extends Activity {
         int caseUnits;
         int unitsTotal;
         int labelsTotal;
+        // "Couldn't do this one": no barcode, wrapped, damaged label. Local
+        // to the batch; never touches a quantity anywhere.
+        boolean skipped;
+        String skipReason;
 
         static BItem from(JSONObject o) {
             BItem b = new BItem();
@@ -203,6 +207,9 @@ public class MainActivity extends Activity {
             // Fall back to the box count for servers that predate cases.
             b.unitsTotal = o.optInt("units_total", b.qty);
             b.labelsTotal = o.optInt("labels_total", b.qty);
+            b.skipped = o.optBoolean("skipped", false);
+            b.skipReason = o.isNull("skip_reason") ? null
+                    : o.optString("skip_reason");
             return b;
         }
 
@@ -852,6 +859,7 @@ public class MainActivity extends Activity {
     private Button editDropBtn;
     private Button editFindBtn;
     private Button editRecommendBtn;
+    private Button editSkipBtn;
 
     private void buildItemEditor(FrameLayout outer) {
         editScrim = new FrameLayout(this);
@@ -983,6 +991,15 @@ public class MainActivity extends Activity {
         editRecommendBtn = smallBtn("SHOW RECOMMENDED");
         editRecommendBtn.setOnClickListener(v -> loadOddCandidates(true));
         mid.addView(editRecommendBtn);
+
+        // "I can't do this one." Keeps the row and the reason; prints no
+        // label; changes no count anywhere.
+        editSkipBtn = smallBtn("CAN'T SCAN — SKIP");
+        editSkipBtn.setOnClickListener(v -> {
+            if (editEntry != null && editEntry.item.skipped) setItemSkip(false, null);
+            else askSkipReason();
+        });
+        mid.addView(editSkipBtn);
 
         editDropBtn = smallBtn("REMOVE THIS SCAN");
         editDropBtn.setOnClickListener(v -> dropItemFromBatch(true));
@@ -1127,8 +1144,14 @@ public class MainActivity extends Activity {
             editBinText.setText("On this shelf (" + batchBin + ") but the "
                     + "system has it in " + it.binLocation + ".");
         }
-        editLabelRow.setVisibility(it.resolved ? View.VISIBLE : View.GONE);
+        editLabelRow.setVisibility(
+                it.resolved && !it.skipped ? View.VISIBLE : View.GONE);
         editDropBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
+        // Only a real product can be skipped; an unknown barcode already has
+        // its own rescue route.
+        editSkipBtn.setVisibility(it.resolved ? View.VISIBLE : View.GONE);
+        editSkipBtn.setText(it.skipped
+                ? "PUT IT BACK IN THE BATCH" : "CAN'T SCAN — SKIP");
         // Only an unresolved row has a barcode to give away.
         editFindBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
         editRecommendBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
@@ -2490,7 +2513,15 @@ public class MainActivity extends Activity {
                     : (b.resolved ? "no SKU" : "⚠ unknown barcode"));
             String flags = checkFlagText.get(b.id);
             String bc = b.barcode != null ? b.barcode : b.scannedCode;
-            if (inBatch() && step == STEP_CHECK && flags != null) {
+            if (b.skipped) {
+                // Skipped rows read as a decision, in every step - the whole
+                // point is that it stays visible rather than looking unscanned.
+                h.card.setBackgroundColor(Color.parseColor("#f0f0f0"));
+                h.bc.setVisibility(View.VISIBLE);
+                h.bc.setText("SKIPPED"
+                        + (b.skipReason == null || b.skipReason.isEmpty()
+                           ? "" : " — " + b.skipReason));
+            } else if (inBatch() && step == STEP_CHECK && flags != null) {
                 h.bc.setVisibility(View.VISIBLE);
                 h.bc.setText(flags);
             } else if (bc != null && !bc.isEmpty()) {
@@ -3021,6 +3052,75 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     beep(SOUND_ERR);
                     editMsg.setText("Could not write it: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    // ------------------------------------------------- can't-scan / skip ---
+    // Loose, bubble-wrapped, no readable barcode - you can see a box but you
+    // can't say what it is. Marking it skipped keeps the row and the reason,
+    // prints no label, and holds nothing up. It does NOT touch any count:
+    // "I couldn't check this" is not "there are none of these", and writing
+    // a quantity from a guess is how stock records get wrecked.
+    private static final String[] SKIP_REASONS = {
+        "No barcode on the box",
+        "Wrapped — can't identify it",
+        "Barcode damaged / unreadable",
+        "Can't reach it",
+        "Other",
+    };
+
+    private void askSkipReason() {
+        if (editEntry == null) return;
+        new AlertDialog.Builder(this)
+                .setTitle("Why can't it be scanned?")
+                .setItems(SKIP_REASONS, (d, which) ->
+                        confirmSkip(SKIP_REASONS[which]))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmSkip(String reason) {
+        new AlertDialog.Builder(this)
+                .setTitle("Skip this product?")
+                .setMessage(reason + "\n\nIt stays on the list with that "
+                        + "reason, gets no label, and won't hold up the "
+                        + "batch.\n\nNothing is counted and no quantity "
+                        + "changes — in Shopify or here. It comes back as a "
+                        + "review task when the bin is closed.")
+                .setPositiveButton("Skip it", (d, w) -> setItemSkip(true, reason))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void setItemSkip(boolean skipped, String reason) {
+        if (editEntry == null) return;
+        final int itemId = editEntry.item.id;
+        editMsg.setText(skipped ? "Marking as skipped…" : "Putting it back…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject().put("skipped", skipped);
+                if (reason != null) body.put("reason", reason);
+                JSONObject resp = api("POST", "/api/batches/" + batchId
+                        + "/items/" + itemId + "/skip", body);
+                final BItem updated = BItem.from(resp.getJSONObject("item"));
+                final String msg = resp.optString("message", "Done.");
+                ui.post(() -> {
+                    BItem existing = itemById(updated.id);
+                    if (existing != null) {
+                        bItems.set(bItems.indexOf(existing), updated);
+                    }
+                    if (editEntry != null) editEntry.item = updated;
+                    beep(SOUND_OK);
+                    closeItemEditor();
+                    status.setText(msg);
+                    refreshBatchList();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    editMsg.setText("Could not do that: " + e.getMessage());
                 });
             }
         }).start();

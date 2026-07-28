@@ -850,6 +850,10 @@ body {
 .bcell__cases { margin-top: 2px; }
 /* Baseline-sweep result: this product was tagged in an earlier session. */
 .bcell__done { color: var(--ok-ink); margin-top: 2px; }
+/* Skipped: couldn't be identified on this pass. Muted rather than alarming
+   — it's a decision that was made, not a fault, and it stays visible. */
+.bcell__skipped { color: var(--muted); margin-top: 2px; }
+.bcell--skipped { opacity: 0.72; }
 /* "8 ×" ahead of the normal product preview. */
 .casebox__mult {
   font-size: 22px;

@@ -2577,6 +2577,7 @@ function unitBreakdown(item) {
 function itemCard(item, mode) {
   const li = document.createElement("li");
   li.className = "bcell";
+  if (item.skipped) li.classList.add("bcell--skipped");
   if (!item.resolved) li.classList.add("bcell--warn");
   if (mode === "pair") {
     if (item.id === pairActiveItemId) li.classList.add("bcell--active");
@@ -2615,6 +2616,13 @@ function itemCard(item, mode) {
             : "⚠ unknown barcode"
       }</div>
       ${barcode ? `<div class="bcell__meta">Barcode: ${escapeHtml(barcode)}</div>` : ""}
+      ${
+        item.skipped
+          ? `<div class="bcell__meta bcell__skipped">⊘ Skipped${
+              item.skip_reason ? " — " + escapeHtml(item.skip_reason) : ""
+            } · no label, nothing counted</div>`
+          : ""
+      }
       ${
         item.tagged_before
           ? `<div class="bcell__meta bcell__done">✓ ${item.tagged_before} already tagged (baseline sweep) — no labels will print for those</div>`
@@ -2904,6 +2912,7 @@ function labelItems() {
 }
 
 const FLAG_TEXT = {
+  skipped: "skipped — couldn't be scanned, nothing counted",
   "tagged-not-detected":
     "tags on file for this shelf, but the sweep read none — find the " +
     "tagged box(es) before printing more",

@@ -2588,6 +2588,17 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
     batch = _get_batch(session, batch_id)
     flagged = []
     for item in _batch_items(session, batch_id):
+        # A skipped row is a decision already made, not a problem to solve.
+        # Checked FIRST: a skipped product usually has nothing scanned, so
+        # the untouched-rows shortcut below would otherwise hide it — and a
+        # deliberate skip is exactly what should be visible before printing.
+        if item.skipped:
+            flagged.append({
+                "item": item.as_dict(),
+                "flags": ["skipped"],
+                "candidates": [],
+            })
+            continue
         if (
             item.qty_scanned == 0
             and item.case_count == 0
@@ -3008,6 +3019,59 @@ def set_item_kind(
     }
 
 
+class ItemSkipIn(BaseModel):
+    skipped: bool = True
+    reason: str | None = Field(default=None, max_length=120)
+
+
+@app.post(
+    "/api/batches/{batch_id}/items/{item_id}/skip",
+    dependencies=[Depends(require_user)],
+)
+def set_item_skipped(
+    batch_id: int,
+    item_id: int,
+    payload: ItemSkipIn,
+    session: Session = Depends(get_session),
+):
+    """Mark a product as one you can't do on this pass — no barcode, wrapped
+    beyond identifying, damaged label. The row stays with its reason so the
+    shelf's story survives; it just queues no label and holds nothing up.
+
+    Nothing here writes a quantity. Not to Shopify, not locally: the scanned
+    count is left exactly as found (usually zero, meaning 'not counted'),
+    because 'I couldn't check this' and 'there are none' are different
+    facts and only one of them is true. Completing the batch raises a
+    review task instead, so it comes back to a human."""
+    _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    if payload.skipped and item.paired_count:
+        raise HTTPException(
+            409,
+            f"{item.paired_count} tag(s) are already paired to this row, so "
+            f"it isn't unfinished. Undo the pairing first if you really "
+            f"mean to skip it.",
+        )
+    item.skipped = payload.skipped
+    item.skip_reason = (
+        ((payload.reason or "").strip() or None) if payload.skipped else None
+    )
+    session.commit()
+    session.refresh(item)
+    name = item.product_title or item.sku or item.scanned_code
+    return {
+        "item": item.as_dict(),
+        "message": (
+            f"{name} skipped — no label, and it won't hold up the batch. "
+            f"Counts are untouched; it'll come back as a review task."
+            if payload.skipped
+            else f"{name} is back in the batch."
+        ),
+    }
+
+
 class ItemQtyIn(BaseModel):
     qty: int = Field(ge=0, le=500)
 
@@ -3202,6 +3266,10 @@ def _build_label_jobs(
     skipped_bundles: list[str] = []
     for item in _batch_items(session, batch.id):
         if not item.resolved or not item.shopify_variant_id:
+            continue
+        # Couldn't be identified on this pass — there is nothing to put a
+        # label on.
+        if item.skipped:
             continue
         # A bundle is an inventory construct, not a box: its components are
         # tagged as themselves, so labelling it would put a second tag on a
@@ -3705,6 +3773,26 @@ def batch_complete(
     tasks = []
     for item in _batch_items(session, batch_id):
         name = item.label_name or item.product_title
+        # Skipped: the one thing that MUST happen is that it doesn't vanish.
+        # No count is asserted and nothing is written anywhere — it simply
+        # comes back as work for a human, which is the honest record of
+        # "nobody could check this one".
+        if item.skipped:
+            tasks.append(ReviewTask(
+                category="could-not-scan",
+                sku=item.sku,
+                product_title=name,
+                detail=(
+                    f"Bin {batch.bin_name}: {name or item.scanned_code} was "
+                    f"skipped during tagging"
+                    + (f" ({item.skip_reason})" if item.skip_reason else "")
+                    + ". It was NOT counted and no quantity was changed — "
+                      "it still needs identifying and tagging."
+                )[:500],
+                batch_id=batch.id,
+                created_by=payload.created_by,
+            ))
+            continue
         if not item.resolved:
             tasks.append(ReviewTask(
                 category="unresolved-barcode",

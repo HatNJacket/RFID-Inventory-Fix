@@ -422,6 +422,15 @@ class BatchItem(Base):
     tagged_before: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # "I can't do this one": no barcode, wrapped so it can't be identified,
+    # damaged label. The row STAYS, with the reason, so the shelf's story is
+    # intact — it just prints no label and blocks nothing. Deliberately
+    # local: skipping never writes a quantity anywhere, least of all to
+    # Shopify, and never sets a count to zero.
+    skipped: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    skip_reason: Mapped[str | None] = mapped_column(String(120))
 
     def as_dict(self) -> dict:
         return {
@@ -447,6 +456,8 @@ class BatchItem(Base):
             "case_count": self.case_count,
             "case_units": self.case_units,
             "tagged_before": self.tagged_before,
+            "skipped": self.skipped,
+            "skip_reason": self.skip_reason,
             # Precomputed so every client shows the same two numbers rather
             # than each reinventing the arithmetic. Baseline-tagged boxes
             # are units on the shelf (so old C72 builds show the combined
