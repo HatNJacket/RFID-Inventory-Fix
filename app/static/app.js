@@ -2429,10 +2429,16 @@ function renderBatchItems() {
         moveItemBin(item)
       );
       li.append(warn);
+      li.classList.add("bcell--stacked");
     }
     // Anything filling more than one box slot needs an answer before labels
     // print, and only the person holding the box can give it.
-    if (item.resolved && item.other_bins) li.append(kindRow(item));
+    if (item.resolved && item.other_bins) {
+      li.append(kindRow(item));
+      // The card is nowrap by default; without this the row lands beside the
+      // name instead of under it.
+      li.classList.add("bcell--stacked");
+    }
     bEl.items.append(li);
   });
 }

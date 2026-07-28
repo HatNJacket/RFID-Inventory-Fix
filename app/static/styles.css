@@ -814,7 +814,6 @@ body {
    so this states what will happen and offers the correction — it is not an
    error. Bundles get the warn colour because they print nothing. */
 .kindrow {
-  flex-basis: 100%;
   display: flex;
   gap: 8px;
   align-items: center;
@@ -867,6 +866,20 @@ body {
   margin-left: 0;
 }
 .bcell .binwarn { margin-top: 8px; flex-basis: auto; }
+/* The cell keeps image | info | qty on one nowrap line. A full-width add-on
+   underneath (bin warning, multi-box/bundle row) can only sit on its own
+   line if the cell is allowed to wrap — without this it becomes a third
+   column and squeezes the name to one word per line. The right gutter keeps
+   it clear of the absolutely-positioned qty stepper. */
+.batch__items li.bcell--stacked { flex-wrap: wrap; }
+.bcell--stacked .kindrow,
+.bcell--stacked .binwarn {
+  /* basis 100% forces its own line; shrink lets it give back the gutter
+     instead of overflowing the card. */
+  flex: 1 1 100%;
+  margin-top: 8px;
+  margin-right: 104px;
+}
 .bcell--active { background: var(--accent-soft); border-color: var(--accent); }
 .bcell--exact {
   border-color: var(--ok-ink);
