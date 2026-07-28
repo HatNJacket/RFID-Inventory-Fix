@@ -2122,9 +2122,17 @@ def _merge_siblings(
     root = _sku_root(item.sku or item.scanned_code)
     if not root:
         return candidates
+    # Dedupe on SKU, not variant id. The two sources disagree on ids —
+    # TELCAN hands back "handle:<handle>" while the bin map stores Shopify's
+    # gid — so an id comparison never matches and the SAME product gets
+    # listed twice, once from each source. SKU is the key both agree on.
     seen = {
         c.get("shopify_variant_id")
         for c in candidates if c.get("shopify_variant_id")
+    }
+    seen_skus = {
+        (c.get("sku") or "").strip().upper()
+        for c in candidates if c.get("sku")
     }
     merged = list(candidates)
     try:
@@ -2132,11 +2140,13 @@ def _merge_siblings(
             select(BinMapEntry).where(BinMapEntry.sku.isnot(None))
         ).scalars()
         for row in rows:
-            if row.shopify_variant_id in seen:
+            sku_key = (row.sku or "").strip().upper()
+            if row.shopify_variant_id in seen or sku_key in seen_skus:
                 continue
             if _sku_root(row.sku) != root:
                 continue
             seen.add(row.shopify_variant_id)
+            seen_skus.add(sku_key)
             merged.append({
                 "shopify_variant_id": row.shopify_variant_id,
                 "shopify_product_id": row.shopify_product_id,

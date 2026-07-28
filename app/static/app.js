@@ -2981,31 +2981,38 @@ async function loadBatchReview(showAll) {
           flagged.get(item.id) || { item, flags: [], candidates: [] }
       );
     }
-    // Only offer the bulk re-check when there's something unknown to re-check.
-    document.getElementById("bcheck-recheck").hidden = !checkEntries.some(
-      (e) => !e.item.resolved
-    );
-    list.innerHTML = "";
-    if (!checkEntries.length) {
-      empty.hidden = false;
-      return;
-    }
-    checkEntries.forEach((entry) => {
-      const li = itemCard(entry.item, "collect");
-      if (entry.flags.length) {
-        const flags = document.createElement("div");
-        flags.className = "bcell__meta bcell__flags";
-        flags.textContent =
-          "⚠ " + entry.flags.map((f) => FLAG_TEXT[f] || f).join(" · ");
-        li.querySelector(".bcell__info").append(flags);
-      }
-      li.style.cursor = "pointer";
-      li.addEventListener("click", () => openBitem(entry));
-      list.append(li);
-    });
+    renderCheckList();
   } catch (err) {
     list.innerHTML = `<li class="recent__empty">${escapeHtml(err.message)}</li>`;
   }
+}
+
+// Draw the Check list from what's already loaded. Kept apart from the fetch
+// because re-checking is expensive — it asks Shopify about every item — and
+// closing an edit window is no reason to pay for it. The ↻ button does that.
+function renderCheckList() {
+  const list = document.getElementById("bcheck-list");
+  const empty = document.getElementById("bcheck-empty");
+  // Only offer the bulk re-check when there's something unknown to re-check.
+  document.getElementById("bcheck-recheck").hidden = !checkEntries.some(
+    (e) => !e.item.resolved
+  );
+  list.innerHTML = "";
+  empty.hidden = checkEntries.length > 0;
+  if (!checkEntries.length) return;
+  checkEntries.forEach((entry) => {
+    const li = itemCard(entry.item, "collect");
+    if (entry.flags.length) {
+      const flags = document.createElement("div");
+      flags.className = "bcell__meta bcell__flags";
+      flags.textContent =
+        "⚠ " + entry.flags.map((f) => FLAG_TEXT[f] || f).join(" · ");
+      li.querySelector(".bcell__info").append(flags);
+    }
+    li.style.cursor = "pointer";
+    li.addEventListener("click", () => openBitem(entry));
+    list.append(li);
+  });
 }
 
 // --- Check-item editor (candidates arrows, counts, serial name) -------------
@@ -3308,6 +3315,10 @@ async function bitemSetKind(kind, excluded) {
   document.getElementById("bitem-overlay").hidden = true;
   loadBatchReview();
 }
+
+document.getElementById("bcheck-refresh").addEventListener("click", () => {
+  loadBatchReview();
+});
 
 document
   .getElementById("bitem-kind-multi")
@@ -3658,14 +3669,18 @@ document.getElementById("bitem-print").addEventListener("click", async () => {
   }
 });
 
+// Closing an edit window redraws the list from what's already loaded; it no
+// longer re-runs the whole check. Re-checking asks Shopify about every item,
+// which is slow and threw the list around after each edit — the ↻ button
+// does it when the operator actually wants it.
 document.getElementById("bitem-close").addEventListener("click", () => {
   document.getElementById("bitem-overlay").hidden = true;
-  loadBatchReview();
+  renderCheckList();
 });
 document.getElementById("bitem-overlay").addEventListener("click", (e) => {
   if (e.target.id === "bitem-overlay") {
     document.getElementById("bitem-overlay").hidden = true;
-    loadBatchReview();
+    renderCheckList();
   }
 });
 
