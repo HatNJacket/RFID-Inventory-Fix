@@ -324,6 +324,14 @@ class Batch(Base):
     # follow along.
     ui_step: Mapped[str | None] = mapped_column(String(20))
 
+    # When a baseline sweep was applied: the shelf was RFID-swept before
+    # collecting, so items carry tagged_before counts and the Check step
+    # can flag "tags on file here but none read". None = no sweep, and
+    # those checks stay silent.
+    baseline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
     # A "side trip": strays found in the bin being worked that actually
     # belong on another shelf. Carrying them home is a small batch of its
     # own so the labels, tags and history all say the RIGHT bin — and this
@@ -338,6 +346,9 @@ class Batch(Base):
             "bin_name": self.bin_name,
             "status": self.status,
             "parent_batch_id": self.parent_batch_id,
+            "baseline_at": (
+                self.baseline_at.isoformat() if self.baseline_at else None
+            ),
             "created_by": self.created_by,
             "created_at": (
                 self.created_at.isoformat() if self.created_at else None
@@ -405,6 +416,12 @@ class BatchItem(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     case_units: Mapped[int | None] = mapped_column(Integer)
+    # Tags for this product read off the shelf by a baseline sweep BEFORE
+    # collecting started — boxes already tagged in an earlier session. They
+    # count as units on the shelf but never queue labels.
+    tagged_before: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     def as_dict(self) -> dict:
         return {
@@ -429,10 +446,15 @@ class BatchItem(Base):
             "kind": self.kind,
             "case_count": self.case_count,
             "case_units": self.case_units,
+            "tagged_before": self.tagged_before,
             # Precomputed so every client shows the same two numbers rather
-            # than each reinventing the arithmetic.
+            # than each reinventing the arithmetic. Baseline-tagged boxes
+            # are units on the shelf (so old C72 builds show the combined
+            # tracker for free), but they are NOT labels — they already
+            # wear one.
             "units_total": self.qty_scanned
-            + self.case_count * (self.case_units or 0),
+            + self.case_count * (self.case_units or 0)
+            + self.tagged_before,
             "labels_total": self.qty_scanned + self.case_count,
         }
 

@@ -524,6 +524,9 @@ public class MainActivity extends Activity {
         btnSweep.setOnClickListener(x -> {
             if (step == STEP_PAIR) armSweep();
             else if (step == STEP_VERIFY) sendVerifySweep();
+            // COLLECT: baseline a part-tagged shelf. (Unpair-everything
+            // stays reachable via long-press on UNDO.)
+            else if (step == STEP_COLLECT) baselineButton();
             else undoAllPairing();
         });
         batchBtnRow.addView(btnSweep, weight());
@@ -1541,6 +1544,8 @@ public class MainActivity extends Activity {
                 pairReadTag();
             } else if (inBatch() && step == STEP_VERIFY) {
                 toggleScan();   // same bulk sweep as the SWEEP tab
+            } else if (inBatch() && baselineArmed) {
+                toggleScan();   // baseline sweep of a part-tagged shelf
             } else if (inBatch()) {
                 beep(SOUND_ERR);
                 status.setText("RFID stickers pair in the PAIR step — "
@@ -2299,8 +2304,12 @@ public class MainActivity extends Activity {
         batchBtnRow.setVisibility(in ? View.VISIBLE : View.GONE);
         // The two right-hand buttons change job with the step.
         btnUndo.setText(step == STEP_VERIFY ? "CLEAR" : "UNDO");
+        if (step != STEP_COLLECT) baselineArmed = false;
         btnSweep.setText(step == STEP_VERIFY ? "SEND SWEEP"
-                : step == STEP_PAIR ? "SWEEP" : "UNPAIR");
+                : step == STEP_PAIR ? "SWEEP"
+                : step == STEP_COLLECT
+                  ? (baselineArmed ? "APPLY BASELINE" : "BASELINE")
+                  : "UNPAIR");
         btnNext.setText(parentBatchId != 0 && step == STEP_PAIR
                 ? "FINISH TRIP" : step == STEP_VERIFY ? "FINISH" : "NEXT →");
         if (in) {
@@ -3012,6 +3021,80 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     beep(SOUND_ERR);
                     editMsg.setText("Could not write it: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    // ------------------------------------------------------ shelf baseline ---
+    // A shelf that's PART tagged (Astronomik on D2-2): sweep it before
+    // collecting, and every tag read marks its product as already done —
+    // the batch becomes exactly the untagged remainder. Products with tags
+    // on file that the sweep missed get flagged at CHECK instead of being
+    // blindly re-tagged, because a weak read would put a second tag on a
+    // box that already wears one.
+    private boolean baselineArmed = false;
+
+    private void baselineButton() {
+        if (!baselineArmed) {
+            if (scanning) toggleScan();
+            synchronized (tags) { tags.clear(); }
+            baselineArmed = true;
+            btnSweep.setText("APPLY BASELINE");
+            beep(SOUND_OTHER);
+            status.setText("BASELINE: hold the trigger and sweep the whole "
+                    + "shelf. Tags already on boxes here count as done. "
+                    + "Then press APPLY BASELINE.");
+        } else {
+            applyBaselineSweep();
+        }
+    }
+
+    private void applyBaselineSweep() {
+        baselineArmed = false;
+        btnSweep.setText("BASELINE");
+        if (scanning) {
+            try {
+                reader.stopInventory();
+            } catch (Exception ignored) {
+            }
+            scanning = false;
+        }
+        final List<String> epcs = new ArrayList<>();
+        synchronized (tags) {
+            epcs.addAll(tags.keySet());
+            tags.clear();
+        }
+        if (epcs.isEmpty()) {
+            beep(SOUND_ERR);
+            status.setText("Nothing swept — press BASELINE again and hold "
+                    + "the trigger over the shelf first.");
+            return;
+        }
+        status.setText("Matching " + epcs.size() + " tag(s)…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("epcs", new JSONArray(epcs));
+                JSONObject resp = api("POST",
+                        "/api/batches/" + batchId + "/baseline", body);
+                final String msg = resp.optString("message",
+                        "Baseline applied.");
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    new AlertDialog.Builder(this)
+                            .setTitle("Shelf baseline")
+                            .setMessage(msg)
+                            .setPositiveButton("OK", null)
+                            .show();
+                    status.setText("Baseline ✓ — now scan only the untagged "
+                            + "boxes.");
+                    reloadBatchOnly();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Baseline failed: " + e.getMessage());
                 });
             }
         }).start();

@@ -848,6 +848,8 @@ body {
   cursor: help;
 }
 .bcell__cases { margin-top: 2px; }
+/* Baseline-sweep result: this product was tagged in an earlier session. */
+.bcell__done { color: var(--ok-ink); margin-top: 2px; }
 /* "8 ×" ahead of the normal product preview. */
 .casebox__mult {
   font-size: 22px;

@@ -2168,9 +2168,14 @@ def _merge_siblings(
 
 def _units_on_shelf(item: BatchItem) -> int:
     """Stock this row represents. Loose boxes are one unit each; a sealed
-    case is one box but `case_units` units — Shopify counts the units, so
-    this is what any count comparison must use."""
-    return item.qty_scanned + item.case_count * (item.case_units or 0)
+    case is one box but `case_units` units; boxes a baseline sweep found
+    already tagged are physically on the shelf too. Shopify counts units,
+    so this is what any count comparison must use."""
+    return (
+        item.qty_scanned
+        + item.case_count * (item.case_units or 0)
+        + item.tagged_before
+    )
 
 
 def _units_breakdown(item: BatchItem) -> str | None:
@@ -2580,7 +2585,7 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
     'count-mismatch' (scanned != expected), 'unconfirmed-name' (serialized
     product whose label name was never operator-confirmed), 'unresolved'
     (barcode matched nothing)."""
-    _get_batch(session, batch_id)
+    batch = _get_batch(session, batch_id)
     flagged = []
     for item in _batch_items(session, batch_id):
         if (
@@ -2588,7 +2593,33 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
             and item.case_count == 0
             and item.paired_count == 0
         ):
-            continue  # untouched pre-seeded rows need no checking
+            # Untouched pre-seeded rows need no checking — with one
+            # exception. After a baseline sweep, a product with tags on
+            # file FOR THIS SHELF that the sweep never read is exactly the
+            # weak-RFID case (Astronomik): re-tagging it blind would put a
+            # second tag on a box that already wears one, so it gets its
+            # own flag and a human look instead.
+            if (
+                batch.baseline_at is not None
+                and item.resolved
+                and item.sku
+                and item.tagged_before == 0
+            ):
+                tags_here = [
+                    t for t in session.scalars(
+                        select(RfidAssignment)
+                        .where(RfidAssignment.sku == item.sku)
+                    )
+                    if bin_contains(t.bin_location, batch.bin_name)
+                ]
+                if tags_here:
+                    flagged.append({
+                        "item": item.as_dict(),
+                        "flags": ["tagged-not-detected"],
+                        "candidates": [],
+                        "tags_on_file": len(tags_here),
+                    })
+            continue
         flags = []
         candidates: list[dict] = []
         if not item.resolved:
@@ -3353,6 +3384,100 @@ def close_divert(batch_id: int, session: Session = Depends(get_session)):
         "message": (
             f"Side trip to {side.bin_name} closed"
             + (f" — back to {parent.bin_name}." if parent else ".")
+        ),
+    }
+
+
+class BaselineIn(BaseModel):
+    epcs: list[str] = Field(default_factory=list, max_length=5000)
+
+
+@app.post(
+    "/api/batches/{batch_id}/baseline",
+    dependencies=[Depends(require_user)],
+)
+def batch_baseline(
+    batch_id: int, payload: BaselineIn, session: Session = Depends(get_session)
+):
+    """Reconcile a part-tagged shelf before collecting: sweep it, and every
+    tag read is matched to its product so the batch starts knowing what was
+    tagged in an earlier session. Those boxes count as units on the shelf
+    but queue no labels — the work left is exactly the untagged remainder.
+
+    Re-applying with a fresh sweep recomputes from scratch, so a second
+    pass over a weak-reading shelf can only improve the picture."""
+    batch = _get_batch(session, batch_id)
+    if batch.status != "collecting":
+        raise HTTPException(
+            409,
+            f"This batch is already {batch.status} — a baseline only makes "
+            f"sense before labels are queued.",
+        )
+    swept = {e.strip().upper() for e in payload.epcs if e and e.strip()}
+    if not swept:
+        raise HTTPException(422, "That sweep contained no tags.")
+
+    # One pass over the whole assignments table, matched in memory: the
+    # table is thousands of rows at most, and EPC casing has never been
+    # guaranteed, so normalising both sides here beats an IN() that would
+    # quietly miss on case.
+    detected_by_sku: dict = {}
+    stray_rows: list = []
+    matched = 0
+    known_epcs: set = set()
+    batch_skus = {
+        i.sku for i in _batch_items(session, batch_id) if i.resolved and i.sku
+    }
+    for a in session.scalars(select(RfidAssignment)):
+        epc = (a.rfid_id or "").strip().upper()
+        known_epcs.add(epc)
+        if epc not in swept:
+            continue
+        matched += 1
+        if a.sku and a.sku in batch_skus:
+            detected_by_sku[a.sku] = detected_by_sku.get(a.sku, 0) + 1
+        else:
+            # A tag on this shelf whose product isn't expected here: either
+            # the box wandered, or the bin map is stale. Named, not counted.
+            stray_rows.append({
+                "sku": a.sku,
+                "product_title": a.product_title,
+                "recorded_bin": a.bin_location,
+                "epc": a.rfid_id,
+            })
+    unknown = len(swept - known_epcs)
+
+    done = 0
+    tagged_products = 0
+    for item in _batch_items(session, batch_id):
+        item.tagged_before = detected_by_sku.get(item.sku or "", 0)
+        if item.tagged_before:
+            tagged_products += 1
+            if (
+                item.expected_qty is not None
+                and item.tagged_before >= item.expected_qty
+            ):
+                done += 1
+    batch.baseline_at = datetime.now(timezone.utc)
+    session.commit()
+
+    return {
+        "batch": batch.as_dict(),
+        "swept": len(swept),
+        "matched": matched,
+        "tagged_products": tagged_products,
+        "done_products": done,
+        "strays": stray_rows[:20],
+        "unknown": unknown,
+        "message": (
+            f"Baseline applied ✓ — {len(swept)} tag(s) swept, {matched} "
+            f"matched to products; {tagged_products} product(s) here "
+            f"already carry tags"
+            + (f", {done} fully done" if done else "")
+            + (f". {len(stray_rows)} tag(s) belong to products not "
+               f"expected in {batch.bin_name}" if stray_rows else "")
+            + (f". {unknown} tag(s) aren't in the system — printed but "
+               f"never paired, or foreign." if unknown else ".")
         ),
     }
 

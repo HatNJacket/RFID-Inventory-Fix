@@ -2121,6 +2121,58 @@ document.getElementById("binboard-filter").addEventListener("input", () => {
   binFilterTimer = setTimeout(renderBinBoard, 120);
 });
 
+// --- shelf baseline: reconcile a part-tagged bin ---------------------------
+// Some shelves were tagged in an earlier session (Astronomik on D2-2), and
+// there was no way to know how far that got. Sweep the shelf on the C72's
+// SWEEP tab, SEND it, then apply it here: every tag read marks its product
+// already-done, and the batch becomes exactly the untagged remainder.
+document.getElementById("batch-baseline").addEventListener("click", async () => {
+  if (!batch) return;
+  let cap;
+  try {
+    cap = await apiJson("/api/epc-captures/latest");
+  } catch (err) {
+    setBatchResult(
+      "No sweep on file yet — on the C72, open SWEEP, hold the trigger " +
+        "over the shelf, then hit SEND. Then click this again.",
+      "err"
+    );
+    return;
+  }
+  const when = cap.created_at
+    ? new Date(cap.created_at).toLocaleTimeString()
+    : "?";
+  if (
+    !confirm(
+      `Use the last C72 sweep as the baseline for ${batch.bin_name}?\n\n` +
+        `${cap.epc_count} tag(s), from ${cap.device || "C72"} at ${when}.\n\n` +
+        `Every tag read marks its product as already tagged — those boxes ` +
+        `won't get labels. Make sure that sweep was THIS shelf.`
+    )
+  )
+    return;
+  try {
+    const res = await postJson(`/api/batches/${batch.id}/baseline`, {
+      epcs: cap.epcs || [],
+    });
+    await pullBatch(false);
+    renderBatchItems();
+    let msg = res.message;
+    if (res.strays && res.strays.length) {
+      msg +=
+        " Strays: " +
+        res.strays
+          .slice(0, 5)
+          .map((s) => `${s.sku || "?"} (recorded in ${s.recorded_bin || "?"})`)
+          .join(", ") +
+        (res.strays.length > 5 ? "…" : "");
+    }
+    setBatchResult(msg, res.strays && res.strays.length ? "err" : "ok");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+});
+
 bEl.create.addEventListener("click", startBatch);
 bEl.bin.addEventListener("keydown", (e) => {
   if (e.key === "Enter") startBatch();
@@ -2564,6 +2616,11 @@ function itemCard(item, mode) {
       }</div>
       ${barcode ? `<div class="bcell__meta">Barcode: ${escapeHtml(barcode)}</div>` : ""}
       ${
+        item.tagged_before
+          ? `<div class="bcell__meta bcell__done">✓ ${item.tagged_before} already tagged (baseline sweep) — no labels will print for those</div>`
+          : ""
+      }
+      ${
         unitBreakdown(item)
           ? `<div class="bcell__meta bcell__cases" title="${escapeHtml(
               `${item.qty_scanned} loose box(es) plus ${item.case_count} sealed case(s) of ${item.case_units} — ${item.labels_total} label(s) in total`
@@ -2676,11 +2733,17 @@ function renderBatchItems() {
   const summary = document.getElementById("bcollect-summary");
   const expected = batchItems.filter((i) => i.expected_qty != null);
   if (expected.length) {
-    const started = expected.filter((i) => i.qty_scanned > 0).length;
+    const started = expected.filter(
+      (i) => i.qty_scanned > 0 || i.tagged_before > 0
+    ).length;
     const boxes = batchItems.reduce((n, i) => n + i.qty_scanned, 0);
+    const tagged = batchItems.reduce(
+      (n, i) => n + (i.tagged_before || 0), 0
+    );
     summary.textContent =
       `${started} of ${expected.length} expected products scanned · ` +
-      `${boxes} box(es) total`;
+      `${boxes} box(es) total` +
+      (tagged ? ` · ${tagged} already tagged (baseline)` : "");
     summary.hidden = false;
   } else {
     summary.hidden = true;
@@ -2841,6 +2904,9 @@ function labelItems() {
 }
 
 const FLAG_TEXT = {
+  "tagged-not-detected":
+    "tags on file for this shelf, but the sweep read none — find the " +
+    "tagged box(es) before printing more",
   bundle: "a bundle — no box of its own to tag",
   ambiguous: "barcode matches several listings",
   "count-mismatch": "count differs from Shopify",
