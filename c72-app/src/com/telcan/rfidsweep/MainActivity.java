@@ -847,6 +847,8 @@ public class MainActivity extends Activity {
     private Button editLabelMode;
     private EditText editLabelText;
     private Button editDropBtn;
+    private Button editFindBtn;
+    private Button editRecommendBtn;
 
     private void buildItemEditor(FrameLayout outer) {
         editScrim = new FrameLayout(this);
@@ -966,6 +968,18 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT));
         editLabelRow.addView(lblRow);
         mid.addView(editLabelRow);
+
+        // Unresolved barcode rescue, so an unknown box can be sorted out at
+        // the shelf instead of walking back to the desk. Same two routes the
+        // web offers: the one product this bin most likely means, or every
+        // product here with an odd-looking barcode.
+        editFindBtn = smallBtn("FIND IT IN THIS BIN");
+        editFindBtn.setOnClickListener(v -> loadOddCandidates(false));
+        mid.addView(editFindBtn);
+
+        editRecommendBtn = smallBtn("SHOW RECOMMENDED");
+        editRecommendBtn.setOnClickListener(v -> loadOddCandidates(true));
+        mid.addView(editRecommendBtn);
 
         editDropBtn = smallBtn("REMOVE THIS SCAN");
         editDropBtn.setOnClickListener(v -> dropItemFromBatch(true));
@@ -1112,6 +1126,9 @@ public class MainActivity extends Activity {
         }
         editLabelRow.setVisibility(it.resolved ? View.VISIBLE : View.GONE);
         editDropBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
+        // Only an unresolved row has a barcode to give away.
+        editFindBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
+        editRecommendBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
         editQty.setText(String.valueOf(it.qty)
                 + (it.expected != null ? " / " + it.expected : ""));
     }
@@ -2881,6 +2898,123 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             return "?";
         }
+    }
+
+    // ------------------------------------------ unresolved barcode rescue ---
+    // A box whose barcode is in no listing usually means the product's
+    // Shopify barcode was left as its SKU or a placeholder. Rather than
+    // walking back to the desk, look through THIS bin and hand the scanned
+    // code to the product it really belongs to.
+    private void loadOddCandidates(boolean recommendedOnly) {
+        if (editEntry == null) return;
+        final String scanned = editEntry.item.scannedCode == null
+                ? "" : editEntry.item.scannedCode;
+        editMsg.setText("Looking through " + batchBin + "…");
+        new Thread(() -> {
+            try {
+                JSONObject resp = api("GET", "/api/bins/"
+                        + URLEncoder.encode(batchBin, "UTF-8")
+                        + "/odd-barcodes?scanned="
+                        + URLEncoder.encode(scanned, "UTF-8"), null);
+                final List<JSONObject> found = new ArrayList<>();
+                if (recommendedOnly) {
+                    JSONObject rec = resp.optJSONObject("recommended");
+                    if (rec != null) found.add(rec);
+                } else {
+                    JSONArray arr = resp.optJSONArray("candidates");
+                    for (int i = 0; arr != null && i < arr.length(); i++) {
+                        found.add(arr.getJSONObject(i));
+                    }
+                }
+                ui.post(() -> {
+                    editMsg.setText("");
+                    if (found.isEmpty()) {
+                        beep(SOUND_ERR);
+                        editMsg.setText(recommendedOnly
+                                ? "Nothing in this bin stands out as the "
+                                  + "likely match."
+                                : "No product in this bin has an odd "
+                                  + "barcode.");
+                        return;
+                    }
+                    showOddPicker(found, scanned);
+                });
+            } catch (Exception e) {
+                ui.post(() -> editMsg.setText("Lookup failed: "
+                        + e.getMessage()));
+            }
+        }).start();
+    }
+
+    /** Pick which product in this bin the scanned code really belongs to. */
+    private void showOddPicker(List<JSONObject> found, String scanned) {
+        String[] labels = new String[found.size()];
+        for (int i = 0; i < found.size(); i++) {
+            JSONObject p = found.get(i);
+            String bc = p.isNull("barcode") ? "(none)"
+                    : p.optString("barcode");
+            labels[i] = p.optString("product_title", "?")
+                    + "\nSKU " + p.optString("sku", "?")
+                    + "  ·  barcode " + bc;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Which product is it?")
+                .setItems(labels, (d, which) ->
+                        confirmGiveBarcode(found.get(which), scanned))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmGiveBarcode(JSONObject p, String scanned) {
+        String title = p.optString("product_title", "?");
+        String old = p.isNull("barcode") ? "(none)" : p.optString("barcode");
+        new AlertDialog.Builder(this)
+                .setTitle("Give this product the barcode?")
+                .setMessage(title + "\n\nbarcode " + old + "  ->  " + scanned
+                        + "\n\nThis changes the barcode in Shopify for real. "
+                        + "Only do this if the box in your hand IS this "
+                        + "product.")
+                .setPositiveButton("Write it", (d, w) ->
+                        giveBarcode(p, scanned))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void giveBarcode(JSONObject p, String scanned) {
+        final int itemId = editEntry.item.id;
+        final int qty = editEntry.item.qty;
+        final String title = p.optString("product_title", "?");
+        editMsg.setText("Writing to Shopify…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("target", p.isNull("sku")
+                                ? p.optString("barcode") : p.optString("sku"))
+                        .put("new_barcode", scanned)
+                        .put("changed_by", prefs.getString("device", "C72"))
+                        // The endpoint refuses to touch Shopify without
+                        // this; the operator just answered the dialog above.
+                        .put("confirmed", true);
+                api("POST", "/api/barcode-overwrites", body);
+                // The count was recorded against a row that isn't a real
+                // product, so drop it and let the boxes be re-scanned.
+                api("DELETE", "/api/batches/" + batchId + "/items/" + itemId,
+                        null);
+                ui.post(() -> {
+                    closeItemEditor();
+                    beep(SOUND_OK);
+                    status.setText("Barcode written ✓ — now RE-SCAN those "
+                            + qty + " box(es); they'll come up as " + title
+                            + ".");
+                    reloadBatchAndReview();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    editMsg.setText("Could not write it: " + e.getMessage());
+                });
+            }
+        }).start();
     }
 
     // ---------------------------------------------------------- side trip ---
