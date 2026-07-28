@@ -1,4 +1,4 @@
-"""Build tc-rfid-sweep.apk without Android Studio or Gradle.
+r"""Build tc-rfid-sweep.apk without Android Studio or Gradle.
 
 Uses a local toolchain at %LOCALAPPDATA%\rfid-android-tools (JDK 17 in
 jdk\..., Android SDK in sdk\ with platforms;android-33 + build-tools;34.0.0
@@ -17,7 +17,40 @@ import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOLS = os.path.join(os.environ["LOCALAPPDATA"], "rfid-android-tools")
+
+
+def _find_tools() -> str:
+    """Locate the toolchain.
+
+    It was installed through the MSIX-packaged Claude app, whose writes to
+    %LOCALAPPDATA% are redirected into a per-package store. So the folder
+    appears at %LOCALAPPDATA%\\rfid-android-tools ONLY to processes inside
+    that package; from an ordinary terminal that path does not exist, and
+    the build died with a bare IndexError on the JDK glob. Check the real
+    location too, and say something useful when neither is there."""
+    local = os.environ.get("LOCALAPPDATA", "")
+    candidates = []
+    override = os.environ.get("TC_ANDROID_TOOLS")
+    if override:
+        candidates.append(override)
+    if local:
+        candidates.append(os.path.join(local, "rfid-android-tools"))
+        # The packaged app's redirected LOCALAPPDATA.
+        candidates.extend(sorted(glob.glob(os.path.join(
+            local, "Packages", "Claude_*", "LocalCache", "Local",
+            "rfid-android-tools"))))
+    for path in candidates:
+        if glob.glob(os.path.join(path, "jdk", "jdk-*")):
+            return path
+    raise SystemExit(
+        "Android toolchain not found. Looked in:\n  "
+        + "\n  ".join(candidates or ["(LOCALAPPDATA is not set)"])
+        + "\n\nPoint TC_ANDROID_TOOLS at the folder holding jdk\\ and sdk\\ "
+          "if it lives somewhere else."
+    )
+
+
+TOOLS = _find_tools()
 JDK = glob.glob(os.path.join(TOOLS, "jdk", "jdk-*"))[0]
 BT = os.path.join(TOOLS, "sdk", "build-tools", "34.0.0")
 ANDROID_JAR = os.path.join(TOOLS, "sdk", "platforms", "android-33",
