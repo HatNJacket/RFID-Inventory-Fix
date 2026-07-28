@@ -1,7 +1,7 @@
 # RFID Inventory System — Roadmap
 
 Source of truth for project status. Updated by Claude each working session.
-Last updated: 2026-07-26.
+Last updated: 2026-07-28.
 
 ## Architecture (target)
 
@@ -134,6 +134,60 @@ next bin.
   - glow: green border when scanned == expected, red when over
   - completion screen with per-product stock deltas ("+1 (5 → 6)") to
     confirm before filing inventory changes
+
+## 📥 Steve's TODO list (captured 2026-07-28, not yet designed)
+
+Noted verbatim-in-substance from Steve. **Not designed, not scoped, no
+code written.** Do not start any of these without asking him first — the
+first two in particular have ordering constraints that make "helpfully
+starting early" actively harmful.
+
+1. **Sync found inventory → Shopify on-hand.**
+   ⛔ **Do not begin until the ENTIRE store is batch tagged.** Right now
+   many products sit in the wrong place, and Steve is deliberately doing a
+   manual hard reset of product locations. Writing on-hand numbers before
+   every product is found, tagged and correctly binned would push wrong
+   counts into Shopify. The counts we hold are observations until then.
+   (See the standing decision on never auto-writing inventory.)
+
+2. **Sync with incoming inventory (receiving).**
+   Ideally one item at a time, with a permissioned bulk-add for a whole
+   shipment, everything added flagged internally as needing tagging. Wins:
+   incoming products are already in the system instead of the operator
+   hunting untagged stock, and receiving stops being manual. Receiving is
+   manual today only because a shipment can't be trusted to be 100%
+   accurate — but if every incoming product is flagged for an inventory
+   check (or the operator scans it in at the desk for a true count), the
+   bulk path becomes safe.
+
+3. **Finish the Review and Audits tabs.** Both are WIP stubs. Steve
+   doesn't remember what each was for — work out the intended split before
+   building (Review = task inbox from batch completion; Audits = shelf
+   reconciliation, per the backlog entry below) and confirm with him.
+
+4. **Make the C72 and web terminal genuinely usable by other people.**
+   Steve can drive it because he co-designed it across ~100 commits; no
+   one else can. Wants a full aesthetic redesign, guidance walking the
+   user through every decision point, and more intuitive buttons. This is
+   the difference between a tool one person can use and one the warehouse
+   can use.
+
+5. **Locate a product on the C72.** (Overlaps the locate-mode backlog
+   entry below.)
+
+6. **Scan a batch of tags, then pick the closest by signal strength.**
+   Today a read takes the first tag seen, so the operator gets denied or
+   mis-targeted when another tagged item is nearby. Reading several and
+   choosing the strongest would make pairing precise and stop
+   "too close to an already-scanned tag" failures. Needs a look at what
+   the Chainway SDK exposes for RSSI per read.
+
+7. **Unpair a single product during collect,** instead of undoing the
+   whole batch because one product was got wrong early on.
+
+8. **Scan an RFID tag and be told what it is,** with actions — chiefly
+   unpair, so a mis-tagged sticker can be re-tagged as the right product
+   during or after batch collection.
 
 ## 🗓️ Later / backlog
 
