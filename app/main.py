@@ -2567,7 +2567,23 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                 "flags": flags,
                 "candidates": candidates,
             })
-    return {"count": len(flagged), "items": flagged}
+    # Strays gathered by the shelf they actually belong on, so the Check step
+    # can offer one trip per bin rather than one per product.
+    strays: dict = {}
+    for entry in flagged:
+        if "wrong-bin" not in entry["flags"]:
+            continue
+        saved = entry["item"].get("bin_location")
+        for name in parse_bins(saved):
+            strays.setdefault(name, []).append(entry["item"].get("sku"))
+    return {
+        "count": len(flagged),
+        "items": flagged,
+        "stray_bins": [
+            {"bin": name, "skus": skus, "count": len(skus)}
+            for name, skus in sorted(strays.items())
+        ],
+    }
 
 
 class ReassignIn(BaseModel):
@@ -3038,9 +3054,39 @@ def batch_queue_labels(
             f"Labels were already queued for this batch (status "
             f"{batch.status}). Reprint individual labels from Print Queue.",
         )
-    jobs = []
+    jobs, skipped_bundles = _build_label_jobs(
+        session, batch, payload.requested_by
+    )
+    if not jobs:
+        if skipped_bundles:
+            raise HTTPException(
+                422,
+                "Everything scanned here is marked as a bundle, and bundles "
+                "aren't labelled — their component products are tagged "
+                "instead. Switch one to 'multi-box product' if that's wrong.",
+            )
+        raise HTTPException(422, "No resolved products with boxes to label.")
+    session.add_all(jobs)
+    batch.status = "printing"
+    session.commit()
+    return {
+        "count": len(jobs),
+        "batch": batch.as_dict(),
+        # Named, not silently dropped: skipping a label is exactly the kind
+        # of thing that should never be a surprise at the printer.
+        "skipped_bundles": skipped_bundles,
+    }
+
+
+def _build_label_jobs(
+    session: Session, batch: Batch, requested_by: str | None
+) -> tuple[list[PrintJob], list[str]]:
+    """Print jobs for every labelable box in a batch. Shared by the normal
+    label run and by a side trip, so a stray carried to its real shelf gets
+    exactly the label it would have got had it been found there."""
+    jobs: list[PrintJob] = []
     skipped_bundles: list[str] = []
-    for item in _batch_items(session, batch_id):
+    for item in _batch_items(session, batch.id):
         if not item.resolved or not item.shopify_variant_id:
             continue
         # A bundle is an inventory construct, not a box: its components are
@@ -3080,27 +3126,151 @@ def batch_queue_labels(
                     # product's saved label name (set in Check / History).
                     label_name=label_name,
                     label_placement=label_placement,
-                    requested_by=payload.requested_by or batch.created_by,
+                    requested_by=requested_by or batch.created_by,
                 )
             )
+    return jobs, skipped_bundles
+
+
+class DivertIn(BaseModel):
+    # The shelf these strays actually belong on.
+    bin: str = Field(max_length=100)
+    created_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/batches/{batch_id}/divert",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def divert_to_bin(
+    batch_id: int, payload: DivertIn, session: Session = Depends(get_session)
+):
+    """Boxes found on the wrong shelf, caught at the Check step before any
+    label exists. Rather than rewriting the product's bin, carry them to
+    where the rest of that product already lives: their rows move into a
+    small side batch for that bin, whose labels — and therefore whose tags
+    — say the RIGHT shelf. Nothing has been printed yet, so there is
+    nothing to reprint, unpair or peel off.
+
+    The parent batch is left exactly as it was, minus the strays."""
+    parent = _get_batch(session, batch_id)
+    if parent.status != "collecting":
+        raise HTTPException(
+            409,
+            f"Labels for this batch are already {parent.status} — a side "
+            f"trip only works from the Check step, before anything prints.",
+        )
+    wanted = payload.bin.strip()
+    if not wanted:
+        raise HTTPException(422, "Which bin are they going to?")
+    if bin_contains(wanted, parent.bin_name):
+        raise HTTPException(
+            422, "That's the bin you're already working in."
+        )
+
+    # Everything in this batch whose saved home is that shelf, together —
+    # one trip carries them all.
+    movers = [
+        i for i in _batch_items(session, batch_id)
+        if i.resolved
+        and (i.qty_scanned or i.case_count)
+        and bin_contains(i.bin_location, wanted)
+    ]
+    if not movers:
+        raise HTTPException(
+            404,
+            f"Nothing scanned here belongs in {wanted}.",
+        )
+    paired = [i for i in movers if i.paired_count]
+    if paired:
+        raise HTTPException(
+            409,
+            "Some of those already have tags paired, so they can't be moved "
+            "as if they were untouched. Undo the pairing first.",
+        )
+
+    side = Batch(
+        bin_name=wanted,
+        created_by=payload.created_by or parent.created_by,
+        parent_batch_id=parent.id,
+        status="collecting",
+    )
+    session.add(side)
+    session.flush()
+
+    for item in movers:
+        # The row moves wholesale — counts, cases, label name, the lot.
+        item.batch_id = side.id
+        # Its saved bin IS this batch's bin now, so it is no longer split
+        # from the point of view of the shelf it's on.
+        others = bins_other_than(item.bin_location, wanted)
+        item.other_bins = (", ".join(others))[:255] if others else None
+
+    session.flush()
+    jobs, skipped = _build_label_jobs(
+        session, side, payload.created_by or parent.created_by
+    )
     if not jobs:
-        if skipped_bundles:
-            raise HTTPException(
-                422,
-                "Everything scanned here is marked as a bundle, and bundles "
-                "aren't labelled — their component products are tagged "
-                "instead. Switch one to 'multi-box product' if that's wrong.",
-            )
-        raise HTTPException(422, "No resolved products with boxes to label.")
+        session.rollback()
+        raise HTTPException(
+            422,
+            "Nothing there can be labelled — bundles carry no labels of "
+            "their own.",
+        )
     session.add_all(jobs)
-    batch.status = "printing"
+    side.status = "printing"
+    side.ui_step = "pair"
     session.commit()
+    session.refresh(side)
     return {
-        "count": len(jobs),
-        "batch": batch.as_dict(),
-        # Named, not silently dropped: skipping a label is exactly the kind
-        # of thing that should never be a surprise at the printer.
-        "skipped_bundles": skipped_bundles,
+        "batch": side.as_dict(),
+        "parent": parent.as_dict(),
+        "moved": len(movers),
+        "labels": len(jobs),
+        "skipped_bundles": skipped,
+        "message": (
+            f"{len(movers)} product(s) moved to a side trip for {wanted} — "
+            f"{len(jobs)} label(s) queued. Pair them, then close it to get "
+            f"back to {parent.bin_name}."
+        ),
+    }
+
+
+@app.post(
+    "/api/batches/{batch_id}/close-divert",
+    dependencies=[Depends(require_user)],
+)
+def close_divert(batch_id: int, session: Session = Depends(get_session)):
+    """Finish a side trip and hand back to the batch it came from. No shelf
+    verification is asked for: a side trip only ever covers the few boxes
+    carried over, never the whole of its bin."""
+    side = _get_batch(session, batch_id)
+    if side.parent_batch_id is None:
+        raise HTTPException(422, "That batch isn't a side trip.")
+    items = _batch_items(session, batch_id)
+    unpaired = [
+        i for i in items
+        if i.resolved and i.paired_count < i.qty_scanned + i.case_count
+    ]
+    side.status = "done"
+    side.completed_at = datetime.now(timezone.utc)
+    session.commit()
+    parent = session.get(Batch, side.parent_batch_id)
+    return {
+        "batch": side.as_dict(),
+        "parent": parent.as_dict() if parent else None,
+        # Reported, not blocked — the operator may deliberately be leaving
+        # one for later, and refusing to close would strand them here.
+        "unpaired": [
+            {"sku": i.sku, "paired": i.paired_count,
+             "labels": i.qty_scanned + i.case_count}
+            for i in unpaired
+        ],
+        "message": (
+            f"Side trip to {side.bin_name} closed"
+            + (f" — back to {parent.bin_name}." if parent else ".")
+        ),
     }
 
 

@@ -428,6 +428,11 @@
       <div id="batch-active" hidden>
         <div class="batch__header">
           <span class="inventory__bin" id="batch-bin-chip">—</span>
+          <!-- Side trip: carrying strays to the shelf they belong on -->
+          <div class="sidetrip" id="batch-sidetrip" hidden>
+            <span class="sidetrip__what" id="sidetrip-what"></span>
+            <button class="reset" id="sidetrip-finish" type="button">Finish &amp; go back</button>
+          </div>
           <div class="stages" id="batch-stages">
             <span class="stage" data-stage="collect">1 Collect</span>
             <span class="stage" data-stage="labels">2 Check</span>
@@ -466,6 +471,7 @@
               <p class="step__hint">Only products needing a decision appear here — barcodes matching several listings, counts that differ from Shopify, unconfirmed serial names. Click one to review it. A clean bin shows nothing.</p>
             </div>
           </section>
+          <div id="bcheck-strays"></div>
           <p class="linkbox__text" id="bcheck-empty" hidden>Nothing needs checking ✓</p>
           <ul class="batch__items" id="bcheck-list"></ul>
           <div class="linkbox__actions">

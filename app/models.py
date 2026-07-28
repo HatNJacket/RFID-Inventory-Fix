@@ -324,11 +324,20 @@ class Batch(Base):
     # follow along.
     ui_step: Mapped[str | None] = mapped_column(String(20))
 
+    # A "side trip": strays found in the bin being worked that actually
+    # belong on another shelf. Carrying them home is a small batch of its
+    # own so the labels, tags and history all say the RIGHT bin — and this
+    # points back at the batch to return to when it's done. Side trips
+    # close without a shelf sweep; they only ever cover a few boxes, not
+    # the whole of their bin.
+    parent_batch_id: Mapped[int | None] = mapped_column(Integer, index=True)
+
     def as_dict(self) -> dict:
         return {
             "id": self.id,
             "bin_name": self.bin_name,
             "status": self.status,
+            "parent_batch_id": self.parent_batch_id,
             "created_by": self.created_by,
             "created_at": (
                 self.created_at.isoformat() if self.created_at else None

@@ -2181,6 +2181,9 @@ async function pullBatch(announce) {
     const data = await apiJson(`/api/batches/${batch.id}`);
     batch = data.batch;
     batchItems = data.items;
+    // Resuming a side trip directly (or arriving from another terminal)
+    // must still show the banner and the way back.
+    renderSideTrip();
     // The C72 (or another browser) moved on — follow it, so this screen
     // doesn't sit on "1 Collect" while the scanner is checking or pairing.
     // The published step is the precise signal; status is the fallback for
@@ -2828,6 +2831,103 @@ let oddList = [];
 let oddIdx = 0;
 let bitemLabelMode = "header";
 
+// --- Side trips ------------------------------------------------------------
+// Boxes found on the wrong shelf, caught at Check before anything prints.
+// Rather than rewriting the product's bin, carry them to where the rest of
+// that product already lives: a small batch for THAT bin, whose labels — and
+// so whose tags — name the right shelf. Nothing to reprint or peel off.
+let parentBatch = null;
+
+function renderStrayBins(bins) {
+  const wrap = document.getElementById("bcheck-strays");
+  wrap.innerHTML = "";
+  // A side trip can't start from inside a side trip; finish this one first.
+  if (!bins.length || (batch && batch.parent_batch_id)) return;
+  bins.forEach((b) => {
+    const row = document.createElement("div");
+    row.className = "kindrow";
+    row.innerHTML = `
+      <span class="kindrow__what">${b.count} product(s) here actually live in
+        <b>${escapeHtml(b.bin)}</b> — ${escapeHtml(b.skus.filter(Boolean).join(", "))}</span>
+      <button class="reset" type="button">Take them to ${escapeHtml(b.bin)}…</button>`;
+    row.querySelector("button").addEventListener("click", () => divertToBin(b.bin));
+    wrap.append(row);
+  });
+}
+
+async function divertToBin(binName) {
+  if (
+    !confirm(
+      `Carry these boxes to ${binName}?\n\n` +
+        `They leave this batch and become a short side trip for ${binName}: ` +
+        `their labels print with ${binName} on them, you pair them there, ` +
+        `then you're back here.\n\n` +
+        `Nothing has printed yet, so there's nothing to reprint or peel off.`
+    )
+  )
+    return;
+  try {
+    const res = await postJson(`/api/batches/${batch.id}/divert`, {
+      bin: binName,
+      created_by: operatorEl.value.trim() || null,
+    });
+    parentBatch = res.parent;
+    batch = res.batch;
+    batchItems = [];
+    await pullBatch(false);
+    renderSideTrip();
+    showBatchStage("pair");
+    setBatchResult(res.message, "ok");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+}
+
+function renderSideTrip() {
+  const bar = document.getElementById("batch-sidetrip");
+  const on = !!(batch && batch.parent_batch_id);
+  bar.hidden = !on;
+  if (!on) return;
+  // The parent's stray offer is still sitting in the DOM; leaving it there
+  // would invite a side trip from inside a side trip.
+  document.getElementById("bcheck-strays").innerHTML = "";
+  document.getElementById("sidetrip-what").textContent =
+    `Side trip — tagging strays into ${batch.bin_name}` +
+    (parentBatch ? `, then back to ${parentBatch.bin_name}` : "") +
+    `. These labels say ${batch.bin_name}.`;
+}
+
+document
+  .getElementById("sidetrip-finish")
+  .addEventListener("click", async () => {
+    const left = batchItems.filter(
+      (i) => i.resolved && i.paired_count < (i.labels_total ?? i.qty_scanned)
+    );
+    if (
+      left.length &&
+      !confirm(
+        `${left.length} product(s) here still have labels waiting to be ` +
+          `paired.\n\nClose the side trip anyway?`
+      )
+    )
+      return;
+    try {
+      const res = await postJson(`/api/batches/${batch.id}/close-divert`, {});
+      if (res.parent) {
+        batch = res.parent;
+        batchItems = [];
+        parentBatch = null;
+        await pullBatch(false);
+        renderSideTrip();
+        showBatchStage("labels");
+        loadBatchReview();
+      }
+      setBatchResult(res.message, "ok");
+    } catch (err) {
+      setBatchResult(err.message, "err");
+    }
+  });
+
 async function loadBatchReview(showAll) {
   const list = document.getElementById("bcheck-list");
   const empty = document.getElementById("bcheck-empty");
@@ -2835,6 +2935,7 @@ async function loadBatchReview(showAll) {
   list.innerHTML = '<li class="recent__empty">Checking the batch…</li>';
   try {
     const data = await apiJson(`/api/batches/${batch.id}/review`);
+    renderStrayBins(data.stray_bins || []);
     checkEntries = data.items
       .map((e) => ({
         ...e,

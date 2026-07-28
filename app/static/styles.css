@@ -851,6 +851,24 @@ body {
   padding-right: 4px;
 }
 .casebox__note { color: var(--warn-ink); }
+
+/* Side trip: a short detour into another bin, mid-batch. Coloured like a
+   warning because you are NOT in the bin you think you are — every label
+   printed here names a different shelf. */
+.sidetrip {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--warn-ink);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-ink);
+}
+.sidetrip__what { flex: 1 1 auto; min-width: 200px; font-weight: 600; }
 .kindrow .reset { padding: 5px 10px; font-size: 12px; }
 
 /* batch cells restyled to mirror the C72 app: image | name + labeled

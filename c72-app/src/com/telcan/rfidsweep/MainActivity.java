@@ -1758,6 +1758,31 @@ public class MainActivity extends Activity {
 
     private void stepNext() {
         if (!inBatch()) return;
+        // On a side trip there is no verify step: it covers a few carried
+        // boxes, never the whole shelf. NEXT hands back to the batch that
+        // sent us instead.
+        if (parentBatchId != 0 && step == STEP_PAIR) {
+            int missing = 0;
+            for (BItem b : bItems) {
+                if (b.resolved && b.paired < b.labelsTotal) {
+                    missing += b.labelsTotal - b.paired;
+                }
+            }
+            final int left = missing;
+            if (left > 0) {
+                new AlertDialog.Builder(this)
+                        .setTitle("Finish side trip?")
+                        .setMessage(left + " label(s) here still have no tag "
+                                + "paired.\n\nGo back to " + parentBinName
+                                + " anyway?")
+                        .setPositiveButton("Finish", (d, w) -> finishSideTrip())
+                        .setNegativeButton("Stay", null)
+                        .show();
+            } else {
+                finishSideTrip();
+            }
+            return;
+        }
         if (step == STEP_COLLECT) {
             boolean any = false;
             for (BItem b : bItems) if (b.qty > 0) any = true;
@@ -2089,6 +2114,7 @@ public class MainActivity extends Activity {
                     }
                     loaded.add(e);
                 }
+                final JSONArray strays = resp.optJSONArray("stray_bins");
                 ui.post(() -> {
                     checkEntries.clear();
                     checkEntries.addAll(loaded);
@@ -2105,6 +2131,10 @@ public class MainActivity extends Activity {
                                   + "look — tap one to review. NEXT queues "
                                   + "the labels.");
                         refreshBatchList();
+                        // Boxes on the wrong shelf: offer to carry them to
+                        // where the rest of that product already lives,
+                        // before any label exists to be reprinted.
+                        offerSideTrip(strays);
                     }
                 });
             } catch (Exception e) {
@@ -2240,7 +2270,8 @@ public class MainActivity extends Activity {
         btnUndo.setText(step == STEP_VERIFY ? "CLEAR" : "UNDO");
         btnSweep.setText(step == STEP_VERIFY ? "SEND SWEEP"
                 : step == STEP_PAIR ? "SWEEP" : "UNPAIR");
-        btnNext.setText(step == STEP_VERIFY ? "FINISH" : "NEXT →");
+        btnNext.setText(parentBatchId != 0 && step == STEP_PAIR
+                ? "FINISH TRIP" : step == STEP_VERIFY ? "FINISH" : "NEXT →");
         if (in) {
             if (step == STEP_COLLECT) {
                 status.setText("COLLECT: scan every box in this bin, then "
@@ -2825,6 +2856,115 @@ public class MainActivity extends Activity {
                 }).start())
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    // ---------------------------------------------------------- side trip ---
+    // Strays found in the bin being worked that belong on another shelf.
+    // Caught at CHECK, before any label exists, so carrying them home costs
+    // nothing: they move into a small batch for THAT bin, whose labels - and
+    // therefore whose tags - name the right shelf. Finish, and the original
+    // batch is exactly where it was left.
+    private int parentBatchId = 0;
+    private String parentBinName = null;
+
+    private void offerSideTrip(JSONArray strays) {
+        if (strays == null || strays.length() == 0) return;
+        if (parentBatchId != 0) return;   // already on one; no nesting
+        JSONObject s = strays.optJSONObject(0);
+        if (s == null) return;
+        final String bin = s.optString("bin", "");
+        int n = s.optInt("count", 0);
+        if (bin.isEmpty() || n == 0) return;
+        new AlertDialog.Builder(this)
+                .setTitle(n + " box(es) belong in " + bin)
+                .setMessage("These are on the wrong shelf. Carry them to "
+                        + bin + " and tag them there?\n\n"
+                        + "Their labels will say " + bin + ", you pair them, "
+                        + "then you're back in " + batchBin + ".\n\n"
+                        + "Nothing has printed yet, so there is nothing to "
+                        + "reprint or peel off.")
+                .setPositiveButton("Take them to " + bin, (d, w) ->
+                        startSideTrip(bin))
+                .setNegativeButton("Not now", null)
+                .show();
+    }
+
+    private void startSideTrip(String bin) {
+        status.setText("Setting up " + bin + "…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject().put("bin", bin)
+                        .put("created_by", prefs.getString("device", "C72"));
+                JSONObject resp = api("POST",
+                        "/api/batches/" + batchId + "/divert", body);
+                JSONObject side = resp.getJSONObject("batch");
+                final int newId = side.optInt("id");
+                final String newBin = side.optString("bin_name", bin);
+                final int labels = resp.optInt("labels");
+                final int oldId = batchId;
+                final String oldBin = batchBin;
+                ui.post(() -> {
+                    parentBatchId = oldId;
+                    parentBinName = oldBin;
+                    batchId = newId;
+                    batchBin = newBin;
+                    bItems.clear();
+                    checkEntries.clear();
+                    checkFlagText.clear();
+                    previewItem = null;
+                    pairActive = null;
+                    step = STEP_PAIR;
+                    beep(SOUND_OK);
+                    status.setText("SIDE TRIP " + newBin + " — " + labels
+                            + " label(s) queued. Pair them, then FINISH to "
+                            + "get back to " + oldBin + ".");
+                    applyBatchUi();
+                    reloadBatchOnly();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Side trip failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    private void finishSideTrip() {
+        new Thread(() -> {
+            try {
+                JSONObject resp = api("POST",
+                        "/api/batches/" + batchId + "/close-divert",
+                        new JSONObject());
+                JSONObject parent = resp.optJSONObject("parent");
+                final int backId = parent == null ? parentBatchId
+                        : parent.optInt("id");
+                final String backBin = parent == null ? parentBinName
+                        : parent.optString("bin_name", parentBinName);
+                ui.post(() -> {
+                    parentBatchId = 0;
+                    parentBinName = null;
+                    batchId = backId;
+                    batchBin = backBin;
+                    bItems.clear();
+                    checkEntries.clear();
+                    checkFlagText.clear();
+                    previewItem = null;
+                    pairActive = null;
+                    step = STEP_CHECK;
+                    beep(SOUND_OK);
+                    status.setText("Back in " + backBin + ".");
+                    applyBatchUi();
+                    reloadBatchAndReview();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Could not close the side trip: "
+                            + e.getMessage());
+                });
+            }
+        }).start();
     }
 
     /** Opened or sealed? Asked once per case scan, with the note in view. */
