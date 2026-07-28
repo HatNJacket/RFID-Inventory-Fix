@@ -3,6 +3,13 @@
    borders, blue focus states, pill badges, one dark primary button.
    Dark mode gets real tokens via prefers-color-scheme — never black-on-dark. */
 
+/* The `hidden` attribute must win, always. Any rule setting display on an
+   element that is ALSO toggled with `hidden` silently defeats it, and the
+   element then never goes away — which has now bitten the bin board, the
+   side-trip bar and the product panel's kind banner. One rule beats
+   remembering to add a `[hidden]` override to every new flex container. */
+[hidden] { display: none !important; }
+
 :root {
   --bg: #f1f2f4;
   --card: #ffffff;
