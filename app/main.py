@@ -2097,6 +2097,65 @@ def _mirror_qty(session: Session, sku: str | None) -> int | None:
         return None
 
 
+def _sku_root(sku: str | None) -> str | None:
+    """The part of a SKU that identifies the PRODUCT, with open-box wording
+    stripped: "OPEN BOX- 08891" and "08891" share the root "08891".
+
+    Short roots are refused — a two-character root would tie half the
+    catalog together, and a wrong candidate list is worse than none."""
+    if not sku:
+        return None
+    root = re.sub(r"open[\s-]*box", " ", sku, flags=re.I)
+    root = re.sub(r"[^0-9A-Za-z]+", "", root).strip()
+    return root.upper() if len(root) >= 4 else None
+
+
+def _merge_siblings(
+    session: Session, item: BatchItem, candidates: list[dict]
+) -> list[dict]:
+    """Add listings that are plainly the same product in another condition.
+
+    A barcode search finds twins that SHARE a barcode, but an open-box
+    listing often has none at all, so it can only be reached through its
+    SKU. The bin map already holds every binned variant locally, which
+    makes this a cheap local scan rather than more Shopify calls."""
+    root = _sku_root(item.sku or item.scanned_code)
+    if not root:
+        return candidates
+    seen = {
+        c.get("shopify_variant_id")
+        for c in candidates if c.get("shopify_variant_id")
+    }
+    merged = list(candidates)
+    try:
+        rows = session.execute(
+            select(BinMapEntry).where(BinMapEntry.sku.isnot(None))
+        ).scalars()
+        for row in rows:
+            if row.shopify_variant_id in seen:
+                continue
+            if _sku_root(row.sku) != root:
+                continue
+            seen.add(row.shopify_variant_id)
+            merged.append({
+                "shopify_variant_id": row.shopify_variant_id,
+                "shopify_product_id": row.shopify_product_id,
+                "product_title": row.product_title,
+                "variant_title": row.variant_title,
+                "sku": row.sku,
+                "barcode": row.barcode,
+                "bin_location": row.bin,
+                "image_url": row.image_url,
+            })
+    except Exception as error:
+        logger.warning("sibling lookup failed for %s: %s", item.sku, error)
+        return candidates
+    # Whatever the row is currently pointing at stays first, so the arrows
+    # open on the listing the operator is looking at.
+    merged.sort(key=lambda c: c.get("shopify_variant_id") != item.shopify_variant_id)
+    return merged
+
+
 def _units_on_shelf(item: BatchItem) -> int:
     """Stock this row represents. Loose boxes are one unit each; a sealed
     case is one box but `case_units` units — Shopify counts the units, so
@@ -2536,6 +2595,12 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                 except Exception as error:
                     logger.warning("candidates failed for %s: %s",
                                    code, error)
+                # Open-box twins often carry NO barcode of their own
+                # ("OPEN BOX- 08891" against "08891"), so a barcode search
+                # can never surface them and the operator is left holding a
+                # box with no way to pick the right listing. Fold in
+                # siblings found by SKU.
+                candidates = _merge_siblings(session, item, candidates)
                 if len(candidates) > 1:
                     flags.append("ambiguous")
                 else:
@@ -2609,15 +2674,23 @@ def batch_item_reassign(
     if item is None or item.batch_id != batch_id:
         raise HTTPException(404, "No such item in this batch.")
     code = item.barcode or item.scanned_code
+    # Same set the Check step offered, siblings included — an open-box twin
+    # usually has no barcode at all, so a barcode-only test would refuse the
+    # very listing the operator was just shown and asked to choose.
+    choices = _merge_siblings(
+        session, item, products_by_barcode_all(code or "")
+    )
     match = next(
         (
-            p for p in products_by_barcode_all(code or "")
+            p for p in choices
             if p.get("shopify_variant_id") == payload.shopify_variant_id
         ),
         None,
     )
     if match is None:
-        raise HTTPException(404, "That listing doesn't share this barcode.")
+        raise HTTPException(
+            404, "That listing isn't one of the alternatives for this item."
+        )
 
     existing = next(
         (
