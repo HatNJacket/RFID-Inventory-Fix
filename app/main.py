@@ -2511,6 +2511,64 @@ def batch_item_resolve(
     }
 
 
+class ProductKindIn(BaseModel):
+    # SKUs contain "+" and can contain "/" ("22451+81037+93575"), so the SKU
+    # travels in the body — a path segment would need escaping to survive.
+    sku: str = Field(max_length=100)
+    # None clears the override and hands the product back to auto-detection.
+    kind: Literal["multi_box", "bundle"] | None = None
+    excluded: bool = False
+    updated_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post("/api/product-kinds", dependencies=[Depends(require_user)])
+def set_product_kind(
+    payload: ProductKindIn, session: Session = Depends(get_session)
+):
+    """Set (or clear) the multi-box/bundle answer for a product outside any
+    batch — this is the undo behind a 'dropped from the RFID system' event,
+    reachable from History and the product panel."""
+    sku = payload.sku.strip()
+    if not sku:
+        raise HTTPException(422, "Provide a SKU.")
+    row = session.get(ProductKind, sku)
+
+    if payload.kind is None:
+        if row is not None:
+            session.delete(row)
+            session.commit()
+        return {
+            "sku": sku, "kind": None, "excluded": False,
+            "message": f"{sku} is back to automatic detection.",
+        }
+
+    if payload.excluded and payload.kind != "bundle":
+        raise HTTPException(
+            422, "Only a bundle can be dropped from the RFID system."
+        )
+    if row is None:
+        row = ProductKind(sku=sku, kind=payload.kind)
+        session.add(row)
+    row.kind = payload.kind
+    row.excluded = payload.excluded
+    row.updated_by = payload.updated_by
+    row.updated_at = datetime.now(timezone.utc)
+    session.commit()
+    if payload.excluded:
+        message = f"{sku} dropped from the RFID system."
+    else:
+        message = (
+            f"{sku} is back in the RFID system"
+            + (" as a bundle — it still won't be labelled."
+               if payload.kind == "bundle"
+               else " as a multi-box product.")
+        )
+    return {
+        "sku": sku, "kind": row.kind, "excluded": row.excluded,
+        "message": message,
+    }
+
+
 class ItemKindIn(BaseModel):
     kind: Literal["multi_box", "bundle"]
     # Bundles only: drop this product out of the RFID system altogether.
@@ -3516,6 +3574,24 @@ def product_history(term: str, session: Session = Depends(get_session)):
             "shopify": False,
         })
 
+    kind_row = session.get(ProductKind, sku) if sku else None
+    if kind_row is not None:
+        events.append({
+            "at": iso(kind_row.updated_at),
+            "type": ("dropped-from-rfid" if kind_row.excluded
+                     else "marked-bundle" if kind_row.kind == "bundle"
+                     else "marked-multi-box"),
+            "worker": kind_row.updated_by,
+            "detail": (
+                "no labels print for it, and it is kept out of new batches"
+                if kind_row.excluded
+                else "no labels print for it — its components carry the tags"
+                if kind_row.kind == "bundle"
+                else "one label per box"
+            ),
+            "shopify": False,
+        })
+
     # Count observations: what the shelf actually held, per batch. These
     # never change Shopify stock — they are the record a future (explicit)
     # write-back would act on.
@@ -3597,6 +3673,17 @@ def product_history(term: str, session: Session = Depends(get_session)):
         # Non-serial products keep their preferred header here instead.
         "custom_label": custom.label_name if custom else None,
         "custom_placement": custom.placement if custom else "header",
+        # Current multi-box/bundle standing, so the panel can offer the undo.
+        "product_kind": (
+            {
+                "kind": kind_row.kind,
+                "excluded": bool(kind_row.excluded),
+                "updated_by": kind_row.updated_by,
+                "updated_at": iso(kind_row.updated_at),
+            }
+            if kind_row is not None
+            else None
+        ),
         "count": len(events),
         "events": events,
     }
@@ -3684,6 +3771,39 @@ def history(
                 "kind": "barcode-alias",
                 "alias_barcode": al.alias_barcode,
             },
+        })
+
+    # Multi-box/bundle decisions. The row holds only the current answer, so
+    # this is one event per product showing where it stands — and, like the
+    # alias rows above, the row being live IS what makes it undoable.
+    kind_titles: dict = {}
+    for sku, title in session.execute(
+        select(BinMapEntry.sku, BinMapEntry.product_title)
+        .where(BinMapEntry.sku.isnot(None))
+    ):
+        if sku:
+            kind_titles.setdefault(sku, title)
+    for pk in session.scalars(
+        select(ProductKind).order_by(ProductKind.updated_at.desc())
+        .limit(limit)
+    ):
+        events.append({
+            "at": iso(pk.updated_at),
+            "type": ("dropped-from-rfid" if pk.excluded
+                     else "marked-bundle" if pk.kind == "bundle"
+                     else "marked-multi-box"),
+            "worker": pk.updated_by,
+            "sku": pk.sku,
+            "title": kind_titles.get(pk.sku),
+            "detail": (
+                "no labels print for it, and it is kept out of new batches"
+                if pk.excluded
+                else "no labels print for it — its components carry the tags"
+                if pk.kind == "bundle"
+                else "one label per box"
+            ),
+            "undo": {"kind": "product-kind", "sku": pk.sku,
+                     "excluded": pk.excluded},
         })
 
     # Tie counts for the batch events below. Pulled once and matched in

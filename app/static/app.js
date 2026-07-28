@@ -4016,6 +4016,25 @@ async function openProductHistory(term) {
             "barcode). ✕ clears it back to the standard label:";
       updateLabelPreview();
     }
+    // Multi-box/bundle standing. Only shown when an answer was actually
+    // saved — an auto-detected product has nothing to undo.
+    const kindBox = document.getElementById("phist-kind");
+    const pk = data.product_kind;
+    kindBox.hidden = !pk;
+    if (pk) {
+      const who = pk.updated_by ? ` by ${pk.updated_by}` : "";
+      const when = pk.updated_at
+        ? ` on ${new Date(pk.updated_at).toLocaleString()}`
+        : "";
+      kindBox.classList.toggle("kindrow--bundle", pk.kind === "bundle");
+      document.getElementById("phist-kind-what").textContent = pk.excluded
+        ? `Dropped from the RFID system${who}${when} — it isn't seeded into ` +
+          `new batches and never gets a label.`
+        : pk.kind === "bundle"
+          ? `Marked as a bundle${who}${when} — no labels print for it; its ` +
+            `component products carry the tags.`
+          : `Marked as a multi-box product${who}${when} — one label per box.`;
+    }
     document.getElementById("phist-print").disabled = !p;
     document.getElementById("phist-title").textContent = p
       ? p.product_title + (p.variant_title ? ` (${p.variant_title})` : "")
@@ -4240,6 +4259,36 @@ document.getElementById("phist-print").addEventListener("click", async () => {
   }
 });
 
+document
+  .getElementById("phist-kind-restore")
+  .addEventListener("click", async () => {
+    if (!phistData || !phistData.sku) return;
+    const pk = phistData.product_kind || {};
+    if (
+      !confirm(
+        pk.excluded
+          ? `Put "${phistData.sku}" back into the RFID system?\n\nIt will ` +
+            `be seeded into new batches again and detected automatically.`
+          : `Clear the manual setting for "${phistData.sku}"?\n\nIt goes ` +
+            `back to being detected automatically from its title and SKU.`
+      )
+    )
+      return;
+    const msg = document.getElementById("phist-msg");
+    try {
+      const res = await postJson("/api/product-kinds", {
+        sku: phistData.sku,
+        kind: null,
+        updated_by: operatorEl.value.trim() || null,
+      });
+      // Reload first — it clears the message slot — then say what happened.
+      await openProductHistory(phistData.sku);
+      msg.textContent = res.message;
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+  });
+
 // Undoable events carry an `undo` descriptor from the server. Today that's
 // barcode links (alias rows are live, so deleting one IS the undo — the
 // scanned code simply stops resolving to that product).
@@ -4268,6 +4317,31 @@ async function undoHistoryEvent(e, btn) {
             ? ` (${res.legacy} of them paired before batches tracked their own ties).`
             : ".")
       );
+    } catch (err) {
+      btn.disabled = false;
+      alert(err.message);
+    }
+    return;
+  }
+  // Multi-box/bundle decisions: undo means handing the product back to
+  // automatic detection, which also un-drops it if it was excluded.
+  if (e.undo.kind === "product-kind") {
+    const what = e.undo.excluded
+      ? `Put "${e.sku}" back into the RFID system?\n\nIt will be seeded ` +
+        `into new batches again and detected automatically.`
+      : `Clear the manual multi-box/bundle setting for "${e.sku}"?\n\n` +
+        `It goes back to being detected automatically from its title ` +
+        `and SKU.`;
+    if (!confirm(what)) return;
+    btn.disabled = true;
+    try {
+      const res = await postJson("/api/product-kinds", {
+        sku: e.undo.sku,
+        kind: null,
+        updated_by: operatorEl.value.trim() || null,
+      });
+      await loadHistory();
+      alert(res.message);
     } catch (err) {
       btn.disabled = false;
       alert(err.message);
