@@ -167,6 +167,12 @@ public class MainActivity extends Activity {
         int qty;
         Integer expected;
         int paired;
+        // A sealed case is one box, one label, one tag - but N units, so
+        // units and labels stop being the same number.
+        int caseCount;
+        int caseUnits;
+        int unitsTotal;
+        int labelsTotal;
 
         static BItem from(JSONObject o) {
             BItem b = new BItem();
@@ -192,6 +198,11 @@ public class MainActivity extends Activity {
             b.expected = o.isNull("expected_qty") ? null
                     : o.optInt("expected_qty");
             b.paired = o.optInt("paired_count", 0);
+            b.caseCount = o.optInt("case_count", 0);
+            b.caseUnits = o.optInt("case_units", 0);
+            // Fall back to the box count for servers that predate cases.
+            b.unitsTotal = o.optInt("units_total", b.qty);
+            b.labelsTotal = o.optInt("labels_total", b.qty);
             return b;
         }
 
@@ -668,6 +679,21 @@ public class MainActivity extends Activity {
                     btInput.requestFocus();
                 });
             } catch (Exception e) {
+                // Not a listing — but it may be a CASE code (a box of N of
+                // one product). That is exactly the scan that used to come
+                // back empty and leave someone holding an unplaceable box.
+                JSONObject c = null;
+                try {
+                    c = api("GET", "/api/cases/"
+                            + URLEncoder.encode(code, "UTF-8"), null);
+                } catch (Exception ignored) {
+                    // genuinely unknown; fall through to the error below
+                }
+                if (c != null) {
+                    final JSONObject box = c;
+                    ui.post(() -> showCaseFind(box));
+                    return;
+                }
                 ui.post(() -> {
                     beep(SOUND_ERR);
                     findResult.setText("Not found:\n" + e.getMessage());
@@ -676,6 +702,30 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    /** A case code in FIND BIN: where the contents live, plus the note. */
+    private void showCaseFind(JSONObject c) {
+        JSONObject p = c.optJSONObject("product");
+        String bin = p == null ? "" : p.optString("bin_location", "");
+        boolean has = !bin.isEmpty()
+                && !bin.equalsIgnoreCase("No bin assigned");
+        int units = c.optInt("units", 0);
+        String sku = c.optString("sku", "—");
+        String title = c.isNull("product_title") ? ""
+                : c.optString("product_title");
+        String note = c.isNull("scan_note") ? "" : c.optString("scan_note");
+        beep(SOUND_OTHER);
+        findResult.setText(
+                (has ? "BIN  " + bin : "NO BIN ASSIGNED")
+                + "\n\nBOX OF " + units + "\n" + units + " x " + sku
+                + (title.isEmpty() ? "" : "\n" + title)
+                + (note.isEmpty() ? "" : "\n\n! " + note));
+        findResult.setTextSize(has ? 20 : 16);
+        loadImage(p == null || p.isNull("image_url") ? null
+                : p.optString("image_url"), findImg);
+        status.setText("That barcode is a box of " + units + ".");
+        btInput.requestFocus();
     }
 
     private View buildLocateView() {
@@ -2250,10 +2300,14 @@ public class MainActivity extends Activity {
                 }
             }
         } else {
+            // A row holding only a sealed case has qty 0 but is very much
+            // "touched", so count cases too.
             for (BItem b : bItems)
-                if (b.qty > 0 || b.paired > 0) displayItems.add(b);
+                if (b.qty > 0 || b.caseCount > 0 || b.paired > 0)
+                    displayItems.add(b);
             for (BItem b : bItems)
-                if (b.qty == 0 && b.paired == 0) displayItems.add(b);
+                if (b.qty == 0 && b.caseCount == 0 && b.paired == 0)
+                    displayItems.add(b);
         }
         batchAdapter.notifyDataSetChanged();
     }
@@ -2266,10 +2320,12 @@ public class MainActivity extends Activity {
             // happens on the web terminal after SEND SWEEP.
             return String.valueOf(b.paired);
         }
+        // Pairing counts LABELS (loose boxes + sealed cases); collecting
+        // counts UNITS, which is what Shopify's on-hand is measured in.
         if (step == STEP_PAIR)
-            return b.paired + "/" + Math.max(b.qty, b.paired);
-        return b.expected != null ? b.qty + "/" + b.expected
-                : String.valueOf(b.qty);
+            return b.paired + "/" + Math.max(b.labelsTotal, b.paired);
+        return b.expected != null ? b.unitsTotal + "/" + b.expected
+                : String.valueOf(b.unitsTotal);
     }
 
     // Inventory cells modeled on the EasyScan-style card: image, bold name
@@ -2406,6 +2462,13 @@ public class MainActivity extends Activity {
                 JSONObject body = new JSONObject().put("code", code);
                 JSONObject resp = api("POST",
                         "/api/batches/" + batchId + "/scan", body);
+                // A case code counts nothing until the operator says whether
+                // the box is being opened — it changes units, labels and tags.
+                if (resp.optBoolean("needs_case_decision")) {
+                    final JSONObject box = resp.optJSONObject("case");
+                    ui.post(() -> askCaseAction(code, box));
+                    return;
+                }
                 final BItem item = BItem.from(resp.getJSONObject("item"));
                 final boolean mismatch = resp.optBoolean("bin_mismatch");
                 ui.post(() -> {
@@ -2675,12 +2738,13 @@ public class MainActivity extends Activity {
         StringBuilder warn = new StringBuilder();
         int unpaired = 0, missingBoxes = 0, warnLines = 0;
         for (BItem b : bItems) {
-            if (!b.resolved || b.paired >= b.qty) continue;
+            // Compare against LABELS: a sealed case gets one, not one per unit.
+            if (!b.resolved || b.paired >= b.labelsTotal) continue;
             unpaired++;
-            missingBoxes += b.qty - b.paired;
+            missingBoxes += b.labelsTotal - b.paired;
             if (warnLines < 6) {
                 warn.append("• ").append(b.name()).append(": ")
-                        .append(b.paired).append("/").append(b.qty)
+                        .append(b.paired).append("/").append(b.labelsTotal)
                         .append(" entered by RFID\n");
                 warnLines++;
             }
@@ -2761,6 +2825,74 @@ public class MainActivity extends Activity {
                 }).start())
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /** Opened or sealed? Asked once per case scan, with the note in view. */
+    private void askCaseAction(String code, JSONObject box) {
+        beep(SOUND_OTHER);
+        int units = box == null ? 0 : box.optInt("units", 0);
+        String sku = box == null ? "?" : box.optString("sku", "?");
+        String title = box == null || box.isNull("product_title") ? ""
+                : box.optString("product_title");
+        String note = box == null || box.isNull("scan_note") ? ""
+                : box.optString("scan_note");
+        status.setText("Box of " + units + " — opened or sealed?");
+        new AlertDialog.Builder(this)
+                .setTitle("Box of " + units + " x " + sku)
+                .setMessage((title.isEmpty() ? "" : title + "\n\n")
+                        + (note.isEmpty() ? "" : "! " + note + "\n\n")
+                        + "OPENED: counts " + units + " units and prints "
+                        + units + " labels.\n\n"
+                        + "SEALED: counts " + units + " units but prints ONE "
+                        + "label reading \"" + units + " x " + sku + "\".")
+                .setCancelable(false)
+                .setPositiveButton("Opened", (d, w) ->
+                        batchScanCase(code, "open"))
+                .setNegativeButton("Left sealed", (d, w) ->
+                        batchScanCase(code, "sealed"))
+                .setNeutralButton("Skip", (d, w) -> {
+                    status.setText("Box skipped — nothing counted.");
+                    btInput.requestFocus();
+                })
+                .show();
+    }
+
+    /** Re-send the scan now that the open/sealed question is answered. */
+    private void batchScanCase(String code, String action) {
+        status.setText("Counting box…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("code", code).put("case_action", action);
+                JSONObject resp = api("POST",
+                        "/api/batches/" + batchId + "/scan", body);
+                final BItem item = BItem.from(resp.getJSONObject("item"));
+                final boolean sealed = "sealed".equals(action);
+                ui.post(() -> {
+                    BItem existing = itemById(item.id);
+                    if (existing != null) {
+                        bItems.set(bItems.indexOf(existing), item);
+                        if (pairActive == existing) pairActive = item;
+                    } else {
+                        bItems.add(0, item);
+                    }
+                    previewItem = item;
+                    beep(SOUND_OK);
+                    status.setText(item.unitsTotal + " unit(s), "
+                            + item.labelsTotal + " label(s)"
+                            + (sealed ? " · box left sealed." : "."));
+                    updateBatchCard();
+                    refreshBatchList();
+                    btInput.requestFocus();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Box scan failed: " + e.getMessage());
+                    btInput.requestFocus();
+                });
+            }
+        }).start();
     }
 
     // ------------------------------------------------------------ station ---
