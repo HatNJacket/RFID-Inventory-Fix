@@ -1,7 +1,7 @@
 # RFID Inventory System — Roadmap
 
 Source of truth for project status. Updated by Claude each working session.
-Last updated: 2026-07-28.
+Last updated: 2026-07-29.
 
 ## Architecture (target)
 
@@ -188,6 +188,19 @@ starting early" actively harmful.
 8. **Scan an RFID tag and be told what it is,** with actions — chiefly
    unpair, so a mis-tagged sticker can be re-tagged as the right product
    during or after batch collection.
+
+9. **"?" help icon on every usable C72 window** (added 2026-07-29),
+   explaining how the current window is used. This is a concrete slice of
+   item 4's guidance work — if item 4 gets built first, fold this into it
+   rather than doing it twice.
+
+10. **Support page: name + message → email to Steve** (added 2026-07-29).
+    A user leaves their name and a message, and it lands in Steve's email
+    ("if possible" — his phrasing). Note before building: the server has
+    no email path today, so this needs a sending mechanism decision first
+    (SMTP account, or something the existing Azure/Shopify accounts
+    already provide). Worth deciding whether the C72, the web terminal,
+    or both get the page.
 
 ## 🗓️ Later / backlog
 
