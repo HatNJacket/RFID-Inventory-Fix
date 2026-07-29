@@ -504,6 +504,16 @@
                 <p class="linkbox__text" id="bitem-candpos" hidden></p>
                 <div class="linkbox__actions" id="bitem-usewrap" hidden>
                   <button class="print__btn" id="bitem-use" type="button">Use this listing</button>
+                  <button class="reset" id="bitem-split" type="button" title="Some boxes are one listing and some another (open box vs regular) — divide the scanned count between them">Split between listings…</button>
+                </div>
+                <div id="bitem-splitwrap" hidden>
+                  <p class="linkbox__extra-label" id="bitem-split-title"></p>
+                  <div id="bitem-split-rows"></div>
+                  <div class="linkbox__actions">
+                    <span class="linkbox__text" id="bitem-split-count"></span>
+                    <button class="print__btn" id="bitem-split-go" type="button" disabled>Split</button>
+                    <button class="reset" id="bitem-split-cancel" type="button">Cancel</button>
+                  </div>
                 </div>
                 <div id="bitem-namewrap" hidden>
                   <p class="linkbox__extra-label">Label name (serialized product — needs confirming):</p>

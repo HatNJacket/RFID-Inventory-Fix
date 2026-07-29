@@ -553,7 +553,6 @@ public class MainActivity extends Activity {
         btnSweep = smallBtn("SWEEP");
         btnSweep.setOnClickListener(x -> {
             if (step == STEP_PAIR) armSweep();
-            else if (step == STEP_VERIFY) sendVerifySweep();
             // COLLECT: baseline a part-tagged shelf. (Unpair-everything
             // stays reachable via long-press on UNDO.)
             else if (step == STEP_COLLECT) baselineButton();
@@ -927,6 +926,7 @@ public class MainActivity extends Activity {
     private Button editFindBtn;
     private Button editRecommendBtn;
     private Button editSkipBtn;
+    private Button editSplitBtn;
 
     private void buildItemEditor(FrameLayout outer) {
         editScrim = new FrameLayout(this);
@@ -1009,6 +1009,12 @@ public class MainActivity extends Activity {
         makePrimary(editUse);   // the decisive action when listings compete
         editUse.setOnClickListener(v -> reassignToShown());
         mid.addView(editUse);
+
+        // Some boxes are one listing and some another (open box vs regular,
+        // same barcode) — divide the count instead of moving all of it.
+        editSplitBtn = smallBtn("SPLIT BETWEEN LISTINGS");
+        editSplitBtn.setOnClickListener(v -> openSplitDialog());
+        mid.addView(editSplitBtn);
         editNameRow = new LinearLayout(this);
         editNameIn = new EditText(this);
         editNameIn.setHint("Label name (confirm)");
@@ -1226,9 +1232,15 @@ public class MainActivity extends Activity {
                     + (current ? "  — currently selected" : ""));
             editUse.setVisibility(View.VISIBLE);
             editUse.setEnabled(!current);
+            // Splitting needs at least two boxes to divide and no tags
+            // yet — the server refuses both anyway, but a button that can
+            // only fail is worse than no button.
+            editSplitBtn.setVisibility(it.qty > 1 && it.paired == 0
+                    && !it.skipped ? View.VISIBLE : View.GONE);
         } else {
             editPos.setVisibility(View.GONE);
             editUse.setVisibility(View.GONE);
+            editSplitBtn.setVisibility(View.GONE);
         }
         editNameRow.setVisibility(
                 editEntry.flags.contains("unconfirmed-name")
@@ -2159,7 +2171,11 @@ public class MainActivity extends Activity {
             startVerifyStep();
             applyBatchUi();
         } else {
-            finishBatch();
+            // VERIFY: the advancing button IS "SEND SWEEP" — sending shows
+            // the results table, and confirming from there hands the bin to
+            // the web terminal. One path, not a FINISH button that half the
+            // time answered "go do it on the PC".
+            sendVerifySweepAndReport();
         }
     }
 
@@ -2188,7 +2204,7 @@ public class MainActivity extends Activity {
     // Send the bin sweep to the server. The web terminal watching this
     // batch picks it up on its own and shows the verification there — the
     // reading and deciding happen on a screen big enough for it.
-    private void sendVerifySweep() {
+    private void sendVerifySweepAndReport() {
         if (scanning) {
             try {
                 reader.stopInventory();
@@ -2200,33 +2216,199 @@ public class MainActivity extends Activity {
         synchronized (tags) { epcs.addAll(tags.keySet()); }
         if (epcs.isEmpty()) {
             beep(SOUND_ERR);
-            status.setText("Nothing swept yet — pull the trigger and walk "
-                    + "the bin first.");
+            status.setText("Nothing swept yet - pull the trigger and walk "
+                    + "the bin first, then SEND SWEEP.");
             return;
         }
-        status.setText("Sending " + epcs.size() + " tag(s)…");
+        status.setText("Sending " + epcs.size() + " tag(s)\u2026");
         new Thread(() -> {
             try {
+                // The capture first: the web terminal watching this batch
+                // notices it and jumps to its own verification screen, so
+                // by the time the operator walks back the PC is ready.
                 JSONObject body = new JSONObject()
                         .put("device", prefs.getString("device", "C72"))
                         .put("batch_id", batchId)
                         .put("note", "Bin " + batchBin + " verify sweep")
                         .put("epcs", new JSONArray(epcs));
-                JSONObject resp = api("POST", "/api/epc-captures", body);
-                final int id = resp.optInt("id");
+                api("POST", "/api/epc-captures", body);
+                // Then the same sweep against the bin, for the on-device
+                // table: which of each product's tags were actually seen.
+                JSONObject check = api("POST", "/api/bins/"
+                        + URLEncoder.encode(batchBin, "UTF-8") + "/check",
+                        new JSONObject().put("epcs", new JSONArray(epcs)));
+                final java.util.HashMap<String, Integer> seen =
+                        new java.util.HashMap<>();
+                JSONArray arr = check.optJSONArray("items");
+                for (int i = 0; arr != null && i < arr.length(); i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    seen.put(o.optString("sku"), o.optInt("detected"));
+                }
+                final int sweptCount = epcs.size();
                 ui.post(() -> {
                     beep(SOUND_OK);
-                    status.setText("Sent ✓ sweep #" + id + " (" + epcs.size()
-                            + " tags) — the PC/iPad is showing the "
-                            + "verification now. CLEAR before re-sweeping.");
+                    status.setText("Sweep sent \u2713 (" + sweptCount
+                            + " tags) - the PC/iPad is showing it too.");
+                    showVerifyReport(seen);
                 });
             } catch (Exception e) {
                 ui.post(() -> {
                     beep(SOUND_ERR);
                     status.setText("Send FAILED (" + e.getMessage()
-                            + ") — tags kept; get Wi-Fi and press SEND "
-                            + "again.");
+                            + ") - tags kept; get Wi-Fi and press SEND "
+                            + "SWEEP again.");
                 });
+            }
+        }).start();
+    }
+
+    /** The verify table: per product, labels printed / tags paired / tags
+     *  seen by this sweep, worst rows first, check or cross per row. From
+     *  here the operator either confirms (bin hands to the web terminal
+     *  and the batch closes on-device) or sweeps again. */
+    private void showVerifyReport(java.util.Map<String, Integer> seen) {
+        List<BItem> rows = new ArrayList<>();
+        for (BItem b : bItems) {
+            if (!b.resolved || (b.labelsTotal == 0 && b.paired == 0)) {
+                continue;
+            }
+            rows.add(b);
+        }
+        final java.util.HashMap<Integer, Integer> det =
+                new java.util.HashMap<>();
+        int bad = 0;
+        for (BItem b : rows) {
+            Integer d = b.sku == null ? null : seen.get(b.sku);
+            det.put(b.id, d == null ? 0 : d);
+            if (!verifyRowOk(b, det.get(b.id))) bad++;
+        }
+        // Worst first: the rows needing eyes should not hide under a page
+        // of green.
+        java.util.Collections.sort(rows, (a, b2) -> {
+            boolean oa = verifyRowOk(a, det.get(a.id));
+            boolean ob = verifyRowOk(b2, det.get(b2.id));
+            return oa == ob ? 0 : (oa ? 1 : -1);
+        });
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(8), dp(14), dp(4));
+        GradientDrawable gapD = new GradientDrawable();
+        gapD.setSize(0, dp(6));
+        box.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
+        box.setDividerDrawable(gapD);
+
+        TextView head = new TextView(this);
+        head.setText(bad == 0
+                ? "Every product checks out \u2713"
+                : bad + " product(s) need a look:");
+        head.setTextSize(13);
+        head.setTypeface(null, Typeface.BOLD);
+        head.setTextColor(bad == 0 ? C_OK : C_OVER);
+        box.addView(head);
+
+        for (BItem b : rows) {
+            int d = det.get(b.id);
+            boolean ok = verifyRowOk(b, d);
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setBackground(rr(ok ? C_OK_BG : C_OVER_BG, 0, 8));
+            row.setPadding(dp(8), dp(6), dp(8), dp(6));
+            TextView mark = new TextView(this);
+            mark.setText(ok ? "\u2713" : "\u2717");
+            mark.setTextSize(18);
+            mark.setTypeface(null, Typeface.BOLD);
+            mark.setTextColor(ok ? C_OK : C_OVER);
+            mark.setPadding(0, 0, dp(10), 0);
+            row.addView(mark);
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            TextView nm = new TextView(this);
+            nm.setText(b.name());
+            nm.setTextSize(13);
+            nm.setTypeface(null, Typeface.BOLD);
+            nm.setTextColor(C_TEXT);
+            nm.setMaxLines(2);
+            col.addView(nm);
+            TextView counts = new TextView(this);
+            counts.setText("printed " + b.labelsTotal + "  \u00b7  tagged "
+                    + b.paired + "  \u00b7  seen " + d);
+            counts.setTextSize(12);
+            counts.setTextColor(C_MUTED);
+            col.addView(counts);
+            row.addView(col);
+            box.addView(row);
+        }
+        if (rows.isEmpty()) {
+            TextView none = new TextView(this);
+            none.setText("Nothing was labelled in this batch.");
+            none.setTextSize(12);
+            none.setTextColor(C_MUTED);
+            box.addView(none);
+        }
+
+        ScrollView sc = new ScrollView(this);
+        sc.addView(box);
+        new AlertDialog.Builder(this)
+                .setTitle("Verify bin " + batchBin)
+                .setView(sc)
+                .setPositiveButton("CONFIRM - finish on the web",
+                        (d, w) -> confirmVerifyHandoff())
+                .setNegativeButton("SWEEP AGAIN", (d, w) -> {
+                    clearVerifySweep();
+                    status.setText("Sweep cleared - pull the trigger to "
+                            + "sweep the bin again, then SEND SWEEP.");
+                })
+                .show();
+    }
+
+    /** A row passes when every printed label got a tag and every one of
+     *  those tags answered the sweep. */
+    private boolean verifyRowOk(BItem b, Integer detected) {
+        int d = detected == null ? 0 : detected;
+        return b.paired >= b.labelsTotal && d >= b.paired;
+    }
+
+    /** Confirm from the report: park the batch as awaiting-verify (the
+     *  server refuses to CLOSE from a scanner on purpose - counts get
+     *  checked on a full screen) and drop back to the batch list. */
+    private void confirmVerifyHandoff() {
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject().put("created_by",
+                        prefs.getString("device", "C72"));
+                api("POST", "/api/batches/" + batchId + "/complete", body);
+                // A 2xx means an older server closed it outright.
+                final String bin = batchBin;
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    exitBatch(true);
+                    status.setText("Bin " + bin + " done \u2713");
+                });
+            } catch (Exception e) {
+                final String msg = e.getMessage() == null
+                        ? "" : e.getMessage();
+                final String bin = batchBin;
+                if (msg.contains("web terminal")) {
+                    // The expected answer: the batch is parked as
+                    // awaiting-verify and the web side already jumped to
+                    // its verification screen when the sweep landed.
+                    ui.post(() -> {
+                        beep(SOUND_OK);
+                        Toast.makeText(this,
+                                "Handed to the web terminal \u2713",
+                                Toast.LENGTH_LONG).show();
+                        exitBatch(true);
+                        status.setText("Bin " + bin + " is waiting on the "
+                                + "PC/iPad - check the counts there and "
+                                + "hit Complete batch.");
+                    });
+                } else {
+                    ui.post(() -> {
+                        beep(SOUND_ERR);
+                        status.setText("Could not finish: " + msg);
+                    });
+                }
             }
         }).start();
     }
@@ -2615,13 +2797,16 @@ public class MainActivity extends Activity {
         // The two right-hand buttons change job with the step.
         btnUndo.setText(step == STEP_VERIFY ? "CLEAR" : "UNDO");
         if (step != STEP_COLLECT) baselineArmed = false;
-        btnSweep.setText(step == STEP_VERIFY ? "SEND SWEEP"
-                : step == STEP_PAIR ? "SWEEP"
+        // In VERIFY the advancing button IS the send, so the third slot
+        // would only duplicate it — hide it and the row reads as one path.
+        btnSweep.setVisibility(step == STEP_VERIFY ? View.GONE : View.VISIBLE);
+        btnSweep.setText(step == STEP_PAIR ? "SWEEP"
                 : step == STEP_COLLECT
                   ? (baselineArmed ? "APPLY BASELINE" : "BASELINE")
                   : "UNPAIR");
         btnNext.setText(parentBatchId != 0 && step == STEP_PAIR
-                ? "FINISH TRIP" : step == STEP_VERIFY ? "FINISH" : "NEXT →");
+                ? "FINISH TRIP"
+                : step == STEP_VERIFY ? "SEND SWEEP" : "NEXT →");
         if (in) {
             if (step == STEP_COLLECT) {
                 status.setText("COLLECT: scan every box in this bin, then "
@@ -2636,8 +2821,8 @@ public class MainActivity extends Activity {
                         + "sticker; NEXT verifies the bin.");
             } else {
                 status.setText("VERIFY: pull the trigger to sweep the whole "
-                        + "bin, then SEND SWEEP — the PC/iPad shows the "
-                        + "result.");
+                        + "bin, then SEND SWEEP — the results show here AND "
+                        + "on the PC/iPad.");
             }
         } else {
             status.setText("Pick an open batch (started on the PC/iPad).");
@@ -3145,103 +3330,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void finishBatch() {
-        if (!inBatch()) return;
-        // RFID check: every scanned box should have a tag paired before the
-        // bin is finished. Short is allowed — but only past an explicit
-        // warning that leads with what's missing.
-        StringBuilder warn = new StringBuilder();
-        int unpaired = 0, missingBoxes = 0, warnLines = 0;
-        for (BItem b : bItems) {
-            // Compare against LABELS: a sealed case gets one, not one per unit.
-            if (!b.resolved || b.paired >= b.labelsTotal) continue;
-            unpaired++;
-            missingBoxes += b.labelsTotal - b.paired;
-            if (warnLines < 6) {
-                warn.append("• ").append(b.name()).append(": ")
-                        .append(b.paired).append("/").append(b.labelsTotal)
-                        .append(" entered by RFID\n");
-                warnLines++;
-            }
-        }
-        StringBuilder sb = new StringBuilder();
-        if (unpaired > 0) {
-            sb.append("⚠ ").append(unpaired).append(" product(s) — ")
-                    .append(missingBoxes).append(" box(es) — NOT entered "
-                    + "into inventory with RFID tags yet:\n\n")
-                    .append(warn);
-            if (unpaired > 6) sb.append("…\n");
-            sb.append("\nAre you sure? They'll be filed in Review as "
-                    + "incomplete pairing.\n\n——————\n");
-        }
-        int diffs = 0, unresolved = 0, lines = 0;
-        for (BItem b : bItems) {
-            if (!b.resolved) {
-                if (b.qty > 0) unresolved++;
-                continue;
-            }
-            if (b.qty == 0 && b.paired == 0) continue;
-            String delta;
-            if (b.expected != null && b.qty != b.expected) {
-                int d = b.qty - b.expected;
-                delta = b.expected + " → " + b.qty + " ("
-                        + (d > 0 ? "+" + d : String.valueOf(d)) + ")";
-                diffs++;
-            } else {
-                delta = b.qty + " ✓";
-            }
-            if (lines < 25) {
-                sb.append(b.name()).append(":  ").append(delta)
-                        .append("  · ").append(b.paired).append("/")
-                        .append(b.qty).append(" tagged").append("\n");
-                lines++;
-            }
-        }
-        if (lines == 0) sb.append("(no boxes scanned)\n");
-        sb.append("\n");
-        if (diffs > 0) sb.append(diffs).append(" count difference(s) will "
-                + "be filed for Review.\n");
-        if (unresolved > 0) sb.append(unresolved).append(" unknown "
-                + "barcode(s) will be filed for Review.\n");
-        if (diffs + unresolved + unpaired == 0) {
-            sb.append("Everything matches and every box is tagged. "
-                    + "Clean bin ✓\n");
-        }
-        sb.append("\nNo Shopify stock numbers change — differences go to "
-                + "the Review tab for a decision.");
-        new AlertDialog.Builder(this)
-                .setTitle(unpaired > 0
-                        ? "Finish bin " + batchBin + " with untagged boxes?"
-                        : "Finish bin " + batchBin + "?")
-                .setMessage(sb.toString())
-                .setPositiveButton(unpaired > 0 ? "Finish anyway" : "Finish",
-                        (d, w) -> new Thread(() -> {
-                    try {
-                        JSONObject body = new JSONObject().put("created_by",
-                                prefs.getString("device", "C72"));
-                        JSONObject resp = api("POST", "/api/batches/"
-                                + batchId + "/complete", body);
-                        final int n = resp.getJSONArray("review_tasks")
-                                .length();
-                        final String bin = batchBin;
-                        ui.post(() -> {
-                            beep(SOUND_OK);
-                            Toast.makeText(this, "Batch done ✓",
-                                    Toast.LENGTH_LONG).show();
-                            exitBatch(true);
-                            status.setText("Bin " + bin + " done — "
-                                    + (n > 0 ? n + " follow-up(s) filed in "
-                                       + "Review." : "no follow-ups ✓"));
-                        });
-                    } catch (Exception e) {
-                        ui.post(() -> status.setText("Finish failed: "
-                                + e.getMessage()));
-                    }
-                }).start())
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
     /** versionName + versionCode of the APK actually installed. */
     private String appVersion() {
         try {
@@ -3251,6 +3339,141 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             return "?";
         }
+    }
+
+    // ---------------------------------------------------- split a scan pile --
+    // Two 94216 boxes share a barcode but one is the open-box listing.
+    // Reassign moves the WHOLE count; this divides it: a stepper per
+    // candidate, and SPLIT stays locked until the counts add up to exactly
+    // what was scanned - a box can't be lost or invented in the shuffle.
+    private void openSplitDialog() {
+        if (editEntry == null || editEntry.candidates.size() < 2) return;
+        final BItem it = editEntry.item;
+        final List<JSONObject> cands = editEntry.candidates;
+        final int total = it.qty;
+        final int[] counts = new int[cands.size()];
+        for (int i = 0; i < cands.size(); i++) {
+            if (cands.get(i).optString("shopify_variant_id")
+                    .equals(entryVariantId(editEntry))) {
+                counts[i] = total;   // start with everything where it is
+            }
+        }
+        final TextView[] countViews = new TextView[cands.size()];
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(8), dp(14), dp(4));
+        GradientDrawable gapD = new GradientDrawable();
+        gapD.setSize(0, dp(8));
+        box.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
+        box.setDividerDrawable(gapD);
+
+        final TextView tally = new TextView(this);
+        tally.setTextSize(13);
+        tally.setTypeface(null, Typeface.BOLD);
+
+        final AlertDialog[] dlgRef = new AlertDialog[1];
+        final Runnable refresh = () -> {
+            int sum = 0;
+            for (int i = 0; i < counts.length; i++) {
+                sum += counts[i];
+                countViews[i].setText(String.valueOf(counts[i]));
+            }
+            boolean ok = sum == total;
+            tally.setText(ok
+                    ? sum + " of " + total + " assigned ✓"
+                    : sum + " of " + total + " assigned - every box needs "
+                      + "a home");
+            tally.setTextColor(ok ? C_OK : C_OVER);
+            if (dlgRef[0] != null) {
+                dlgRef[0].getButton(AlertDialog.BUTTON_POSITIVE)
+                        .setEnabled(ok);
+            }
+        };
+
+        for (int i = 0; i < cands.size(); i++) {
+            final int idx = i;
+            JSONObject c = cands.get(i);
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            Button minus = smallBtn("−");
+            minus.setOnClickListener(v -> {
+                if (counts[idx] > 0) {
+                    counts[idx]--;
+                    refresh.run();
+                }
+            });
+            row.addView(minus, new LinearLayout.LayoutParams(dp(42),
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            TextView n = new TextView(this);
+            n.setTextSize(17);
+            n.setTypeface(null, Typeface.BOLD);
+            n.setTextColor(C_BLUE);
+            n.setGravity(Gravity.CENTER);
+            countViews[i] = n;
+            row.addView(n, new LinearLayout.LayoutParams(dp(40),
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            Button plus = smallBtn("+");
+            plus.setOnClickListener(v -> {
+                counts[idx]++;
+                refresh.run();
+            });
+            row.addView(plus, new LinearLayout.LayoutParams(dp(42),
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+            TextView nm = new TextView(this);
+            nm.setText(c.optString("product_title", "?"));
+            nm.setTextSize(12);
+            nm.setTextColor(C_TEXT);
+            nm.setMaxLines(2);
+            nm.setPadding(dp(8), 0, 0, 0);
+            row.addView(nm, weight());
+            box.addView(row);
+        }
+        box.addView(tally);
+
+        ScrollView sc = new ScrollView(this);
+        sc.addView(box);
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("Split " + total + " box(es)")
+                .setView(sc)
+                .setPositiveButton("SPLIT", (d, w) -> postSplit(cands, counts))
+                .setNegativeButton("Cancel", null)
+                .create();
+        dlgRef[0] = dlg;
+        dlg.show();
+        refresh.run();
+    }
+
+    private void postSplit(List<JSONObject> cands, int[] counts) {
+        if (editEntry == null) return;
+        final int itemId = editEntry.item.id;
+        editMsg.setText("Splitting…");
+        new Thread(() -> {
+            try {
+                JSONArray parts = new JSONArray();
+                for (int i = 0; i < cands.size(); i++) {
+                    parts.put(new JSONObject()
+                            .put("shopify_variant_id", cands.get(i)
+                                    .optString("shopify_variant_id"))
+                            .put("qty", counts[i]));
+                }
+                JSONObject resp = api("POST", "/api/batches/" + batchId
+                        + "/items/" + itemId + "/split",
+                        new JSONObject().put("parts", parts));
+                final String msg = resp.optString("message", "Split ✓");
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    closeItemEditor();
+                    status.setText(msg);
+                    reloadBatchAndReview();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    editMsg.setText("Split failed: " + e.getMessage());
+                });
+            }
+        }).start();
     }
 
     // ------------------------------------------ unresolved barcode rescue ---

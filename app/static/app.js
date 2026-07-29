@@ -3145,9 +3145,15 @@ function renderBitem() {
     const useWrap = document.getElementById("bitem-usewrap");
     useWrap.hidden = false;
     document.getElementById("bitem-use").disabled = current;
+    // Splitting needs at least two boxes to divide and no tags yet — the
+    // server refuses both anyway, but a button that can only fail is worse
+    // than no button.
+    document.getElementById("bitem-split").hidden =
+      it.qty_scanned < 2 || it.paired_count > 0;
   } else {
     document.getElementById("bitem-usewrap").hidden = true;
   }
+  document.getElementById("bitem-splitwrap").hidden = true;
 
   const nameWrap = document.getElementById("bitem-namewrap");
   nameWrap.hidden = !bitemEntry.flags.includes("unconfirmed-name");
@@ -3617,6 +3623,89 @@ document.getElementById("bitem-next").addEventListener("click", () => {
     renderBitem();
   }
 });
+
+// --- split one scanned pile between listings sharing a barcode -------------
+// Two 94216 boxes, one regular and one open-box, same barcode: reassign
+// moves ALL of them, so there was no honest way to say "one of each". The
+// form gives every candidate a count; Split stays locked until the counts
+// add up to exactly what was scanned, so a box can't vanish or duplicate.
+function openSplitForm() {
+  const it = bitemEntry.item;
+  const cands = bitemEntry.candidates || [];
+  const wrap = document.getElementById("bitem-splitwrap");
+  const rows = document.getElementById("bitem-split-rows");
+  document.getElementById("bitem-split-title").textContent =
+    `Divide the ${it.qty_scanned} scanned box(es) between these listings:`;
+  rows.innerHTML = "";
+  cands.forEach((c, i) => {
+    const row = document.createElement("div");
+    row.className = "linkbox__form";
+    row.style.marginBottom = "6px";
+    // The row it's currently sitting on starts with the full count; the
+    // operator moves boxes off it.
+    const startQty =
+      c.shopify_variant_id === it.shopify_variant_id ? it.qty_scanned : 0;
+    row.innerHTML = `
+      <input type="number" class="linkbox__input bitem-split-qty" min="0"
+             max="${it.qty_scanned}" value="${startQty}"
+             data-variant="${escapeHtml(c.shopify_variant_id)}"
+             style="max-width:70px" />
+      <span class="linkbox__text">${escapeHtml(
+        c.product_title || c.sku || "?"
+      )}${c.sku ? ` · ${escapeHtml(c.sku)}` : ""}</span>`;
+    rows.append(row);
+  });
+  const refresh = () => {
+    const total = [...rows.querySelectorAll(".bitem-split-qty")].reduce(
+      (n, inp) => n + (Number(inp.value) || 0),
+      0
+    );
+    const ok = total === it.qty_scanned;
+    document.getElementById("bitem-split-count").textContent = ok
+      ? `${total} of ${it.qty_scanned} assigned ✓`
+      : `${total} of ${it.qty_scanned} assigned — every box needs a home`;
+    document.getElementById("bitem-split-go").disabled = !ok;
+  };
+  rows.querySelectorAll(".bitem-split-qty").forEach((inp) =>
+    inp.addEventListener("input", refresh)
+  );
+  refresh();
+  wrap.hidden = false;
+}
+
+document
+  .getElementById("bitem-split")
+  .addEventListener("click", openSplitForm);
+document
+  .getElementById("bitem-split-cancel")
+  .addEventListener("click", () => {
+    document.getElementById("bitem-splitwrap").hidden = true;
+  });
+
+document
+  .getElementById("bitem-split-go")
+  .addEventListener("click", async () => {
+    const msg = document.getElementById("bitem-msg");
+    const parts = [
+      ...document.querySelectorAll("#bitem-split-rows .bitem-split-qty"),
+    ].map((inp) => ({
+      shopify_variant_id: inp.dataset.variant,
+      qty: Number(inp.value) || 0,
+    }));
+    try {
+      const data = await postJson(
+        `/api/batches/${batch.id}/items/${bitemEntry.item.id}/split`,
+        { parts }
+      );
+      batchSound("ok");
+      document.getElementById("bitem-overlay").hidden = true;
+      setBatchResult(data.message, "ok");
+      await pullBatch(false);
+      loadBatchReview();
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+  });
 
 document.getElementById("bitem-use").addEventListener("click", async () => {
   const cand = bitemEntry.candidates[bitemIdx];

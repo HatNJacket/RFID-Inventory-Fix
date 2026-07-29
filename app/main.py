@@ -3088,6 +3088,129 @@ def set_item_kind(
     }
 
 
+class SplitPartIn(BaseModel):
+    shopify_variant_id: str = Field(max_length=64)
+    qty: int = Field(ge=0, le=500)
+
+
+class SplitIn(BaseModel):
+    parts: list[SplitPartIn] = Field(min_length=2, max_length=10)
+
+
+@app.post(
+    "/api/batches/{batch_id}/items/{item_id}/split",
+    dependencies=[Depends(require_user)],
+)
+def batch_item_split(
+    batch_id: int,
+    item_id: int,
+    payload: SplitIn,
+    session: Session = Depends(get_session),
+):
+    """One scanned pile, several listings: two 94216 boxes share a barcode
+    but one is the open-box listing. Reassign moves the WHOLE count; this
+    divides it — each candidate gets its share, and the shares must add up
+    to exactly what was scanned, so a box can't be lost or invented in the
+    shuffle.
+
+    Refused once tags are paired: the tags were tied to ONE listing, and
+    splitting under them would leave tags asserting the wrong product."""
+    batch = _get_batch(session, batch_id)
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    if not item.resolved:
+        raise HTTPException(422, "That row never resolved to a product.")
+    if item.paired_count:
+        raise HTTPException(
+            409,
+            f"{item.paired_count} tag(s) are already paired to this row — "
+            f"undo the pairing first, then split.",
+        )
+    if item.case_count:
+        raise HTTPException(
+            409,
+            "This row holds sealed cases. Open or re-scan them first — a "
+            "case can't be split between listings.",
+        )
+    total = sum(p.qty for p in payload.parts)
+    if total != item.qty_scanned:
+        raise HTTPException(
+            422,
+            f"The split adds up to {total}, but {item.qty_scanned} box(es) "
+            f"were scanned. Every box has to land somewhere.",
+        )
+    seen_variants = {p.shopify_variant_id for p in payload.parts}
+    if len(seen_variants) != len(payload.parts):
+        raise HTTPException(422, "The same listing appears twice.")
+
+    code = item.barcode or item.scanned_code
+    choices = _merge_siblings(
+        session, item, products_by_barcode_all(code or "")
+    )
+    by_variant = {c.get("shopify_variant_id"): c for c in choices}
+    for p in payload.parts:
+        if p.shopify_variant_id not in by_variant:
+            raise HTTPException(
+                404,
+                "One of those listings isn't an alternative for this item.",
+            )
+
+    rows = []
+    for p in payload.parts:
+        match = by_variant[p.shopify_variant_id]
+        if p.shopify_variant_id == item.shopify_variant_id:
+            # The original keeps its row (and its label-name override);
+            # only the count changes. qty 0 is allowed — it then reads as
+            # an untouched seeded row, which is exactly what it is.
+            item.qty_scanned = p.qty
+            rows.append(item)
+            continue
+        existing = next(
+            (
+                i for i in _batch_items(session, batch_id)
+                if i.id != item.id and i.resolved and i.sku
+                and i.sku == match.get("sku")
+            ),
+            None,
+        )
+        if existing is not None:
+            existing.qty_scanned += p.qty
+            rows.append(existing)
+            continue
+        if p.qty == 0:
+            continue    # don't create empty rows for unpicked listings
+        row = BatchItem(
+            batch_id=batch.id,
+            scanned_code=(match.get("barcode")
+                          or match.get("sku") or "")[:64],
+            resolved=True,
+            shopify_variant_id=match.get("shopify_variant_id"),
+            shopify_product_id=match.get("shopify_product_id"),
+            product_title=match.get("product_title"),
+            variant_title=match.get("variant_title"),
+            sku=match.get("sku"),
+            barcode=match.get("barcode"),
+            bin_location=match.get("bin_location"),
+            image_url=(match.get("image_url") or "")[:500] or None,
+            qty_scanned=p.qty,
+            expected_qty=_mirror_qty(session, match.get("sku")),
+        )
+        session.add(row)
+        rows.append(row)
+    session.commit()
+    for r in rows:
+        session.refresh(r)
+    summary = ", ".join(
+        f"{r.qty_scanned} × {r.sku or r.product_title}" for r in rows
+        if r.qty_scanned
+    )
+    return {
+        "items": [r.as_dict() for r in rows],
+        "message": f"Split ✓ — {summary}.",
+    }
+
+
 class ItemSkipIn(BaseModel):
     skipped: bool = True
     reason: str | None = Field(default=None, max_length=120)
