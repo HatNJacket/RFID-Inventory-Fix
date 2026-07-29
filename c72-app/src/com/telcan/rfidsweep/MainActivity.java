@@ -3110,11 +3110,22 @@ public class MainActivity extends Activity {
     }
 
     private void pairSelect(String code) {
+        // Twins sharing a barcode (SS TH10 and its open-box listing, both
+        // seeded from the same bin) both match the scan — but only one has
+        // labels waiting for tags. First-match here used to hand the pair
+        // target to a seeded row with nothing printed, so every label scan
+        // "came up as OPEN BOX". Prefer work over emptiness:
+        //   1. a match with unpaired labels,  2. any match with labels,
+        //   3. any match at all.
         BItem match = null;
-        for (BItem b : bItems) {
-            if (!b.resolved) continue;
-            if ((b.barcode != null && b.barcode.equals(code))
-                    || (b.sku != null && b.sku.equals(code))) {
+        for (int pass = 0; pass < 3 && match == null; pass++) {
+            for (BItem b : bItems) {
+                if (!b.resolved) continue;
+                boolean hit = (b.barcode != null && b.barcode.equals(code))
+                        || (b.sku != null && b.sku.equals(code));
+                if (!hit) continue;
+                if (pass == 0 && b.paired >= b.labelsTotal) continue;
+                if (pass == 1 && b.labelsTotal == 0) continue;
                 match = b;
                 break;
             }

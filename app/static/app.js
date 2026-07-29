@@ -3901,14 +3901,22 @@ bEl.toPair.addEventListener("click", () => showBatchStage("pair"));
 // --- Stage 4: pair ----------------------------------------------------------
 function matchBatchItem(code) {
   const low = code.toLowerCase();
+  const hits = batchItems.filter(
+    (i) =>
+      i.resolved &&
+      ((i.barcode && i.barcode.toLowerCase() === low) ||
+        (i.sku && i.sku.toLowerCase() === low) ||
+        (i.scanned_code && i.scanned_code.toLowerCase() === low))
+  );
+  // Twins sharing a barcode (SS TH10 and its open-box listing, both seeded
+  // from the same bin) both match — but only one has labels waiting for
+  // tags. A row with nothing printed can't be the thing being paired, so
+  // it must never win the tie.
+  const labels = (i) => (i.labels_total != null ? i.labels_total : i.qty_scanned);
   return (
-    batchItems.find(
-      (i) =>
-        i.resolved &&
-        ((i.barcode && i.barcode.toLowerCase() === low) ||
-          (i.sku && i.sku.toLowerCase() === low) ||
-          (i.scanned_code && i.scanned_code.toLowerCase() === low))
-    ) ||
+    hits.find((i) => labels(i) > i.paired_count) ||
+    hits.find((i) => labels(i) > 0) ||
+    hits[0] ||
     (/^\d{5,12}$/.test(code)
       ? batchItems.find(
           (i) => i.resolved && i.serial_prefix === code.slice(0, 4)
