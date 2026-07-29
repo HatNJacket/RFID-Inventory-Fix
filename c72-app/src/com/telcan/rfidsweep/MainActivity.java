@@ -20,6 +20,8 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
 import android.os.Bundle;
@@ -34,6 +36,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
+import android.widget.ScrollView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -74,9 +77,11 @@ public class MainActivity extends Activity {
     private static final int[] TRIGGER_KEYS = {
             139, 280, 291, 293, 294, 311, 312, 313, 315, 591, 593, 594, 595, 596
     };
+    // First-run favourites only. Once the operator stars/renames their own,
+    // these never reappear — favourites are theirs, not ours.
     private static final int[] PRESET_LEVELS = {2, 5, 10, 30};
-    private static final String[] PRESET_LABELS = {
-            "2 station", "5 bin", "10 rack", "30 locate"};
+    private static final String[] PRESET_NAMES = {
+            "station", "bin", "rack", "locate"};
 
     private static final int SOUND_OK = 0;
     private static final int SOUND_OTHER = 1;
@@ -97,6 +102,21 @@ public class MainActivity extends Activity {
     private static final int C_MUTED = Color.parseColor("#6d7175");
     private static final int C_BLUE = Color.parseColor("#005bd3");
     private static final int C_CHIP = Color.parseColor("#d9dbdd");
+    // Style tokens matching the web terminal (Shopify-admin look): hairline
+    // borders on white cards over the gray workspace, blue accents, rounded
+    // pills instead of stock square gray buttons.
+    private static final int C_LINE = Color.parseColor("#e1e3e5");
+    private static final int C_PRESS = Color.parseColor("#e7e9eb");
+    private static final int C_BLUE_DK = Color.parseColor("#00449e");
+    private static final int C_SOFT = Color.parseColor("#e3edfb");
+    private static final int C_SOFT_DK = Color.parseColor("#cbdef6");
+    // Pair-step outcome colours, matching the web's glow states. The fills
+    // are deliberately faint (alpha 0x22) so the product photo and text stay
+    // readable; the tracker number carries the saturated colour.
+    private static final int C_OK = Color.parseColor("#29845a");
+    private static final int C_OVER = Color.parseColor("#d72c0d");
+    private static final int C_OK_BG = Color.parseColor("#2229845a");
+    private static final int C_OVER_BG = Color.parseColor("#22d72c0d");
 
     private RFIDWithUHFUART reader;
     private volatile boolean readerReady = false;
@@ -139,6 +159,7 @@ public class MainActivity extends Activity {
 
     // station widgets
     private Button pwrChipStation;
+    private Button pwrChipSweep;
     private FrameLayout stationCard;
     private ImageView stationImg;
     private TextView stationName;
@@ -319,7 +340,8 @@ public class MainActivity extends Activity {
         btInput = new EditText(this);
         btInput.setHint("BT scanner…");
         btInput.setTextSize(13);
-        btInput.setPadding(dp(8), dp(4), dp(8), dp(4));
+        btInput.setPadding(dp(10), dp(7), dp(10), dp(7));
+        btInput.setBackground(rr(Color.WHITE, C_LINE, 8));
         btInput.setInputType(InputType.TYPE_CLASS_TEXT
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         btInput.setShowSoftInputOnFocus(false);
@@ -363,9 +385,15 @@ public class MainActivity extends Activity {
         status = new TextView(this);
         status.setTextSize(13);
         status.setTextColor(C_MUTED);
-        status.setPadding(dp(2), dp(2), dp(2), dp(4));
+        status.setPadding(dp(10), dp(6), dp(10), dp(6));
         status.setMaxLines(3);
-        root.addView(status);
+        status.setBackground(rr(Color.WHITE, C_LINE, 8));
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        sl.topMargin = dp(6);
+        sl.bottomMargin = dp(6);
+        root.addView(status, sl);
 
         // ---- content -------------------------------------------------------
         FrameLayout content = new FrameLayout(this);
@@ -470,7 +498,7 @@ public class MainActivity extends Activity {
         binChip.setTextColor(C_TEXT);
         header.addView(binChip, weight());
         pwrChipBatch = chipBtn("PWR " + prefs.getInt("power", 5));
-        pwrChipBatch.setOnClickListener(x -> showPowerDialog());
+        wirePowerChip(pwrChipBatch);
         header.addView(pwrChipBatch);
         phaseChip = new TextView(this);
         phaseChip.setTextSize(15);
@@ -510,23 +538,18 @@ public class MainActivity extends Activity {
         v.addView(batchListView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
+        // Steve's order: EXIT | BACK | BASELINE | UNDO | NEXT — escape on
+        // the far left, the one advancing action on the far right.
         batchBtnRow = new LinearLayout(this);
-        Button back = smallBtn("← BACK");
+        Button exit = smallBtn("EXIT");
+        exit.setOnClickListener(x -> exitBatch(false));
+        batchBtnRow.addView(exit, weight());
+        // Trailing arrow, like NEXT — on a five-button row both labels wrap,
+        // and a leading arrow put BACK's above the word while NEXT's sat
+        // below it.
+        Button back = smallBtn("BACK ←");
         back.setOnClickListener(x -> stepBack());
         batchBtnRow.addView(back, weight());
-        btnNext = smallBtn("NEXT →");
-        btnNext.setOnClickListener(x -> stepNext());
-        batchBtnRow.addView(btnNext, weight());
-        btnUndo = smallBtn("UNDO");
-        btnUndo.setOnClickListener(x -> {
-            if (step == STEP_VERIFY) clearVerifySweep();
-            else undoPair();
-        });
-        btnUndo.setOnLongClickListener(x -> {
-            undoAllPairing();
-            return true;
-        });
-        batchBtnRow.addView(btnUndo, weight());
         btnSweep = smallBtn("SWEEP");
         btnSweep.setOnClickListener(x -> {
             if (step == STEP_PAIR) armSweep();
@@ -537,19 +560,30 @@ public class MainActivity extends Activity {
             else undoAllPairing();
         });
         batchBtnRow.addView(btnSweep, weight());
-        Button exit = smallBtn("EXIT");
-        exit.setOnClickListener(x -> exitBatch(false));
-        batchBtnRow.addView(exit, weight());
+        btnUndo = smallBtn("UNDO");
+        btnUndo.setOnClickListener(x -> {
+            if (step == STEP_VERIFY) clearVerifySweep();
+            else undoPair();
+        });
+        btnUndo.setOnLongClickListener(x -> {
+            undoAllPairing();
+            return true;
+        });
+        batchBtnRow.addView(btnUndo, weight());
+        btnNext = smallBtn("NEXT →");
+        makePrimary(btnNext);   // the one button that advances the flow
+        btnNext.setOnClickListener(x -> stepNext());
+        batchBtnRow.addView(btnNext, weight());
         v.addView(batchBtnRow);
 
         batchListView.setOnItemClickListener((parent, view, pos, id) -> {
             if (!inBatch() || pos >= displayItems.size()) return;
             if (step == STEP_CHECK && pos < checkEntries.size()) {
                 openItemEditor(checkEntries.get(pos));
-            } else if (step == STEP_COLLECT) {
-                // Same editor while collecting: fix a count, rename the
-                // label, or move the product to another bin without
-                // waiting for the check step.
+            } else {
+                // Same editor everywhere: fix a count, rename the label,
+                // move a product or skip it — during collect, pair AND
+                // verify, without hunting for the one step that allows it.
                 CheckEntry e = new CheckEntry();
                 e.item = displayItems.get(pos);
                 openItemEditor(e);
@@ -572,7 +606,7 @@ public class MainActivity extends Activity {
         t.setTextColor(C_TEXT);
         header.addView(t, weight());
         pwrChipStation = chipBtn("PWR " + prefs.getInt("power", 5));
-        pwrChipStation.setOnClickListener(x -> showPowerDialog());
+        wirePowerChip(pwrChipStation);
         header.addView(pwrChipStation);
         v.addView(header);
 
@@ -615,9 +649,9 @@ public class MainActivity extends Activity {
         sweepCount.setTypeface(null, Typeface.BOLD);
         sweepCount.setTextColor(C_BLUE);
         header.addView(sweepCount, weight());
-        Button pwr = chipBtn("PWR " + prefs.getInt("power", 5));
-        pwr.setOnClickListener(x -> showPowerDialog());
-        header.addView(pwr);
+        pwrChipSweep = chipBtn("PWR " + prefs.getInt("power", 5));
+        wirePowerChip(pwrChipSweep);
+        header.addView(pwrChipSweep);
         v.addView(header);
 
         LinearLayout row = new LinearLayout(this);
@@ -770,8 +804,8 @@ public class MainActivity extends Activity {
     // Preview card: [image | name + SKU] with the tracker pinned top-right.
     private void buildCard(FrameLayout card, ImageView[] img, TextView[] name,
                            TextView[] sku, TextView[] tracker) {
-        card.setBackgroundColor(Color.WHITE);
-        card.setPadding(dp(8), dp(8), dp(8), dp(8));
+        card.setBackground(rr(Color.WHITE, C_LINE, 10));
+        card.setPadding(dp(10), dp(10), dp(10), dp(10));
 
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -818,6 +852,27 @@ public class MainActivity extends Activity {
         tracker[0] = tr;
     }
 
+    /** Rounded rect: the building block of the whole look. */
+    private GradientDrawable rr(int fill, int stroke, int radiusDp) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(fill);
+        g.setCornerRadius(dp(radiusDp));
+        if (stroke != 0) g.setStroke(dp(1), stroke);
+        return g;
+    }
+
+    /** Button background with a real pressed state — a flat drawable would
+     *  kill all touch feedback, which on a scanner is how double-taps
+     *  happen. */
+    private StateListDrawable btnBg(int fill, int stroke, int pressed,
+                                    int radiusDp) {
+        StateListDrawable s = new StateListDrawable();
+        s.addState(new int[]{android.R.attr.state_pressed},
+                rr(pressed, stroke, radiusDp));
+        s.addState(new int[]{}, rr(fill, stroke, radiusDp));
+        return s;
+    }
+
     private Button smallBtn(String text) {
         Button b = new Button(this);
         b.setText(text);
@@ -825,13 +880,25 @@ public class MainActivity extends Activity {
         b.setAllCaps(false);
         b.setMinHeight(0);
         b.setMinimumHeight(dp(38));
-        b.setPadding(dp(4), 0, dp(4), 0);
+        b.setPadding(dp(10), 0, dp(10), 0);
+        b.setBackground(btnBg(Color.WHITE, C_LINE, C_PRESS, 8));
+        b.setTextColor(C_TEXT);
+        b.setStateListAnimator(null);
         return b;
+    }
+
+    /** The one action that moves the flow forward gets the filled blue. */
+    private void makePrimary(Button b) {
+        b.setBackground(btnBg(C_BLUE, 0, C_BLUE_DK, 8));
+        b.setTextColor(Color.WHITE);
+        b.setTypeface(null, Typeface.BOLD);
     }
 
     private Button chipBtn(String text) {
         Button b = smallBtn(text);
-        b.setBackgroundColor(C_CHIP);
+        b.setBackground(btnBg(C_SOFT, 0, C_SOFT_DK, 16));
+        b.setTextColor(C_BLUE);
+        b.setTypeface(null, Typeface.BOLD);
         b.setMinimumHeight(dp(32));
         return b;
     }
@@ -869,30 +936,56 @@ public class MainActivity extends Activity {
 
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setBackgroundColor(Color.WHITE);
-        panel.setPadding(dp(8), dp(10), dp(8), dp(10));
+        panel.setBackground(rr(Color.WHITE, C_LINE, 12));
+        panel.setPadding(dp(12), dp(12), dp(12), dp(12));
         panel.setClickable(true);
 
-        LinearLayout nav = new LinearLayout(this);
-        nav.setGravity(Gravity.CENTER_VERTICAL);
+        // Candidate arrows sit ON the preview image, left and right, rather
+        // than running the full height of the panel: they belong to the
+        // product being shown, and full-height rails stole width from every
+        // control below them.
+        FrameLayout imgWrap = new FrameLayout(this);
+        editImg = new ImageView(this);
+        editImg.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        editImg.setBackground(rr(C_BG, 0, 8));
+        imgWrap.addView(editImg, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(96)));
+
         editPrev = smallBtn("◀");
+        editPrev.setTextSize(17);
         editPrev.setOnClickListener(v -> {
             if (editIdx > 0) {
                 editIdx--;
                 renderItemEditor();
             }
         });
-        nav.addView(editPrev, new LinearLayout.LayoutParams(dp(44),
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        FrameLayout.LayoutParams pvl = new FrameLayout.LayoutParams(
+                dp(40), dp(56), Gravity.START | Gravity.CENTER_VERTICAL);
+        imgWrap.addView(editPrev, pvl);
+
+        editNext = smallBtn("▶");
+        editNext.setTextSize(17);
+        editNext.setOnClickListener(v -> {
+            if (editEntry != null
+                    && editIdx < editEntry.candidates.size() - 1) {
+                editIdx++;
+                renderItemEditor();
+            }
+        });
+        FrameLayout.LayoutParams nxl = new FrameLayout.LayoutParams(
+                dp(40), dp(56), Gravity.END | Gravity.CENTER_VERTICAL);
+        imgWrap.addView(editNext, nxl);
+        panel.addView(imgWrap);
 
         LinearLayout mid = new LinearLayout(this);
         mid.setOrientation(LinearLayout.VERTICAL);
-        editImg = new ImageView(this);
-        editImg.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        editImg.setBackgroundColor(C_BG);
-        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(110));
-        mid.addView(editImg, il);
+        // Uniform breathing room between every block — the old panel packed
+        // a dozen controls edge-to-edge, which is most of what made it feel
+        // broken.
+        GradientDrawable midGap = new GradientDrawable();
+        midGap.setSize(0, dp(8));
+        mid.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
+        mid.setDividerDrawable(midGap);
         editName = new TextView(this);
         editName.setTextSize(16);
         editName.setTypeface(null, Typeface.BOLD);
@@ -913,6 +1006,7 @@ public class MainActivity extends Activity {
         editPos.setTextColor(C_BLUE);
         mid.addView(editPos);
         editUse = smallBtn("USE THIS LISTING");
+        makePrimary(editUse);   // the decisive action when listings compete
         editUse.setOnClickListener(v -> reassignToShown());
         mid.addView(editUse);
         editNameRow = new LinearLayout(this);
@@ -1006,7 +1100,7 @@ public class MainActivity extends Activity {
         mid.addView(editDropBtn);
 
         LinearLayout qtyRow = new LinearLayout(this);
-        qtyRow.setGravity(Gravity.CENTER_VERTICAL);
+        qtyRow.setGravity(Gravity.CENTER);
         Button minus = smallBtn("−");
         minus.setOnClickListener(v -> editorAdjust(-1));
         qtyRow.addView(minus, new LinearLayout.LayoutParams(dp(52),
@@ -1033,24 +1127,25 @@ public class MainActivity extends Activity {
         Button close = smallBtn("CLOSE");
         close.setOnClickListener(v -> closeItemEditor());
         mid.addView(close);
-        nav.addView(mid, weight());
-
-        editNext = smallBtn("▶");
-        editNext.setOnClickListener(v -> {
-            if (editEntry != null && editIdx < editEntry.candidates.size() - 1) {
-                editIdx++;
-                renderItemEditor();
-            }
-        });
-        nav.addView(editNext, new LinearLayout.LayoutParams(dp(44),
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        panel.addView(nav);
+        // Scrolls: with the label editor, bin warning and rescue buttons all
+        // visible at once, the old fixed panel simply ran off the screen.
+        ScrollView midScroll = new ScrollView(this);
+        midScroll.setVerticalScrollBarEnabled(false);
+        midScroll.addView(mid);
+        // Full width now that the arrows have moved onto the image.
+        LinearLayout.LayoutParams msl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        msl.topMargin = dp(8);
+        panel.addView(midScroll, msl);
 
         FrameLayout.LayoutParams pl = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
-        pl.leftMargin = dp(6);
-        pl.rightMargin = dp(6);
+        pl.leftMargin = dp(10);
+        pl.rightMargin = dp(10);
+        pl.topMargin = dp(16);
+        pl.bottomMargin = dp(16);
         editScrim.addView(panel, pl);
         outer.addView(editScrim);
     }
@@ -1457,8 +1552,12 @@ public class MainActivity extends Activity {
         }
         for (int i = 0; i < TAB_COUNT; i++) {
             tabBtns[i].setVisibility(tabVisible(i) ? View.VISIBLE : View.GONE);
-            tabBtns[i].setBackgroundColor(i == activeTab ? C_BLUE : C_CHIP);
+            tabBtns[i].setBackground(i == activeTab
+                    ? btnBg(C_BLUE, 0, C_BLUE_DK, 8)
+                    : btnBg(Color.WHITE, C_LINE, C_PRESS, 8));
             tabBtns[i].setTextColor(i == activeTab ? Color.WHITE : C_TEXT);
+            tabBtns[i].setTypeface(null,
+                    i == activeTab ? Typeface.BOLD : Typeface.NORMAL);
         }
         drawerScrim.setVisibility(View.VISIBLE);
         android.view.animation.TranslateAnimation slide =
@@ -1684,8 +1783,84 @@ public class MainActivity extends Activity {
     }
 
     private void updatePowerChips(int lv) {
-        pwrChipBatch.setText("PWR " + lv);
-        pwrChipStation.setText("PWR " + lv);
+        boolean fav = favPowers().contains(lv);
+        String text = "PWR " + lv + (fav ? " ★" : "");
+        pwrChipBatch.setText(text);
+        pwrChipStation.setText(text);
+        if (pwrChipSweep != null) pwrChipSweep.setText(text);
+    }
+
+    // ---- power favourites --------------------------------------------------
+    // Pairing at power 1 beats 2 (2 sometimes grabs the neighbouring tag),
+    // and sweeps want 5-10 - so the same few levels get flipped between all
+    // day. Favourites make that one gesture: long-press any PWR chip to
+    // cycle them, no dialog, no slider.
+    /** power -> operator's name for it ("" = unnamed). Stored "1:pair,5:bin";
+     *  first run is seeded with the old presets so the dialog is never
+     *  empty, but once the operator touches them they're entirely theirs. */
+    private java.util.TreeMap<Integer, String> favMap() {
+        java.util.TreeMap<Integer, String> out = new java.util.TreeMap<>();
+        if (!prefs.contains("fav_powers")) {
+            for (int i = 0; i < PRESET_LEVELS.length; i++) {
+                out.put(PRESET_LEVELS[i], PRESET_NAMES[i]);
+            }
+            return out;
+        }
+        for (String s : prefs.getString("fav_powers", "").split(",")) {
+            String[] parts = s.split(":", 2);
+            try {
+                int v = Integer.parseInt(parts[0].trim());
+                if (v >= 1 && v <= 30) {
+                    out.put(v, parts.length > 1 ? parts[1].trim() : "");
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return out;
+    }
+
+    private void saveFavMap(java.util.TreeMap<Integer, String> favs) {
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<Integer, String> e : favs.entrySet()) {
+            if (sb.length() > 0) sb.append(",");
+            sb.append(e.getKey());
+            if (!e.getValue().isEmpty()) sb.append(":").append(e.getValue());
+        }
+        prefs.edit().putString("fav_powers", sb.toString()).apply();
+        updatePowerChips(prefs.getInt("power", 5));
+    }
+
+    private java.util.List<Integer> favPowers() {
+        return new ArrayList<>(favMap().keySet());
+    }
+
+    private void wirePowerChip(Button chip) {
+        chip.setOnClickListener(x -> showPowerDialog());
+        chip.setOnLongClickListener(x -> {
+            cycleFavPower();
+            return true;
+        });
+    }
+
+    /** Long-press on a PWR chip: jump to the next favourite level. */
+    private void cycleFavPower() {
+        java.util.List<Integer> favs = favPowers();
+        if (favs.isEmpty()) {
+            beep(SOUND_ERR);
+            status.setText("No favourite power levels yet — tap the PWR "
+                    + "chip and star the levels you use.");
+            return;
+        }
+        int cur = prefs.getInt("power", 5);
+        int next = favs.get(0);
+        for (int v : favs) {
+            if (v > cur) {
+                next = v;
+                break;
+            }
+        }
+        beep(SOUND_OTHER);
+        setPowerLevel(next);
     }
 
     private void showPowerDialog() {
@@ -1703,10 +1878,75 @@ public class MainActivity extends Activity {
         final SeekBar seek = new SeekBar(this);
         seek.setMax(29);
         seek.setProgress(cur - 1);
+        // (Its change listener is attached below, after the favourites row
+        // exists — the star button's label follows the slider.)
+        box.addView(seek);
+
+        // ---- favourites, where the fixed presets used to sit ---------------
+        // The operator's levels with the operator's names ("1 pair", "5
+        // bin"), not ours. Tap = use it; hold = use / rename / remove. The
+        // level currently set is highlighted like the active pair card.
+        final LinearLayout favRow = new LinearLayout(this);
+        final Button starBtn = smallBtn("");
+        final Runnable[] rebuild = new Runnable[1];
+        rebuild[0] = () -> {
+            favRow.removeAllViews();
+            java.util.TreeMap<Integer, String> favs = favMap();
+            int now = prefs.getInt("power", 5);
+            starBtn.setText(favs.containsKey(now)
+                    ? "★ Unstar " + now : "☆ Star " + now);
+            if (favs.isEmpty()) {
+                TextView none = new TextView(this);
+                none.setText("No favourites — pick a power, then star it.");
+                none.setTextSize(12);
+                none.setTextColor(C_MUTED);
+                favRow.addView(none);
+                return;
+            }
+            for (java.util.Map.Entry<Integer, String> e : favs.entrySet()) {
+                final int p = e.getKey();
+                final String name = e.getValue();
+                Button chip = smallBtn(
+                        p + (name.isEmpty() ? "" : " " + name));
+                if (p == now) {
+                    chip.setBackground(btnBg(Color.parseColor("#dbe9ff"),
+                            C_BLUE, C_SOFT_DK, 8));
+                    chip.setTextColor(C_BLUE);
+                    chip.setTypeface(null, Typeface.BOLD);
+                }
+                chip.setOnClickListener(x -> {
+                    seek.setProgress(p - 1);
+                    setPowerLevel(p);
+                    label.setText("RFID power: " + p);
+                    rebuild[0].run();
+                });
+                chip.setOnLongClickListener(x -> {
+                    favChipMenu(p, name, seek, label, rebuild[0]);
+                    return true;
+                });
+                LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(
+                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                cl.rightMargin = dp(5);
+                favRow.addView(chip, cl);
+            }
+        };
+        rebuild[0].run();
+        box.addView(favRow);
+
+        starBtn.setOnClickListener(x -> {
+            int now = seek.getProgress() + 1;
+            java.util.TreeMap<Integer, String> favs = favMap();
+            if (favs.containsKey(now)) favs.remove(now);
+            else favs.put(now, "");
+            saveFavMap(favs);
+            rebuild[0].run();
+        });
         seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar s, int p, boolean u) {
                 label.setText("RFID power: " + (p + 1));
+                starBtn.setText(favMap().containsKey(p + 1)
+                        ? "★ Unstar " + (p + 1) : "☆ Star " + (p + 1));
             }
 
             @Override
@@ -1716,26 +1956,73 @@ public class MainActivity extends Activity {
             @Override
             public void onStopTrackingTouch(SeekBar s) {
                 setPowerLevel(s.getProgress() + 1);
+                rebuild[0].run();
             }
         });
-        box.addView(seek);
+        LinearLayout.LayoutParams stl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        stl.topMargin = dp(8);
+        box.addView(starBtn, stl);
 
-        LinearLayout presets = new LinearLayout(this);
-        for (int i = 0; i < PRESET_LEVELS.length; i++) {
-            final int level = PRESET_LEVELS[i];
-            Button b = smallBtn(PRESET_LABELS[i]);
-            b.setOnClickListener(x -> {
-                seek.setProgress(level - 1);
-                setPowerLevel(level);
-            });
-            presets.addView(b, weight());
-        }
-        box.addView(presets);
+        TextView hint = new TextView(this);
+        hint.setText("Tap a favourite to use it · hold it to rename or "
+                + "remove.\nLong-press any PWR chip to cycle favourites "
+                + "without opening this.");
+        hint.setTextSize(11);
+        hint.setTextColor(C_MUTED);
+        hint.setPadding(0, dp(8), 0, 0);
+        box.addView(hint);
 
         new AlertDialog.Builder(this)
                 .setTitle("Scanner power")
                 .setView(box)
                 .setPositiveButton("Done", null)
+                .show();
+    }
+
+    /** Hold on a favourite: use it, name it, or drop it. */
+    private void favChipMenu(int power, String name, SeekBar seek,
+                             TextView label, Runnable rebuild) {
+        String shown = power + (name.isEmpty() ? "" : " " + name);
+        String[] opts = {"Use power " + power, "Rename…",
+                "Remove from favourites"};
+        new AlertDialog.Builder(this)
+                .setTitle("★ " + shown)
+                .setItems(opts, (d, which) -> {
+                    if (which == 0) {
+                        seek.setProgress(power - 1);
+                        setPowerLevel(power);
+                        label.setText("RFID power: " + power);
+                        rebuild.run();
+                    } else if (which == 1) {
+                        final EditText in = new EditText(this);
+                        in.setText(name);
+                        in.setHint("e.g. pair, bin, rack");
+                        new AlertDialog.Builder(this)
+                                .setTitle("Name for power " + power)
+                                .setView(in)
+                                .setPositiveButton("Save", (dd, ww) -> {
+                                    java.util.TreeMap<Integer, String> favs =
+                                            favMap();
+                                    // ',' and ':' would corrupt the stored
+                                    // CSV, so they can't be part of a name.
+                                    favs.put(power, in.getText().toString()
+                                            .replace(",", " ")
+                                            .replace(":", " ")
+                                            .trim());
+                                    saveFavMap(favs);
+                                    rebuild.run();
+                                })
+                                .setNegativeButton("Cancel", null)
+                                .show();
+                    } else {
+                        java.util.TreeMap<Integer, String> favs = favMap();
+                        favs.remove(power);
+                        saveFavMap(favs);
+                        rebuild.run();
+                    }
+                })
                 .show();
     }
 
@@ -2416,8 +2703,11 @@ public class MainActivity extends Activity {
         }
         // Pairing counts LABELS (loose boxes + sealed cases); collecting
         // counts UNITS, which is what Shopify's on-hand is measured in.
+        // The denominator is how many labels were printed — a fixed target.
+        // It used to be max(labels, paired), so over-pairing quietly moved
+        // the goalposts and 5 tags on 4 labels still read "5/5".
         if (step == STEP_PAIR)
-            return b.paired + "/" + Math.max(b.labelsTotal, b.paired);
+            return b.paired + "/" + b.labelsTotal;
         return b.expected != null ? b.unitsTotal + "/" + b.expected
                 : String.valueOf(b.unitsTotal);
     }
@@ -2506,8 +2796,30 @@ public class MainActivity extends Activity {
             }
 
             BItem b = getItem(pos);
-            h.card.setBackgroundColor(b == pairActive
-                    ? Color.parseColor("#dbe9ff") : Color.WHITE);
+            // While pairing, the card says at a glance whether this product
+            // is done (green) or has more tags on it than labels printed
+            // (red). The selected product keeps its blue border on top of
+            // that, so "which am I pairing into" and "is it finished" are
+            // two separate signals instead of one fighting the other.
+            int fill = Color.WHITE, stroke = C_LINE, trk = C_BLUE;
+            if (inBatch() && step == STEP_PAIR && b.resolved
+                    && b.labelsTotal > 0) {
+                if (b.paired > b.labelsTotal) {
+                    fill = C_OVER_BG;
+                    stroke = C_OVER;
+                    trk = C_OVER;
+                } else if (b.paired == b.labelsTotal) {
+                    fill = C_OK_BG;
+                    stroke = C_OK;
+                    trk = C_OK;
+                }
+            }
+            // Selection is the BORDER only — an unfinished row stays white,
+            // so fill colour means one thing and one thing alone: done or
+            // over-paired.
+            if (b == pairActive) stroke = C_BLUE;
+            h.card.setBackground(rr(fill, stroke, 10));
+            h.tracker.setTextColor(trk);
             h.name.setText(b.name());
             h.sku.setText(b.sku != null ? "SKU: " + b.sku
                     : (b.resolved ? "no SKU" : "⚠ unknown barcode"));
@@ -2516,7 +2828,8 @@ public class MainActivity extends Activity {
             if (b.skipped) {
                 // Skipped rows read as a decision, in every step - the whole
                 // point is that it stays visible rather than looking unscanned.
-                h.card.setBackgroundColor(Color.parseColor("#f0f0f0"));
+                h.card.setBackground(
+                        rr(Color.parseColor("#f2f2f3"), C_LINE, 10));
                 h.bc.setVisibility(View.VISIBLE);
                 h.bc.setText("SKIPPED"
                         + (b.skipReason == null || b.skipReason.isEmpty()
