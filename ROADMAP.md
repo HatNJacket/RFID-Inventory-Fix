@@ -194,16 +194,19 @@ starting early" actively harmful.
    item 4's guidance work — if item 4 gets built first, fold this into it
    rather than doing it twice.
 
-10. **Support page: name + message → email to Nicholas Drapak** (added
-    2026-07-29; recipient corrected same day — Nicholas, NOT Stephen).
-    A user leaves their name and a message, and it lands in Nicholas's
-    email ("if possible" — Steve's phrasing). Get the actual address from
-    Steve when building — don't guess it (an address does appear in old
-    git commits, but confirm rather than assume). Note before building:
-    the server has no email path today, so this needs a sending mechanism
-    decision first (SMTP account, or something the existing Azure/Shopify
-    accounts already provide). Worth deciding whether the C72, the web
-    terminal, or both get the page.
+10. **Support page: name + message → opens a GitHub issue** (added
+    2026-07-29; reworked same day — was "email Nicholas Drapak directly",
+    now a GitHub issue on this repo instead, no direct email at all).
+    A user leaves their name and a message; the server opens an issue
+    titled from the message with name + message in the body. Nicholas
+    gets notified through GitHub's own watch/notification settings, which
+    kills the two hardest parts of the email version: no sending
+    mechanism to build, and no personal address to keep correct. What it
+    needs instead: a repo-scoped GitHub token stored as an Azure app
+    setting, because warehouse users won't have GitHub accounts — the
+    SERVER files the issue on their behalf. Rate-limit or dedupe the
+    endpoint lightly so a stuck scanner can't file fifty issues. Still
+    open: whether the C72, the web terminal, or both get the page.
 
 ## 🗓️ Later / backlog
 
