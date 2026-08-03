@@ -409,17 +409,31 @@ def _drop_stale_mirror_matches(
             logger.warning("stale-mirror check unavailable: %s", error)
             return products
 
+    # Case-insensitive view of the live map. The dead mirror's SKUs drift
+    # in CASE too ('ZWO Anti-dew' vs the live 'ZWO Anti-Dew'), and an exact
+    # lookup treated the pair as two different products.
+    ci = {
+        k.strip().upper(): (k.strip(), v)
+        for k, v in live.items() if k
+    }
     kept = []
     for p in products:
         sku = (p.get("sku") or "").strip()
         matched_by_barcode = (p.get("barcode") or "").strip() == wanted
-        known = live.get(sku)
+        live_sku, known = ci.get(sku.upper(), (None, None))
         if matched_by_barcode and known and known != wanted:
             logger.info(
                 "dropping stale mirror match: %s claims barcode %s but the "
                 "live catalog has %s", sku, wanted, known
             )
             continue
+        if matched_by_barcode and live_sku and live_sku != sku:
+            # The live catalog owns the spelling: rewrite the mirror's
+            # drifted casing here, at the source, so every batch row and
+            # tag downstream carries ONE spelling of the product.
+            logger.info("normalizing mirror SKU casing: %r -> %r",
+                        sku, live_sku)
+            p = {**p, "sku": live_sku}
         kept.append(p)
     # Single-lookup callers WANT an empty result: it drops them through to
     # the live Shopify lookup, which has the right answer. The candidate
@@ -450,11 +464,14 @@ def product_by_barcode(barcode: str):
             product = _lookup_db(barcode)
 
             # The mirror can hand back a product whose barcode has since
-            # moved elsewhere; the live-sourced bin map catches that.
-            if product is not None and not _drop_stale_mirror_matches(
-                barcode, [product], allow_empty=True
-            ):
-                product = None
+            # moved elsewhere; the live-sourced bin map catches that. Keep
+            # the RETURNED copy — it also carries the SKU casing fixed to
+            # the live catalog's spelling.
+            if product is not None:
+                kept = _drop_stale_mirror_matches(
+                    barcode, [product], allow_empty=True
+                )
+                product = kept[0] if kept else None
             if product is not None:
                 return _enrich_bin_from_shopify(
                     product=product,
@@ -634,11 +651,14 @@ def products_by_barcode_all(
                 candidates = [single]
         except HTTPException:
             candidates = []
-    # De-dup by variant id (mirror + API can both contribute).
+    # De-dup by case-insensitive SKU first (mirror + API can both
+    # contribute, and the dead mirror's SKU casing drifts — same-SKU-
+    # different-case IS the same product), variant id when there's no SKU.
     seen: set = set()
     unique = []
     for p in candidates:
-        key = p.get("shopify_variant_id") or p.get("sku")
+        key = (p.get("sku") or "").strip().upper() \
+            or p.get("shopify_variant_id")
         if key in seen:
             continue
         seen.add(key)
@@ -2091,17 +2111,19 @@ def bin_check(
     # One query for every tag on file for the bin's products — this used to
     # be one query PER product, which timed real bins out.
     skus = sorted({e.sku for e in rows if e.sku})
+    # Grouped case-insensitively: tags applied before a SKU's casing was
+    # tidied in Shopify must still count for the product.
     tags_by_sku: dict[str, list[RfidAssignment]] = {}
     if skus:
         for t in session.scalars(
             select(RfidAssignment).where(RfidAssignment.sku.in_(skus))
         ):
-            tags_by_sku.setdefault(t.sku, []).append(t)
+            tags_by_sku.setdefault((t.sku or "").upper(), []).append(t)
     report = []
     for e in rows:
         if not e.sku:
             continue
-        tags = tags_by_sku.get(e.sku, [])
+        tags = tags_by_sku.get(e.sku.upper(), [])
         detected = [t for t in tags if t.rfid_id.upper() in swept]
         report.append({
             "sku": e.sku,
@@ -2604,10 +2626,14 @@ def batch_scan(
     item = None
     if product is not None:
         sku = product.get("sku")
+        sku_ci = (sku or "").strip().upper()
         barcode = product.get("barcode")
         for i in items:
+            # SKU match is case-insensitive: the mirror's casing drifts
+            # ('ZWO Anti-dew'), and an exact match here split one product
+            # into two batch rows.
             if i.resolved and (
-                (sku and i.sku == sku)
+                (sku and (i.sku or "").strip().upper() == sku_ci)
                 or (not sku and barcode and i.barcode == barcode)
             ):
                 item = i
@@ -2896,7 +2922,8 @@ def batch_item_reassign(
         (
             i for i in _batch_items(session, batch_id)
             if i.id != item.id and i.resolved and i.sku
-            and i.sku == match.get("sku")
+            and i.sku.strip().upper()
+            == (match.get("sku") or "").strip().upper()
         ),
         None,
     )
@@ -3956,15 +3983,17 @@ def batch_verify(
         ).all()
         assignments = {r.rfid_id.upper(): r for r in rows}
 
-    batch_keys = {(i.sku, i.barcode) for i in items}
-    detected = {}  # (sku, barcode) -> count
+    # SKU half of the key is case-insensitive — tags paired before a SKU's
+    # casing was tidied must still count as ours.
+    batch_keys = {((i.sku or "").upper(), i.barcode) for i in items}
+    detected = {}  # (SKU, barcode) -> count
     foreign, unknown = [], []
     for epc in sorted(epcs):
         row = assignments.get(epc)
         if row is None:
             unknown.append(epc)
-        elif (row.sku, row.barcode) in batch_keys:
-            key = (row.sku, row.barcode)
+        elif ((row.sku or "").upper(), row.barcode) in batch_keys:
+            key = ((row.sku or "").upper(), row.barcode)
             detected[key] = detected.get(key, 0) + 1
         else:
             foreign.append(
@@ -3983,7 +4012,7 @@ def batch_verify(
             "product_title": i.label_name or i.product_title,
             "qty_scanned": i.qty_scanned,
             "paired_count": i.paired_count,
-            "detected": detected.get((i.sku, i.barcode), 0),
+            "detected": detected.get(((i.sku or "").upper(), i.barcode), 0),
         }
         for i in items
     ]

@@ -2274,7 +2274,11 @@ public class MainActivity extends Activity {
                 JSONArray arr = check.optJSONArray("items");
                 for (int i = 0; arr != null && i < arr.length(); i++) {
                     JSONObject o = arr.getJSONObject(i);
-                    seen.put(o.optString("sku"), o.optInt("detected"));
+                    // Upper-cased key: the batch row and the bin map can
+                    // disagree on a SKU's CASE (dead mirror drift).
+                    seen.put(o.optString("sku")
+                            .toUpperCase(java.util.Locale.ROOT),
+                            o.optInt("detected"));
                 }
                 final int sweptCount = epcs.size();
                 ui.post(() -> {
@@ -2310,7 +2314,8 @@ public class MainActivity extends Activity {
                 new java.util.HashMap<>();
         int bad = 0;
         for (BItem b : rows) {
-            Integer d = b.sku == null ? null : seen.get(b.sku);
+            Integer d = b.sku == null ? null
+                    : seen.get(b.sku.toUpperCase(java.util.Locale.ROOT));
             det.put(b.id, d == null ? 0 : d);
             if (!verifyRowOk(b, det.get(b.id))) bad++;
         }
