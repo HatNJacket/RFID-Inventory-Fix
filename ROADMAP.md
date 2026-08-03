@@ -208,6 +208,16 @@ starting early" actively harmful.
     endpoint lightly so a stuck scanner can't file fifty issues. Still
     open: whether the C72, the web terminal, or both get the page.
 
+11. **Print labels FROM the C72 and pair them there — no PC/iPad in the
+    loop at all** (added 2026-08-03; noted only, not designed). Today the
+    C72 collects and pairs, but queueing labels and closing batches still
+    route through the web terminal. Goal: the C72 queues the print jobs
+    itself (the print agent already polls the server, so "printing from
+    the C72" is really just "queueing from the C72") and walks the whole
+    collect → labels → pair flow standalone. Needs a C72 UI for the
+    label/print step and a think about where the Check step's human
+    decisions land when no big screen is involved.
+
 ## 🗓️ Later / backlog
 
 - Locate mode: max-power geiger-counter search for a specific EPC on the

@@ -4455,7 +4455,7 @@ async function runVerifyCheck() {
         <td class="num">${r.qty_scanned}</td>
         <td class="num${paired ? "" : " bexp--off"}">${r.paired_count}</td>
         <td class="num${detected ? "" : " bexp--off"}">${
-          na ? "n/a" : r.detected
+          na ? (r.detected > 0 ? `${r.detected} ⊘` : "n/a") : r.detected
         }</td>
         <td>${na && paired ? "⊘" : paired && detected ? "✓" : "⚠"}</td>
       </tr>`;
@@ -4484,9 +4484,17 @@ async function runVerifyCheck() {
         " · "
       )}. Check the ⚠ rows.</p>`
     : `<p class="result result--ok">✓ Boxes, paired and detected all agree for every product.</p>`;
+  // Expected silence is stated out loud, not hidden inside a green tick:
+  // flagged products were paired but no sweep will ever hear them.
+  const naSilent = rep.items.filter(
+    (r) => r.rfid_incompatible && r.paired_count > 0 && r.detected === 0
+  ).length;
+  const naNote = naSilent
+    ? `<p class="result">⊘ ${naSilent} product(s) flagged "won't RFID scan" answered nothing, as expected — their tags are paired and counted; the sweep can't hear them on the box.</p>`
+    : "";
 
   bEl.verifyReport.innerHTML = `
-    ${verdict}
+    ${verdict}${naNote}
     <div class="inventory__scroll"><table class="inventory__table">
       <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
