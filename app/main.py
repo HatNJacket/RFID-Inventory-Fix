@@ -49,6 +49,7 @@ from app.models import (
     ProductKind,
     ReviewTask,
     RfidAssignment,
+    RfidIncompatible,
     SerialPrefix,
 )
 
@@ -697,7 +698,18 @@ def tags_for_product(
         .where(or_(*conditions))
         .order_by(RfidAssignment.assigned_at.desc())
     ).all()
-    return {"count": len(rows), "assignments": [r.as_dict() for r in rows]}
+    # Piggybacked flag: both scan stations already make this call right
+    # after a product lookup, so the "won't scan" chip needs no extra trip.
+    look = (sku or "").strip() or next(
+        ((r.sku or "").strip() for r in rows if r.sku), ""
+    )
+    return {
+        "count": len(rows),
+        "assignments": [r.as_dict() for r in rows],
+        "rfid_incompatible": bool(
+            look and session.get(RfidIncompatible, look) is not None
+        ),
+    }
 
 
 # ---------------------------------------------------------- assignment API ---
@@ -1595,6 +1607,7 @@ def inventory_summary(session: Session = Depends(get_session)):
             "unit_breakdown": " + ".join(parts),
         }
 
+    noscan = _noscan_skus(session)
     products = [
         {
             "sku": r.sku,
@@ -1609,6 +1622,7 @@ def inventory_summary(session: Session = Depends(get_session)):
             ),
             "shopify_qty": None,
             "vendor": None,
+            "rfid_incompatible": (r.sku or "").strip().upper() in noscan,
         }
         for r in rows
     ]
@@ -2190,6 +2204,7 @@ def bin_check(
             select(RfidAssignment).where(RfidAssignment.sku.in_(skus))
         ):
             tags_by_sku.setdefault((t.sku or "").upper(), []).append(t)
+    noscan = _noscan_skus(session)
     report = []
     for e in rows:
         if not e.sku:
@@ -2204,6 +2219,7 @@ def bin_check(
             "expected_qty": e.qty,
             "tags_on_file": len(tags),
             "detected": len(detected),
+            "rfid_incompatible": e.sku.strip().upper() in noscan,
         })
     return {
         "bin": bin_name.strip(),
@@ -2631,9 +2647,13 @@ def get_batch(batch_id: int, session: Session = Depends(get_session)):
         if job.sku:
             printed[job.sku] = printed.get(job.sku, 0) + 1
     payload = []
+    noscan = _noscan_skus(session)
     for item in items:
         d = item.as_dict()
         d["printed_count"] = printed.get(item.sku or "", 0)
+        d["rfid_incompatible"] = (
+            (item.sku or "").strip().upper() in noscan
+        )
         payload.append(d)
     return {"batch": batch.as_dict(), "items": payload}
 
@@ -2764,8 +2784,13 @@ def batch_scan(
         and saved_bin not in MISSING_BIN_VALUES
         and not bin_contains(saved_bin, batch.bin_name)
     )
+    item_dict = item.as_dict()
+    item_dict["rfid_incompatible"] = bool(
+        item.sku
+        and session.get(RfidIncompatible, item.sku.strip()) is not None
+    )
     return {
-        "item": item.as_dict(),
+        "item": item_dict,
         "bin_mismatch": bin_mismatch,
         "serial_note": (product or {}).get("serial_note"),
         # Present whenever a case was scanned, so the note shows here too.
@@ -2804,6 +2829,8 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                     live_bc[r.sku] = (r.barcode or "").strip()
         return bin_rows, live_bc
 
+    noscan = _noscan_skus(session)
+
     flagged = []
     for item in _batch_items(session, batch_id):
         # A skipped row is a decision already made, not a problem to solve.
@@ -2833,6 +2860,10 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                 and item.resolved
                 and item.sku
                 and item.tagged_before == 0
+                # "Won't RFID scan" products are EXPECTED silent — flagging
+                # every baseline sweep forever would train people to ignore
+                # the flag on products where it means something.
+                and item.sku.strip().upper() not in noscan
             ):
                 tags_here = [
                     t for t in session.scalars(
@@ -2938,6 +2969,10 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
         saved = entry["item"].get("bin_location")
         for name in parse_bins(saved):
             strays.setdefault(name, []).append(entry["item"].get("sku"))
+    for entry in flagged:
+        entry["item"]["rfid_incompatible"] = (
+            (entry["item"].get("sku") or "").strip().upper() in noscan
+        )
     return {
         "count": len(flagged),
         "items": flagged,
@@ -4058,6 +4093,47 @@ def batch_pair_undo(
 STORE_HEADER = "Telescopes Canada"
 
 
+def _save_two_line_label(
+    session: Session,
+    sku: str,
+    top_text: str | None,
+    sku_line: str | None,
+    updated_by: str | None,
+) -> None:
+    """Map the two edited label lines onto the saved preferred name. Text
+    equal to the defaults (store header on top, the SKU in the centre)
+    means "standard"; both at default clears the saved name entirely."""
+    sku = (sku or "").strip()
+    if not sku:
+        return
+    top = (top_text or "").strip()
+    centre = (sku_line or "").strip()
+    top_custom = top if top and top != STORE_HEADER else None
+    centre_custom = centre if centre and centre != sku else None
+    row = session.get(LabelName, sku)
+    if not top_custom and not centre_custom:
+        if row is not None:
+            session.delete(row)
+        return
+    if row is None:
+        row = LabelName(sku=sku)
+        session.add(row)
+    if top_custom and centre_custom:
+        if top_custom == centre_custom:
+            row.label_name, row.placement = top_custom, "both"
+            row.sku_text = None
+        else:
+            row.label_name, row.placement = top_custom, "header"
+            row.sku_text = centre_custom
+    elif top_custom:
+        row.label_name, row.placement = top_custom, "header"
+        row.sku_text = None
+    else:
+        row.label_name, row.placement = centre_custom, "sku"
+        row.sku_text = None
+    row.updated_by = updated_by
+
+
 class ReprintLabelsIn(BaseModel):
     """Fix-and-reprint at the Pair step: the labels printed wrong (usually
     a preferred name replacing the wrong line). The operator edits the two
@@ -4110,44 +4186,10 @@ def batch_item_reprint(
 
     # 1. The saved preferred name is the usual culprit (right name, wrong
     # line) — fix it store-wide so the NEXT print anywhere is right too.
-    # The two boxes map onto the saved name: text equal to the defaults
-    # (store header / the product's SKU) means "standard", and only a pair
-    # of DIFFERENT customs needs the extra sku_text column.
-    top = payload.top_text.strip()
-    centre = payload.sku_line.strip()
-    top_custom = top if top and top != STORE_HEADER else None
-    centre_custom = (
-        centre
-        if centre and centre != (item.sku or "").strip()
-        else None
+    _save_two_line_label(
+        session, item.sku or "", payload.top_text, payload.sku_line,
+        payload.created_by,
     )
-    if item.sku:
-        row = session.get(LabelName, item.sku.strip())
-        if not top_custom and not centre_custom:
-            if row is not None:
-                session.delete(row)
-        else:
-            if row is None:
-                row = LabelName(sku=item.sku.strip())
-                session.add(row)
-            if top_custom and centre_custom:
-                if top_custom == centre_custom:
-                    row.label_name = top_custom
-                    row.placement = "both"
-                    row.sku_text = None
-                else:
-                    row.label_name = top_custom
-                    row.placement = "header"
-                    row.sku_text = centre_custom
-            elif top_custom:
-                row.label_name = top_custom
-                row.placement = "header"
-                row.sku_text = None
-            else:
-                row.label_name = centre_custom
-                row.placement = "sku"
-                row.sku_text = None
-            row.updated_by = payload.created_by
 
     # 2. Release the ties to the old stickers (they're coming off/binned).
     released = 0
@@ -4267,6 +4309,7 @@ def batch_verify(
                 }
             )
 
+    noscan = _noscan_skus(session)
     report = [
         {
             "item_id": i.id,
@@ -4275,13 +4318,18 @@ def batch_verify(
             "qty_scanned": i.qty_scanned,
             "paired_count": i.paired_count,
             "detected": detected.get(((i.sku or "").upper(), i.barcode), 0),
+            # Expected silent: the tag never answers once it's on the box.
+            "rfid_incompatible": (i.sku or "").strip().upper() in noscan,
         }
         for i in items
     ]
     ok = (
         not unknown
         and not foreign
-        and all(r["detected"] >= r["paired_count"] for r in report)
+        and all(
+            r["detected"] >= r["paired_count"]
+            for r in report if not r["rfid_incompatible"]
+        )
     )
     return {
         "bin": batch.bin_name,
@@ -4715,6 +4763,10 @@ class LabelNameIn(BaseModel):
     label_name: str = Field(default="", max_length=76)
     placement: str = Field(default="header", pattern="^(header|sku|both)$")
     updated_by: str | None = Field(default=None, max_length=100)
+    # Two-box style (the shared label editor): when either field is
+    # present, the top/centre pair wins over label_name+placement.
+    top_text: str | None = Field(default=None, max_length=76)
+    sku_line: str | None = Field(default=None, max_length=56)
 
 
 @app.get("/api/label-names/{sku}", dependencies=[Depends(require_user)])
@@ -4747,6 +4799,20 @@ def set_label_name(
     sku = sku.strip()
     if not sku:
         raise HTTPException(422, "SKU required.")
+    # Two-box style from the shared label editor.
+    if payload.top_text is not None or payload.sku_line is not None:
+        _save_two_line_label(
+            session, sku, payload.top_text, payload.sku_line,
+            payload.updated_by,
+        )
+        session.commit()
+        row = session.get(LabelName, sku)
+        return {
+            "sku": sku,
+            "label_name": row.label_name if row else None,
+            "placement": row.placement if row else "header",
+            "sku_text": row.sku_text if row else None,
+        }
     name = payload.label_name.strip()
     row = session.get(LabelName, sku)
     if not name:
@@ -4765,6 +4831,75 @@ def set_label_name(
     row.updated_by = payload.updated_by
     session.commit()
     return {"sku": sku, "label_name": name, "placement": row.placement}
+
+
+# ------------------------------------------------- won't-RFID-scan flag ---
+def _noscan_skus(session: Session) -> set[str]:
+    """Upper-cased SKUs flagged "won't RFID scan": the applied tag never
+    answers a sweep (packaging kills the read), so sweep-side checks must
+    not treat silence as a problem."""
+    return {
+        (r.sku or "").strip().upper()
+        for r in session.scalars(select(RfidIncompatible))
+    }
+
+
+class NoScanIn(BaseModel):
+    incompatible: bool = True
+    changed_by: str | None = Field(default=None, max_length=100)
+
+
+@app.put(
+    "/api/products/{sku}/rfid-incompatible",
+    dependencies=[Depends(require_user)],
+)
+def set_rfid_incompatible(
+    sku: str, payload: NoScanIn, session: Session = Depends(get_session)
+):
+    """Flag (or unflag) a product as "won't RFID scan". Labels still print
+    and tags still pair — only the expectation that sweeps HEAR the tag
+    changes. Every flip is logged as a change event."""
+    sku = sku.strip()
+    if not sku:
+        raise HTTPException(422, "SKU required.")
+    row = session.get(RfidIncompatible, sku)
+    changed = False
+    if payload.incompatible and row is None:
+        session.add(RfidIncompatible(sku=sku, set_by=payload.changed_by))
+        changed = True
+    elif not payload.incompatible and row is not None:
+        session.delete(row)
+        changed = True
+    if changed:
+        session.add(BarcodeChange(
+            sku=sku,
+            changed_field="rfid-scan",
+            old_barcode=(
+                "scans normally" if payload.incompatible
+                else "won't scan on box"
+            ),
+            new_barcode=(
+                "won't scan on box" if payload.incompatible
+                else "scans normally"
+            ),
+            changed_by=payload.changed_by,
+        ))
+    session.commit()
+    return {"sku": sku, "rfid_incompatible": payload.incompatible}
+
+
+@app.get(
+    "/api/products/{sku}/rfid-incompatible",
+    dependencies=[Depends(require_user)],
+)
+def get_rfid_incompatible(sku: str, session: Session = Depends(get_session)):
+    row = session.get(RfidIncompatible, sku.strip())
+    return {
+        "sku": sku.strip(),
+        "rfid_incompatible": row is not None,
+        "set_by": row.set_by if row else None,
+        "set_at": row.set_at.isoformat() if row and row.set_at else None,
+    }
 
 
 # -------------------------------------------------------- product history ---
@@ -4809,7 +4944,7 @@ def product_history(term: str, session: Session = Depends(get_session)):
 
     change_types = {
         "barcode": "barcode-replaced", "sku": "sku-updated",
-        "bin": "bin-updated",
+        "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
     }
     for c in session.scalars(
         select(BarcodeChange).where(or_(
@@ -4823,7 +4958,9 @@ def product_history(term: str, session: Session = Depends(get_session)):
             "type": change_types.get(c.changed_field, c.changed_field),
             "worker": c.changed_by,
             "detail": f"{c.old_barcode or '(none)'} → {c.new_barcode}",
-            "shopify": True,  # these flows write to the store
+            # Barcode/SKU/bin flows write to the store; the RFID-scan flag
+            # is a local marker only.
+            "shopify": c.changed_field != "rfid-scan",
         })
 
     job_types = {
@@ -4957,6 +5094,11 @@ def product_history(term: str, session: Session = Depends(get_session)):
         # Non-serial products keep their preferred header here instead.
         "custom_label": custom.label_name if custom else None,
         "custom_placement": custom.placement if custom else "header",
+        # Two-line customs: the centre line when it differs from the top.
+        "custom_sku_text": custom.sku_text if custom else None,
+        "rfid_incompatible": (
+            session.get(RfidIncompatible, sku) is not None if sku else False
+        ),
         # Current multi-box/bundle standing, so the panel can offer the undo.
         "product_kind": (
             {
@@ -5005,7 +5147,7 @@ def history(
 
     change_types = {
         "barcode": "barcode-replaced", "sku": "sku-updated",
-        "bin": "bin-updated",
+        "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
     }
     for c in session.scalars(
         select(BarcodeChange).order_by(BarcodeChange.id.desc()).limit(limit)

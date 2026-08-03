@@ -200,6 +200,9 @@ public class MainActivity extends Activity {
         // to the batch; never touches a quantity anywhere.
         boolean skipped;
         String skipReason;
+        // Product-wide "won't RFID scan": the tag reads in hand but never
+        // once it's on the box, so sweeps don't expect an answer.
+        boolean noScan;
 
         static BItem from(JSONObject o) {
             BItem b = new BItem();
@@ -233,6 +236,7 @@ public class MainActivity extends Activity {
             b.skipped = o.optBoolean("skipped", false);
             b.skipReason = o.isNull("skip_reason") ? null
                     : o.optString("skip_reason");
+            b.noScan = o.optBoolean("rfid_incompatible", false);
             return b;
         }
 
@@ -961,6 +965,7 @@ public class MainActivity extends Activity {
     private Button editFindBtn;
     private Button editRecommendBtn;
     private Button editSkipBtn;
+    private Button editNoScanBtn;
     private Button editSplitBtn;
 
     private void buildItemEditor(FrameLayout outer) {
@@ -1149,6 +1154,13 @@ public class MainActivity extends Activity {
         });
         mid.addView(editSkipBtn);
 
+        // Product-wide "won't RFID scan": labels still print, pairing
+        // still counts — sweeps just stop expecting an answer. Applies to
+        // the PRODUCT (every box shares the tag-killing design).
+        editNoScanBtn = smallBtn("WON'T RFID SCAN");
+        editNoScanBtn.setOnClickListener(v -> toggleNoScan());
+        mid.addView(editNoScanBtn);
+
         editDropBtn = smallBtn("REMOVE THIS SCAN");
         editDropBtn.setOnClickListener(v -> dropItemFromBatch(true));
         mid.addView(editDropBtn);
@@ -1313,6 +1325,10 @@ public class MainActivity extends Activity {
         editSkipBtn.setVisibility(it.resolved ? View.VISIBLE : View.GONE);
         editSkipBtn.setText(it.skipped
                 ? "PUT IT BACK IN THE BATCH" : "CAN'T SCAN — SKIP");
+        editNoScanBtn.setVisibility(
+                it.resolved && it.sku != null ? View.VISIBLE : View.GONE);
+        editNoScanBtn.setText(it.noScan
+                ? "⊘ RFID FLAG ON — REMOVE" : "WON'T RFID SCAN");
         // Only an unresolved row has a barcode to give away.
         editFindBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
         editRecommendBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
@@ -2384,7 +2400,7 @@ public class MainActivity extends Activity {
             row.setBackground(rr(ok ? C_OK_BG : C_OVER_BG, 0, 8));
             row.setPadding(dp(8), dp(6), dp(8), dp(6));
             TextView mark = new TextView(this);
-            mark.setText(ok ? "\u2713" : "\u2717");
+            mark.setText(b.noScan && ok ? "\u2298" : ok ? "\u2713" : "\u2717");
             mark.setTextSize(18);
             mark.setTypeface(null, Typeface.BOLD);
             mark.setTextColor(ok ? C_OK : C_OVER);
@@ -2401,7 +2417,9 @@ public class MainActivity extends Activity {
             col.addView(nm);
             TextView counts = new TextView(this);
             counts.setText("printed " + b.labelsTotal + "  \u00b7  tagged "
-                    + b.paired + "  \u00b7  seen " + d);
+                    + b.paired + "  \u00b7  "
+                    + (b.noScan ? "won't scan on box \u2014 seen n/a"
+                       : "seen " + d));
             counts.setTextSize(12);
             counts.setTextColor(C_MUTED);
             col.addView(counts);
@@ -2432,8 +2450,10 @@ public class MainActivity extends Activity {
     }
 
     /** A row passes when every printed label got a tag and every one of
-     *  those tags answered the sweep. */
+     *  those tags answered the sweep. "Won't RFID scan" products are
+     *  expected silent, so only the pairing half is judged for them. */
     private boolean verifyRowOk(BItem b, Integer detected) {
+        if (b.noScan) return b.paired >= b.labelsTotal;
         int d = detected == null ? 0 : detected;
         return b.paired >= b.labelsTotal && d >= b.paired;
     }
@@ -3795,6 +3815,60 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    /** Flag/unflag the product "won't RFID scan" — the tag reads in hand
+     *  but never on the box (ZWO Desicc, several Optolong lines). Sweeps
+     *  and Verify stop expecting an answer; nothing else changes. */
+    private void toggleNoScan() {
+        if (editEntry == null || editEntry.item.sku == null) return;
+        final BItem it = editEntry.item;
+        final boolean want = !it.noScan;
+        Runnable send = () -> {
+            editMsg.setText(want ? "Flagging…" : "Removing the flag…");
+            new Thread(() -> {
+                try {
+                    JSONObject body = new JSONObject()
+                            .put("incompatible", want)
+                            .put("changed_by",
+                                    prefs.getString("device", "C72"));
+                    api("PUT", "/api/products/"
+                            + URLEncoder.encode(it.sku, "UTF-8")
+                            + "/rfid-incompatible", body);
+                    ui.post(() -> {
+                        beep(SOUND_OK);
+                        for (BItem b : bItems) {
+                            if (b.sku != null
+                                    && b.sku.equalsIgnoreCase(it.sku)) {
+                                b.noScan = want;
+                            }
+                        }
+                        it.noScan = want;
+                        renderItemEditor();
+                        editMsg.setText(want
+                                ? "Flagged ⊘ — sweeps won't expect this "
+                                  + "product to answer. Logged."
+                                : "Flag removed ✓ — logged.");
+                    });
+                } catch (Exception e) {
+                    ui.post(() -> editMsg.setText(e.getMessage()));
+                }
+            }).start();
+        };
+        if (want) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Won't RFID scan?")
+                    .setMessage(it.name() + "\n\nTag won't scan when on "
+                            + "box. Labels still print and pairing still "
+                            + "counts - but sweeps and Verify stop "
+                            + "expecting its tags to answer.\n\nApplies to "
+                            + "this product store-wide.")
+                    .setPositiveButton("FLAG IT", (d, w) -> send.run())
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } else {
+            send.run();
+        }
+    }
+
     private void setItemSkip(boolean skipped, String reason) {
         if (editEntry == null) return;
         final int itemId = editEntry.item.id;
@@ -4245,18 +4319,24 @@ public class MainActivity extends Activity {
                 JSONObject prod = api("GET",
                         "/api/products/by-barcode/" + enc, null);
                 int count = 0;
+                boolean silent = false;
                 try {
                     String q = prod.isNull("sku")
                             ? "barcode=" + URLEncoder.encode(
                                     prod.optString("barcode", code), "UTF-8")
                             : "sku=" + URLEncoder.encode(
                                     prod.optString("sku"), "UTF-8");
-                    count = api("GET", "/api/products/tags?" + q, null)
-                            .optInt("count");
+                    JSONObject tagsResp = api("GET",
+                            "/api/products/tags?" + q, null);
+                    count = tagsResp.optInt("count");
+                    // Piggybacked "won't RFID scan" flag — the operator
+                    // should know sweeps will never hear this product.
+                    silent = tagsResp.optBoolean("rfid_incompatible", false);
                 } catch (Exception ignored) {
                 }
                 final JSONObject p = prod;
                 final int tagsOnFile = count;
+                final boolean noScan = silent;
                 ui.post(() -> {
                     stationProduct = p;
                     stationTags = tagsOnFile;
@@ -4270,13 +4350,16 @@ public class MainActivity extends Activity {
                     stationName.setText(name);
                     stationSku.setText((p.isNull("sku") ? "no SKU"
                             : "SKU: " + p.optString("sku"))
-                            + "  ·  bin " + p.optString("bin_location", "—"));
+                            + "  ·  bin " + p.optString("bin_location", "—")
+                            + (noScan ? "  ·  ⊘ won't RFID scan" : ""));
                     stationTracker.setText(String.valueOf(tagsOnFile));
                     loadImage(p.isNull("image_url") ? null
                             : p.optString("image_url"), stationImg);
                     beep(SOUND_OK);
                     status.setText("Trigger on the sticker to link it "
-                            + "(" + tagsOnFile + " tag(s) on file).");
+                            + "(" + tagsOnFile + " tag(s) on file)."
+                            + (noScan ? " ⊘ Won't scan once it's on the "
+                              + "box — pair BEFORE applying." : ""));
                     btInput.requestFocus();
                 });
             } catch (Exception e) {

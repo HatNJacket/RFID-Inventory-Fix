@@ -1697,6 +1697,10 @@ function renderInventory() {
         escapeHtml(p.product_title || "") +
         (p.variant_title
           ? ` <span class="inventory__variant">(${escapeHtml(p.variant_title)})</span>`
+          : "") +
+        (p.rfid_incompatible
+          ? ' <span class="noscan-chip" title="tag won\'t scan when on ' +
+            'box — sweeps don\'t expect it to answer">⊘ no RFID</span>'
           : "");
       const when = p.last_assigned_at
         ? new Date(p.last_assigned_at).toLocaleString(undefined, {
@@ -1707,7 +1711,11 @@ function renderInventory() {
       return `<tr>
         <td>${title}</td>
         <td>${escapeHtml(p.vendor || "—")}</td>
-        <td class="mono">${escapeHtml(p.sku || "—")}</td>
+        <td class="mono">${
+          p.sku
+            ? `<span class="skulink" data-sku="${escapeHtml(p.sku)}" title="Open this product — label editor, RFID flag, full history">${escapeHtml(p.sku)}</span>`
+            : "—"
+        }</td>
         <td>${p.bin_location && p.bin_location !== "No bin assigned"
           ? `<span class="inventory__bin">${escapeHtml(p.bin_location)}</span>`
           : "—"}</td>
@@ -1724,6 +1732,13 @@ function renderInventory() {
     })
     .join("");
 }
+
+// Inventory rows open the same product panel History uses — label editor,
+// preview, RFID flag and paper trail in one place.
+document.getElementById("inv-body").addEventListener("click", (e) => {
+  const s = e.target.closest(".skulink");
+  if (s && s.dataset.sku) openProductHistory(s.dataset.sku);
+});
 
 let invSearchTimer;
 document.getElementById("inv-search").addEventListener("input", () => {
@@ -3996,6 +4011,10 @@ function renderPairCard() {
   if (!item) return;
   const goal = item.printed_count ?? item.qty_scanned;
   bEl.pairActive.textContent = itemDisplayName(item);
+  document.getElementById("bpair-norfid").textContent =
+    item.rfid_incompatible
+      ? "⊘ RFID flag ON — remove"
+      : "⊘ Won't RFID scan";
   bEl.pairProgress.textContent =
     `${item.paired_count} of ${goal} printed label(s) paired · ` +
     `${Math.max(0, goal - item.paired_count)} remaining` +
@@ -4147,12 +4166,32 @@ function labelFitIssues(top, sku) {
   return issues;
 }
 
+// The item behind the open reprint dialog, for the preview's barcode/bin.
+let breprintItem = null;
+
 function updateReprintFitWarn() {
+  const top =
+    document.getElementById("breprint-top").value.trim() || STORE_HEADER;
+  const skuLine = document.getElementById("breprint-sku").value.trim();
+  // Live sticker preview, same tiers the printer steps through.
+  const el = document.getElementById("breprint-prev-header");
+  el.textContent = top;
+  el.className =
+    "label-preview__header " +
+    (top === STORE_HEADER || top.length <= 26
+      ? "label-preview__header--lg"
+      : top.length <= 56
+        ? "label-preview__header--md"
+        : "label-preview__header--sm");
+  document.getElementById("breprint-prev-sku").textContent = skuLine || "—";
+  if (breprintItem) {
+    document.getElementById("breprint-prev-bc").textContent =
+      breprintItem.barcode || breprintItem.sku || "";
+    document.getElementById("breprint-prev-bin").textContent =
+      "BIN: " + (batch ? batch.bin_name : "—");
+  }
   const warnEl = document.getElementById("breprint-fitwarn");
-  const issues = labelFitIssues(
-    document.getElementById("breprint-top").value.trim(),
-    document.getElementById("breprint-sku").value.trim()
-  );
+  const issues = labelFitIssues(top, skuLine);
   warnEl.hidden = !issues.length;
   warnEl.textContent = issues.length
     ? "⚠ " + issues.join("\n⚠ ") + "\nYou can still print — this is a warning, not a block."
@@ -4174,6 +4213,7 @@ document.getElementById("bpair-reprint").addEventListener("click", async () => {
     : `The old printed labels become invalid — bin them so they never ` +
       `end up on a box.`;
   document.getElementById("breprint-msg").textContent = "";
+  breprintItem = item;
   reprintDefaults = { top: STORE_HEADER, sku: item.sku || "" };
   // Prefill from what's SAVED, never from a previous unconfirmed edit.
   let top = STORE_HEADER;
@@ -4256,6 +4296,51 @@ document.getElementById("breprint-go").addEventListener("click", async () => {
     document.getElementById("breprint-msg").textContent = err.message;
   } finally {
     btn.disabled = false;
+  }
+});
+
+// Won't-RFID-scan toggle from the pair card: per-PRODUCT and store-wide,
+// because every box of these shares the same tag-killing design. Labels
+// still print and pairing still counts; sweeps stop expecting an answer.
+document.getElementById("bpair-norfid").addEventListener("click", async () => {
+  const item = batchItems.find((i) => i.id === pairActiveItemId);
+  if (!item || !item.sku || !batch) return;
+  const want = !item.rfid_incompatible;
+  if (
+    want &&
+    !confirm(
+      `Flag ${itemDisplayName(item)} as "won't RFID scan"?\n\n` +
+        `Labels still print and pairing still counts — but sweeps and ` +
+        `Verify stop expecting its tags to answer. Applies to this ` +
+        `product store-wide, and is logged.`
+    )
+  )
+    return;
+  try {
+    await apiJson(
+      `/api/products/${encodeURIComponent(item.sku)}/rfid-incompatible`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          incompatible: want,
+          changed_by: operatorEl.value || null,
+        }),
+      }
+    );
+    batchItems.forEach((i) => {
+      if ((i.sku || "").toUpperCase() === item.sku.toUpperCase())
+        i.rfid_incompatible = want;
+    });
+    renderPairCard();
+    setBatchResult(
+      want
+        ? `⊘ ${itemDisplayName(item)} flagged — sweeps won't expect it to answer.`
+        : `Flag removed from ${itemDisplayName(item)}.`,
+      "ok"
+    );
+  } catch (err) {
+    setBatchResult(err.message, "err");
   }
 });
 
@@ -4352,18 +4437,27 @@ async function runVerifyCheck() {
   let detectedOk = true;
   const rows = rep.items
     .map((r) => {
+      // "Won't RFID scan" products are expected silent: their detected
+      // column reads n/a and never drags the verdict down.
+      const na = r.rfid_incompatible;
       const paired = r.paired_count === r.qty_scanned;
-      const detected = r.detected === r.paired_count;
+      const detected = na || r.detected === r.paired_count;
       if (r.qty_scanned !== r.paired_count) boxesOk = false;
       if (!paired) pairedOk = false;
       if (!detected) detectedOk = false;
       return `<tr>
-        <td>${escapeHtml(r.product_title || "")}</td>
+        <td>${escapeHtml(r.product_title || "")}${
+          na
+            ? ' <span class="noscan-chip" title="tag won\'t scan when on box — sweeps don\'t expect it to answer">⊘</span>'
+            : ""
+        }</td>
         <td class="mono">${escapeHtml(r.sku || "—")}</td>
         <td class="num">${r.qty_scanned}</td>
         <td class="num${paired ? "" : " bexp--off"}">${r.paired_count}</td>
-        <td class="num${detected ? "" : " bexp--off"}">${r.detected}</td>
-        <td>${paired && detected ? "✓" : "⚠"}</td>
+        <td class="num${detected ? "" : " bexp--off"}">${
+          na ? "n/a" : r.detected
+        }</td>
+        <td>${na && paired ? "⊘" : paired && detected ? "✓" : "⚠"}</td>
       </tr>`;
     })
     .join("");
@@ -4788,28 +4882,39 @@ async function openProductHistory(term) {
     // label-name store. Blank = standard "Telescopes Canada" header.
     if (p) {
       document.getElementById("phist-serial").hidden = false;
-      document.getElementById("phist-label-input").value =
-        phistEffectiveName() || "";
-      phistPlacement = data.serial_prefix
-        ? "header"
-        : data.custom_placement || "header";
-      // Serialized names are header-only by design (name-at-top labels);
-      // the placement toggle applies to everything else.
-      document.getElementById("phist-placement").hidden =
-        !!data.serial_prefix;
-      document.getElementById("phist-label-clear").hidden =
-        !!data.serial_prefix;
-      updatePlacementBtn();
-      document.getElementById("phist-label-hint").textContent =
-        data.serial_prefix
-          ? "Preferred label name (serialized product) — printed at the " +
-            "top of every label, including Scan Station auto-prints. " +
-            "Long names print smaller to fit two lines:"
-          : "Preferred label name — prints where the toggle says " +
-            "(replacing the store name, or the SKU line above the " +
-            "barcode). ✕ clears it back to the standard label:";
+      // Two-box prefill from what's SAVED — cancelling any edit leaves no
+      // trace. Serialized products edit the top line through their serial
+      // record and keep a standard SKU line, so that box locks for them.
+      const serial = !!data.serial_prefix;
+      phistDefaults = { top: STORE_HEADER, sku: data.sku || "" };
+      let top = STORE_HEADER;
+      let skuLine = data.sku || "";
+      if (serial) {
+        top = phistEffectiveName() || data.serial_label || "";
+      } else if (data.custom_label) {
+        if (data.custom_placement !== "sku") top = data.custom_label;
+        if (data.custom_sku_text) skuLine = data.custom_sku_text;
+        else if (
+          data.custom_placement === "sku" ||
+          data.custom_placement === "both"
+        )
+          skuLine = data.custom_label;
+      }
+      document.getElementById("phist-top").value = top;
+      const skuBox = document.getElementById("phist-skuline");
+      skuBox.value = skuLine;
+      skuBox.disabled = serial;
+      document.getElementById("phist-top-reset").hidden = serial;
+      document.getElementById("phist-skuline-reset").hidden = serial;
+      document.getElementById("phist-label-hint").textContent = serial
+        ? "Serialized product — the top line is its item name, printed " +
+          "on every label including Scan Station auto-prints. The SKU " +
+          "line stays standard:"
+        : "Edit the two label lines — saved store-wide, every future " +
+          "print uses them. ✕ resets a line to its default:";
       updateLabelPreview();
     }
+    renderNoScan(!!data.rfid_incompatible);
     // Multi-box/bundle standing. Only shown when an answer was actually
     // saved — an auto-detected product has nothing to undo.
     const kindBox = document.getElementById("phist-kind");
@@ -4889,9 +4994,8 @@ document.getElementById("phist-overlay").addEventListener("click", (e) => {
     document.getElementById("phist-overlay").hidden = true;
 });
 
-// The name a label would print for this product right now (null = the
-// standard store header) and where it goes.
-let phistPlacement = "header";
+// Defaults for the panel's two label boxes, captured per product on open.
+let phistDefaults = { top: "Telescopes Canada", sku: "" };
 
 function phistEffectiveName() {
   if (!phistData) return null;
@@ -4900,67 +5004,117 @@ function phistEffectiveName() {
   return phistData.custom_label;
 }
 
-function updatePlacementBtn() {
-  document.getElementById("phist-placement").textContent =
-    phistPlacement === "sku" ? "Replaces: SKU line" : "Replaces: store name";
-}
-
 // Miniature sticker mirrors the agent's real layout, including the
-// smaller font tiers long names trigger and the placement modes.
+// smaller font tiers long names trigger — plus the same fit check the
+// reprint dialog runs, so bad text is flagged (never blocked) here too.
 function updateLabelPreview() {
   if (!phistData) return;
   const p = phistData.product || {};
-  const typed = document.getElementById("phist-label-input").value.trim();
-  const asSku = typed && phistPlacement === "sku";
-  const header = asSku || !typed ? "Telescopes Canada" : typed;
+  const top =
+    document.getElementById("phist-top").value.trim() || STORE_HEADER;
+  const skuLine =
+    document.getElementById("phist-skuline").value.trim() ||
+    phistDefaults.sku;
   const el = document.getElementById("phist-prev-header");
-  el.textContent = header;
+  el.textContent = top;
   el.className =
     "label-preview__header " +
-    (asSku || !typed || header.length <= 26
+    (top === STORE_HEADER || top.length <= 26
       ? "label-preview__header--lg"
-      : header.length <= 56
+      : top.length <= 56
         ? "label-preview__header--md"
         : "label-preview__header--sm");
-  document.getElementById("phist-prev-sku").textContent = asSku
-    ? typed
-    : p.sku || phistData.sku || "";
+  document.getElementById("phist-prev-sku").textContent = skuLine || "—";
   document.getElementById("phist-prev-bc").textContent =
     p.barcode || p.sku || phistData.barcode || "";
   document.getElementById("phist-prev-bin").textContent =
     "BIN: " + (p.bin_location || "—");
+  const issues = labelFitIssues(top, skuLine);
+  const warn = document.getElementById("phist-fitwarn");
+  warn.hidden = !issues.length;
+  warn.textContent = issues.length
+    ? "⚠ " + issues.join("\n⚠ ") +
+      "\nYou can still print — this is a warning, not a block."
+    : "";
 }
 
-document.getElementById("phist-placement").addEventListener("click", () => {
-  phistPlacement = phistPlacement === "sku" ? "header" : "sku";
-  updatePlacementBtn();
+document
+  .getElementById("phist-top")
+  .addEventListener("input", updateLabelPreview);
+document
+  .getElementById("phist-skuline")
+  .addEventListener("input", updateLabelPreview);
+document.getElementById("phist-top-reset").addEventListener("click", () => {
+  document.getElementById("phist-top").value = phistDefaults.top;
   updateLabelPreview();
 });
+document
+  .getElementById("phist-skuline-reset")
+  .addEventListener("click", () => {
+    document.getElementById("phist-skuline").value = phistDefaults.sku;
+    updateLabelPreview();
+  });
 
-document.getElementById("phist-label-clear").addEventListener("click", async () => {
-  const input = document.getElementById("phist-label-input");
-  input.value = "";
-  updateLabelPreview();
-  // If a name was saved, clearing the box also purges it server-side.
-  if (phistData && !phistData.serial_prefix && phistData.custom_label) {
-    document.getElementById("phist-label-save").click();
+// Won't-RFID-scan flag: add OR remove, always offered for a cataloged
+// product. Labels still print and pairing still counts — sweeps just stop
+// expecting an answer. Every flip is logged.
+function renderNoScan(flagged) {
+  const row = document.getElementById("phist-norfid");
+  if (!phistData || !phistData.product || !phistData.sku) {
+    row.hidden = true;
+    return;
   }
-});
+  row.hidden = false;
+  phistData.rfid_incompatible = flagged;
+  document.getElementById("phist-norfid-what").innerHTML = flagged
+    ? '<span class="noscan-chip">⊘ won\'t RFID scan</span> tag won\'t ' +
+      "scan when on box — sweeps and Verify don't expect it to answer."
+    : "RFID OK — sweeps expect this product's tags to answer. If a tag " +
+      "reads in hand but never on the box, flag it:";
+  document.getElementById("phist-norfid-btn").textContent = flagged
+    ? "Remove flag"
+    : "Flag: won't RFID scan";
+}
 
 document
-  .getElementById("phist-label-input")
-  .addEventListener("input", updateLabelPreview);
+  .getElementById("phist-norfid-btn")
+  .addEventListener("click", async () => {
+    if (!phistData || !phistData.sku) return;
+    const want = !phistData.rfid_incompatible;
+    const msg = document.getElementById("phist-msg");
+    try {
+      await apiJson(
+        `/api/products/${encodeURIComponent(phistData.sku)}/rfid-incompatible`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            incompatible: want,
+            changed_by: operatorEl.value || null,
+          }),
+        }
+      );
+      renderNoScan(want);
+      msg.textContent = want
+        ? "Flagged ⊘ — logged; sweeps stop expecting this product to answer."
+        : "Flag removed ✓ — logged; sweeps expect it again.";
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+  });
 
-// Preferred label name save — serialized products write through their
-// serial record (Scan Station auto-prints use it too); others go to the
-// per-SKU label-name store. Blank clears back to the standard header.
+// Label save — serialized products write the top line through their
+// serial record (Scan Station auto-prints use it too); everything else
+// saves both lines to the per-SKU label store. Lines left at their
+// defaults mean "standard label".
 document.getElementById("phist-label-save").addEventListener("click", async () => {
   if (!phistData) return;
-  const name = document.getElementById("phist-label-input").value.trim();
   const msg = document.getElementById("phist-msg");
+  const top = document.getElementById("phist-top").value.trim();
+  const skuLine = document.getElementById("phist-skuline").value.trim();
   try {
     if (phistData.serial_prefix) {
-      if (!name) {
+      if (!top || top === STORE_HEADER) {
         msg.textContent =
           "Serialized products need a name — shorten it instead of clearing.";
         return;
@@ -4970,31 +5124,30 @@ document.getElementById("phist-label-save").addEventListener("click", async () =
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ label_name: name }),
+          body: JSON.stringify({ label_name: top }),
         }
       );
-      phistData.serial_label = name;
+      phistData.serial_label = top;
       phistData.serial_label_saved = true;
     } else {
-      await apiJson(
+      const res = await apiJson(
         `/api/label-names/${encodeURIComponent(phistData.sku)}`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            label_name: name,
-            placement: phistPlacement,
+            top_text: top || STORE_HEADER,
+            sku_line: skuLine || phistDefaults.sku,
             updated_by: operatorEl.value || null,
           }),
         }
       );
-      phistData.custom_label = name || null;
-      phistData.custom_placement = phistPlacement;
+      phistData.custom_label = res.label_name;
+      phistData.custom_placement = res.placement || "header";
+      phistData.custom_sku_text = res.sku_text || null;
     }
     updateLabelPreview();
-    msg.textContent = name
-      ? "Name saved ✓ — new prints use it."
-      : "Cleared ✓ — labels print the standard header.";
+    msg.textContent = "Label saved ✓ — new prints use it.";
   } catch (err) {
     msg.textContent = err.message;
   }

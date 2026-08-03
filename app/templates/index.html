@@ -494,18 +494,30 @@
           <section class="linkbox serialbox phist-modal" style="max-width:560px">
             <div class="linkbox__title">Fix label &amp; reprint — <span id="breprint-title">—</span></div>
             <p class="linkbox__text">Edit the two label lines. Corrections are saved for this product <b>store-wide</b>, so every future print uses them too.</p>
-            <label class="step__label" for="breprint-top">Top line</label>
-            <div class="phist-inputwrap">
-              <input class="linkbox__input" id="breprint-top" type="text" maxlength="76" autocomplete="off" autocapitalize="off" spellcheck="false" />
-              <button class="phist-clear" id="breprint-top-reset" type="button" title="Back to the store header">✕</button>
+            <div class="labeledit">
+              <div class="labeledit__fields">
+                <label class="step__label" for="breprint-top">Top line</label>
+                <div class="phist-inputwrap">
+                  <input class="linkbox__input" id="breprint-top" type="text" maxlength="76" autocomplete="off" autocapitalize="off" spellcheck="false" />
+                  <button class="phist-clear" id="breprint-top-reset" type="button" title="Back to the store header">✕</button>
+                </div>
+                <label class="step__label" for="breprint-sku">SKU line</label>
+                <div class="phist-inputwrap">
+                  <input class="linkbox__input" id="breprint-sku" type="text" maxlength="56" autocomplete="off" autocapitalize="off" spellcheck="false" />
+                  <button class="phist-clear" id="breprint-sku-reset" type="button" title="Back to the plain SKU">✕</button>
+                </div>
+                <label class="step__label" for="breprint-count">Labels to print</label>
+                <input class="linkbox__input breprint__count" id="breprint-count" type="number" min="1" max="200" />
+              </div>
+              <div class="labeledit__preview">
+                <div class="label-preview">
+                  <div class="label-preview__header" id="breprint-prev-header">Telescopes Canada</div>
+                  <div class="label-preview__sku" id="breprint-prev-sku"></div>
+                  <div class="label-preview__bc" id="breprint-prev-bc"></div>
+                  <div class="label-preview__bin" id="breprint-prev-bin"></div>
+                </div>
+              </div>
             </div>
-            <label class="step__label" for="breprint-sku">SKU line</label>
-            <div class="phist-inputwrap">
-              <input class="linkbox__input" id="breprint-sku" type="text" maxlength="56" autocomplete="off" autocapitalize="off" spellcheck="false" />
-              <button class="phist-clear" id="breprint-sku-reset" type="button" title="Back to the plain SKU">✕</button>
-            </div>
-            <label class="step__label" for="breprint-count">Labels to print</label>
-            <input class="linkbox__input breprint__count" id="breprint-count" type="number" min="1" max="200" />
             <p class="breprint__fitwarn" id="breprint-fitwarn" hidden></p>
             <p class="linkbox__text" id="breprint-warn"></p>
             <div class="linkbox__actions">
@@ -669,6 +681,7 @@
             <div class="linkbox__actions">
               <button class="reset" id="bpair-undo" type="button">Undo last tag</button>
               <button class="reset" id="bpair-reprint" type="button" title="The labels printed wrong — fix the name and print a fresh set">Fix label &amp; reprint…</button>
+              <button class="reset" id="bpair-norfid" type="button" title="The tag reads fine in hand but never once it's on the box — sweeps stop expecting an answer">⊘ Won't RFID scan</button>
             </div>
           </div>
           <p class="linkbox__text" id="bpair-summary"></p>
@@ -763,21 +776,39 @@
           <button class="reset" id="phist-kind-restore" type="button" title="Hand this product back to automatic detection">Put it back / detect automatically</button>
         </div>
         <div id="phist-serial" hidden>
-          <p class="linkbox__extra-label" id="phist-label-hint">Preferred label name — printed at the top of this product's labels instead of "Telescopes Canada". Leave blank for the standard label. Long names print smaller to fit two lines:</p>
-          <div class="linkbox__form">
-            <span class="phist-inputwrap">
-              <input id="phist-label-input" class="linkbox__input" type="text" maxlength="76" autocomplete="off" spellcheck="false" />
-              <button class="phist-clear" id="phist-label-clear" type="button" title="Clear the name — print the standard label">✕</button>
-            </span>
-            <button class="reset" id="phist-placement" type="button" title="Where the name prints on the label">Replaces: store name</button>
-            <button class="reset" id="phist-label-save" type="button">Save name</button>
+          <p class="linkbox__extra-label" id="phist-label-hint">Edit the two label lines — saved store-wide, every future print uses them:</p>
+          <div class="labeledit">
+            <div class="labeledit__fields">
+              <label class="step__label" for="phist-top">Top line</label>
+              <div class="phist-inputwrap">
+                <input id="phist-top" class="linkbox__input" type="text" maxlength="76" autocomplete="off" spellcheck="false" />
+                <button class="phist-clear" id="phist-top-reset" type="button" title="Back to the store header">✕</button>
+              </div>
+              <label class="step__label" for="phist-skuline">SKU line</label>
+              <div class="phist-inputwrap">
+                <input id="phist-skuline" class="linkbox__input" type="text" maxlength="56" autocomplete="off" spellcheck="false" />
+                <button class="phist-clear" id="phist-skuline-reset" type="button" title="Back to the plain SKU">✕</button>
+              </div>
+              <p class="breprint__fitwarn" id="phist-fitwarn" hidden></p>
+              <div class="linkbox__actions">
+                <button class="reset" id="phist-label-save" type="button">Save label</button>
+              </div>
+            </div>
+            <div class="labeledit__preview">
+              <div class="label-preview" id="phist-preview">
+                <div class="label-preview__header" id="phist-prev-header">Telescopes Canada</div>
+                <div class="label-preview__sku" id="phist-prev-sku"></div>
+                <div class="label-preview__bc" id="phist-prev-bc"></div>
+                <div class="label-preview__bin" id="phist-prev-bin"></div>
+              </div>
+            </div>
           </div>
-          <div class="label-preview" id="phist-preview">
-            <div class="label-preview__header" id="phist-prev-header">Telescopes Canada</div>
-            <div class="label-preview__sku" id="phist-prev-sku"></div>
-            <div class="label-preview__bc" id="phist-prev-bc"></div>
-            <div class="label-preview__bin" id="phist-prev-bin"></div>
-          </div>
+        </div>
+        <!-- Won't-RFID-scan flag: add or remove, always visible for a real
+             product. Sweeps stop expecting flagged products to answer. -->
+        <div class="kindrow" id="phist-norfid" hidden style="margin:10px 0">
+          <span class="kindrow__what" id="phist-norfid-what"></span>
+          <button class="reset" id="phist-norfid-btn" type="button"></button>
         </div>
         <div class="linkbox__form" style="margin:10px 0">
           <input id="phist-qty" class="linkbox__input" type="number" min="1" max="50" value="1" style="max-width:90px" />

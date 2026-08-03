@@ -1198,6 +1198,35 @@ a { color: var(--accent); }
 }
 .phist-clear:hover { color: var(--danger-ink, #d72c0d); }
 
+/* shared label editor: line boxes on the left, live sticker preview
+   in line with them on the right */
+.labeledit { display: flex; gap: 16px; align-items: flex-start; }
+.labeledit__fields { flex: 1; min-width: 0; }
+.labeledit__fields .step__label { display: block; margin: 8px 0 4px; }
+.labeledit__preview { flex: none; }
+.labeledit__preview .label-preview { margin: 4px 0; }
+@media (max-width: 620px) {
+  .labeledit { flex-wrap: wrap; }
+}
+
+/* inventory SKUs open the product panel */
+.skulink { color: var(--accent); cursor: pointer; }
+.skulink:hover { text-decoration: underline; }
+
+/* won't-RFID-scan chip: same shape as the ask-first bin flag */
+.noscan-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--bad-ink);
+  background: var(--bad-bg);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  vertical-align: 2px;
+  cursor: help;
+}
+
 /* fix-label-&-reprint dialog: stacked line editors + fit warning */
 #breprint-overlay .step__label { display: block; margin: 10px 0 4px; }
 #breprint-overlay .phist-inputwrap { width: 100%; }

@@ -529,6 +529,21 @@ class LabelName(Base):
     )
 
 
+class RfidIncompatible(Base):
+    """Products whose applied tag never answers a sweep — the label reads
+    fine in hand, dead once it's on the box (ZWO Desicc, several Optolong
+    lines). Labels still print and tags still pair (counts stay honest);
+    this flag tells every sweep-side check not to expect an answer."""
+
+    __tablename__ = "rfid_incompatible"
+
+    sku: Mapped[str] = mapped_column(String(100), primary_key=True)
+    set_by: Mapped[str | None] = mapped_column(String(100))
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class CaseCode(Base):
     """A barcode that is not a listing at all: the manufacturer's case /
     inner-pack code, meaning "N units of one product". Scanning it used to
