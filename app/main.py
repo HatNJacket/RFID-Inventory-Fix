@@ -2295,11 +2295,31 @@ def audit_bins(session: Session = Depends(get_session)):
     for (bin_name, _key), row in orphans.items():
         _bucket(f"{bin_name} · not in the bin map")["products"].append(row)
 
+    # "Done" means the bin itself went through batch tagging to completion.
+    # A lone tag from the Scan Station (or a stray carried in) must NOT
+    # promote an otherwise-untouched bin into the default view — one
+    # desk-tagged product out of 42 made E6-1 top the list with a score
+    # that was 41 parts never-tagged noise. Side trips don't count either:
+    # they tag a few carried boxes, never the whole shelf.
+    done_bins = {
+        (b.bin_name or "").strip().lower()
+        for b in session.scalars(
+            select(Batch).where(
+                Batch.status == "done",
+                Batch.parent_batch_id.is_(None),
+            )
+        )
+    }
+
     payload = []
     for b in bins.values():
         b["products"].sort(key=lambda p: (-abs(p["diff"]), p["sku"] or ""))
         b["score"] = sum(abs(p["diff"]) for p in b["products"])
-        b["tagged"] = any(p["rfid_units"] > 0 for p in b["products"])
+        b["tagged_products"] = sum(
+            1 for p in b["products"] if p["rfid_units"] > 0
+        )
+        b["tagged"] = b["tagged_products"] > 0
+        b["batch_done"] = b["bin"].strip().lower() in done_bins
         b["product_count"] = len(b["products"])
         b["mismatched_count"] = sum(1 for p in b["products"] if p["diff"])
         payload.append(b)
@@ -2310,6 +2330,7 @@ def audit_bins(session: Session = Depends(get_session)):
     return {
         "bins": payload,
         "bin_count": len(payload),
+        "done_bin_count": sum(1 for b in payload if b["batch_done"]),
         "tagged_bin_count": sum(1 for b in payload if b["tagged"]),
         "onhand_age_minutes": None if age is None else int(age / 60),
         "refreshing": _bin_map_state["running"],

@@ -4780,12 +4780,15 @@ function renderAuditBins() {
         ? `${auditData.onhand_age_minutes} min ago`
         : `${Math.round(auditData.onhand_age_minutes / 60)} h ago`) +
     `${auditData.refreshing ? " · refreshing now…" : ""})`;
+  // Default = bins that went through batch tagging to completion. A lone
+  // Scan-Station tag or a carried-in stray must not promote a bin whose
+  // score would be almost all never-tagged noise (the E6-1 lesson).
   document.getElementById("audit-untagged").textContent = auditShowUntagged
-    ? "Hide untagged bins"
-    : `Show untagged bins (${auditData.bin_count - auditData.tagged_bin_count})`;
+    ? "Show only batch-tagged bins"
+    : `Show not-yet-tagged bins (${auditData.bin_count - auditData.done_bin_count})`;
 
   const rows = auditData.bins.filter((b) => {
-    if (!auditShowUntagged && !b.tagged) return false;
+    if (!auditShowUntagged && !b.batch_done) return false;
     if (!q) return true;
     return (
       b.bin.toLowerCase().includes(q) ||
@@ -4797,7 +4800,7 @@ function renderAuditBins() {
     list.innerHTML = `<li class="recent__empty">${
       q
         ? "No bins match that."
-        : "No tagged bins yet — batch-tag a shelf first."
+        : "No batch-tagged bins yet — complete a batch first."
     }</li>`;
     return;
   }
@@ -4816,7 +4819,13 @@ function renderAuditBins() {
            clean
              ? " · all match"
              : ` · ${b.mismatched_count} mismatched`
-         }${b.tagged ? "" : " · untagged"}</span>
+         }${
+           b.batch_done
+             ? ""
+             : b.tagged
+               ? ` · NOT batch-tagged (${b.tagged_products} of ${b.product_count} have stray tags)`
+               : " · not batch-tagged"
+         }</span>
          <span class="auditrow__chev">${open ? "▾" : "▸"}</span>
        </div>` +
       (open
