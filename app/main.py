@@ -3505,20 +3505,26 @@ class BatchQueueIn(BaseModel):
 
 
 def _label_name_for(session: Session, item: BatchItem) -> tuple:
-    """Preferred label name + placement for one batch item, in order: the
-    serial brand's confirmed name, the product's saved label name, then
-    the item's own override. None = store header + SKU."""
+    """(name, placement, sku_text) for one batch item, in order: the serial
+    brand's confirmed name, the product's saved label name, then the item's
+    own override. (None, "header", None) = store header + SKU. sku_text is
+    only ever set from a saved name whose two lines were customized with
+    DIFFERENT text — placement alone can't express that."""
     if item.serial_prefix:
         sp = session.get(SerialPrefix, item.serial_prefix)
         if sp is not None and sp.label_name:
-            return sp.label_name, "header"
+            return sp.label_name, "header", None
     if item.sku:
         custom = session.get(LabelName, item.sku)
         if custom is not None:
-            return custom.label_name, custom.placement or "header"
+            return (
+                custom.label_name,
+                custom.placement or "header",
+                custom.sku_text,
+            )
     if item.label_name and item.label_name != item.sku:
-        return item.label_name, "header"
-    return None, "header"
+        return item.label_name, "header", None
+    return None, "header", None
 
 
 class ItemLabelsIn(BaseModel):
@@ -3556,7 +3562,7 @@ def batch_item_labels(
             "tag on. Print the label from one of its component products, or "
             "switch it to 'multi-box product' if that's wrong.",
         )
-    label_name, placement = _label_name_for(session, item)
+    label_name, placement, label_sku = _label_name_for(session, item)
     jobs = [
         PrintJob(
             epc=_new_epc(),
@@ -3572,6 +3578,7 @@ def batch_item_labels(
             other_bins=item.other_bins,
             label_name=label_name,
             label_placement=placement,
+            label_sku=label_sku,
             requested_by=payload.requested_by or batch.created_by,
         )
         for _ in range(payload.quantity)
@@ -3647,7 +3654,9 @@ def _build_label_jobs(
             if item.qty_scanned:
                 skipped_bundles.append(item.product_title or item.sku or "?")
             continue
-        label_name, label_placement = _label_name_for(session, item)
+        label_name, label_placement, label_sku = _label_name_for(
+            session, item
+        )
         # One label per loose box, plus one per sealed case. The case labels
         # carry their unit count so the sticker reads "8 x 93581" and nobody
         # mistakes the box for a single item.
@@ -3677,6 +3686,7 @@ def _build_label_jobs(
                     # product's saved label name (set in Check / History).
                     label_name=label_name,
                     label_placement=label_placement,
+                    label_sku=label_sku,
                     requested_by=requested_by or batch.created_by,
                 )
             )
@@ -4045,16 +4055,18 @@ def batch_pair_undo(
     return {"item": item.as_dict()}
 
 
+STORE_HEADER = "Telescopes Canada"
+
+
 class ReprintLabelsIn(BaseModel):
     """Fix-and-reprint at the Pair step: the labels printed wrong (usually
-    a preferred name replacing the wrong line)."""
+    a preferred name replacing the wrong line). The operator edits the two
+    label lines directly — top line and centre line — and text equal to
+    the default (store header / the SKU) means "standard"."""
 
     count: int = Field(ge=1, le=200)
-    # Optional store-wide correction of the preferred label name — saved
-    # BEFORE the new labels build, so they pick it up. None = leave the
-    # saved name alone; "" = clear it back to the standard label.
-    label_name: str | None = Field(default=None, max_length=76)
-    placement: str = Field(default="header", pattern="^(header|sku|both)$")
+    top_text: str = Field(default=STORE_HEADER, max_length=76)
+    sku_line: str = Field(default="", max_length=56)
     created_by: str | None = Field(default=None, max_length=100)
     # The operator confirmed the OLD stickers are off the boxes — an old
     # sticker left on would answer sweeps alongside the new one.
@@ -4098,18 +4110,43 @@ def batch_item_reprint(
 
     # 1. The saved preferred name is the usual culprit (right name, wrong
     # line) — fix it store-wide so the NEXT print anywhere is right too.
-    if payload.label_name is not None and item.sku:
-        name = payload.label_name.strip()
+    # The two boxes map onto the saved name: text equal to the defaults
+    # (store header / the product's SKU) means "standard", and only a pair
+    # of DIFFERENT customs needs the extra sku_text column.
+    top = payload.top_text.strip()
+    centre = payload.sku_line.strip()
+    top_custom = top if top and top != STORE_HEADER else None
+    centre_custom = (
+        centre
+        if centre and centre != (item.sku or "").strip()
+        else None
+    )
+    if item.sku:
         row = session.get(LabelName, item.sku.strip())
-        if not name:
+        if not top_custom and not centre_custom:
             if row is not None:
                 session.delete(row)
         else:
             if row is None:
                 row = LabelName(sku=item.sku.strip())
                 session.add(row)
-            row.label_name = name
-            row.placement = payload.placement
+            if top_custom and centre_custom:
+                if top_custom == centre_custom:
+                    row.label_name = top_custom
+                    row.placement = "both"
+                    row.sku_text = None
+                else:
+                    row.label_name = top_custom
+                    row.placement = "header"
+                    row.sku_text = centre_custom
+            elif top_custom:
+                row.label_name = top_custom
+                row.placement = "header"
+                row.sku_text = None
+            else:
+                row.label_name = centre_custom
+                row.placement = "sku"
+                row.sku_text = None
             row.updated_by = payload.created_by
 
     # 2. Release the ties to the old stickers (they're coming off/binned).
@@ -4136,7 +4173,7 @@ def batch_item_reprint(
 
     # 4. Fresh labels, picking up the corrected name. Sealed-case labels
     # are rebuilt at the tail, same order the original run used.
-    label_name, label_placement = _label_name_for(session, item)
+    label_name, label_placement, label_sku = _label_name_for(session, item)
     cases = min(item.case_count, payload.count) if item.case_units else 0
     per_label_units = (
         [None] * (payload.count - cases) + [item.case_units] * cases
@@ -4157,6 +4194,7 @@ def batch_item_reprint(
             other_bins=item.other_bins,
             label_name=label_name,
             label_placement=label_placement,
+            label_sku=label_sku,
             requested_by=payload.created_by or batch.created_by,
         )
         for units in per_label_units
@@ -4685,11 +4723,17 @@ def get_label_name(sku: str, session: Session = Depends(get_session)):
     and-reprint dialog show the operator what they're correcting."""
     row = session.get(LabelName, sku.strip())
     if row is None:
-        return {"sku": sku.strip(), "label_name": None, "placement": "header"}
+        return {
+            "sku": sku.strip(),
+            "label_name": None,
+            "placement": "header",
+            "sku_text": None,
+        }
     return {
         "sku": row.sku,
         "label_name": row.label_name,
         "placement": row.placement or "header",
+        "sku_text": row.sku_text,
     }
 
 
@@ -4715,6 +4759,9 @@ def set_label_name(
         session.add(row)
     row.label_name = name
     row.placement = payload.placement
+    # This API speaks the single-text model; a leftover two-line centre
+    # text would silently override the placement being saved here.
+    row.sku_text = None
     row.updated_by = payload.updated_by
     session.commit()
     return {"sku": sku, "label_name": name, "placement": row.placement}

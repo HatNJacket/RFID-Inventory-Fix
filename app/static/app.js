@@ -4095,6 +4095,70 @@ bEl.pairInput.addEventListener("keydown", async (event) => {
 // saved name store-wide, void this product's labels in the batch, release
 // any tags tied to them, and print a fresh set: the tracker returns to 0/N
 // with N the fresh count, never old-plus-new.
+const STORE_HEADER = "Telescopes Canada";
+// Defaults for the two boxes, captured when the dialog opens. Cancelling
+// discards edits: every open re-reads the SAVED state, so the boxes show
+// what they did before the first open, never a half-typed leftover.
+let reprintDefaults = { top: STORE_HEADER, sku: "" };
+
+// Approximate ZPL font-0 advance width, as a fraction of the font height.
+// Same geometry as the print agent: 2.125in x 203dpi = 431 dots across.
+const LABEL_PW = 431;
+function zplTextDots(text, size) {
+  const NARROW = "iIl1jft.,:;'|!()[] -";
+  const WIDE = "MWmw@";
+  let w = 0;
+  for (const ch of text) {
+    w += (NARROW.includes(ch) ? 0.35 : WIDE.includes(ch) ? 0.78 : 0.55) * size;
+  }
+  return w;
+}
+
+// Mirrors the print agent's layout rules: the top zone holds at most two
+// lines (font steps down 28/20/16 with length) and ends where the SKU
+// line starts; the SKU line is ONE line at font 30 — ZPL overprints
+// rather than clipping, which is exactly the mess being fixed.
+function labelFitIssues(top, sku) {
+  const issues = [];
+  if (top && top !== STORE_HEADER) {
+    if (top.length > 76)
+      issues.push("Top line: cut off after 76 characters.");
+    const size = top.length <= 26 ? 28 : top.length <= 56 ? 20 : 16;
+    const lines = Math.max(1, Math.ceil(zplTextDots(top, size) / LABEL_PW));
+    if (lines > 2)
+      issues.push(
+        "Top line: needs more than the two lines available — the text " +
+          "will overprint itself."
+      );
+    else if (lines === 2 && size === 28)
+      issues.push(
+        "Top line: wraps onto a second line that lands ON the SKU line."
+      );
+  }
+  if (sku) {
+    if (sku.length > 56)
+      issues.push("SKU line: cut off after 56 characters.");
+    else if (zplTextDots(sku, 30) > LABEL_PW)
+      issues.push(
+        "SKU line: too wide for its single line — the text will overlap " +
+          "itself on the sticker."
+      );
+  }
+  return issues;
+}
+
+function updateReprintFitWarn() {
+  const warnEl = document.getElementById("breprint-fitwarn");
+  const issues = labelFitIssues(
+    document.getElementById("breprint-top").value.trim(),
+    document.getElementById("breprint-sku").value.trim()
+  );
+  warnEl.hidden = !issues.length;
+  warnEl.textContent = issues.length
+    ? "⚠ " + issues.join("\n⚠ ") + "\nYou can still print — this is a warning, not a block."
+    : "";
+}
+
 document.getElementById("bpair-reprint").addEventListener("click", async () => {
   const item = batchItems.find((i) => i.id === pairActiveItemId);
   if (!item || !batch) return;
@@ -4110,19 +4174,36 @@ document.getElementById("bpair-reprint").addEventListener("click", async () => {
     : `The old printed labels become invalid — bin them so they never ` +
       `end up on a box.`;
   document.getElementById("breprint-msg").textContent = "";
-  // Prefill with what's saved now, so the wrong placement is visible.
+  reprintDefaults = { top: STORE_HEADER, sku: item.sku || "" };
+  // Prefill from what's SAVED, never from a previous unconfirmed edit.
+  let top = STORE_HEADER;
+  let skuLine = item.sku || "";
   try {
     const cur = await apiJson(
       `/api/label-names/${encodeURIComponent(item.sku || "")}`
     );
-    document.getElementById("breprint-name").value = cur.label_name || "";
-    document.getElementById("breprint-placement").value =
-      cur.placement || "header";
+    if (cur.label_name && cur.placement !== "sku") top = cur.label_name;
+    if (cur.sku_text) skuLine = cur.sku_text;
+    else if (cur.label_name && (cur.placement === "sku" || cur.placement === "both"))
+      skuLine = cur.label_name;
   } catch {
-    document.getElementById("breprint-name").value = "";
-    document.getElementById("breprint-placement").value = "header";
+    /* no saved name — defaults stand */
   }
+  document.getElementById("breprint-top").value = top;
+  document.getElementById("breprint-sku").value = skuLine;
+  updateReprintFitWarn();
   document.getElementById("breprint-overlay").hidden = false;
+});
+
+document.getElementById("breprint-top").addEventListener("input", updateReprintFitWarn);
+document.getElementById("breprint-sku").addEventListener("input", updateReprintFitWarn);
+document.getElementById("breprint-top-reset").addEventListener("click", () => {
+  document.getElementById("breprint-top").value = reprintDefaults.top;
+  updateReprintFitWarn();
+});
+document.getElementById("breprint-sku-reset").addEventListener("click", () => {
+  document.getElementById("breprint-sku").value = reprintDefaults.sku;
+  updateReprintFitWarn();
 });
 
 document
@@ -4159,8 +4240,8 @@ document.getElementById("breprint-go").addEventListener("click", async () => {
       `/api/batches/${batch.id}/items/${item.id}/reprint-labels`,
       {
         count,
-        label_name: document.getElementById("breprint-name").value,
-        placement: document.getElementById("breprint-placement").value,
+        top_text: document.getElementById("breprint-top").value.trim(),
+        sku_line: document.getElementById("breprint-sku").value.trim(),
         created_by: operatorEl.value || null,
         old_stickers_removed: true,
       }

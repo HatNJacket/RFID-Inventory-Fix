@@ -493,17 +493,20 @@
         <div class="phist-overlay" id="breprint-overlay" hidden>
           <section class="linkbox serialbox phist-modal" style="max-width:560px">
             <div class="linkbox__title">Fix label &amp; reprint — <span id="breprint-title">—</span></div>
-            <p class="linkbox__text">The corrected name is saved for this product <b>store-wide</b>, so every future print uses it too.</p>
-            <label class="step__label" for="breprint-name">Preferred label name (blank = standard label)</label>
-            <input id="breprint-name" type="text" maxlength="76" autocomplete="off" />
-            <label class="step__label" for="breprint-placement">Which line does it replace?</label>
-            <select id="breprint-placement">
-              <option value="header">The name line (keeps the SKU line)</option>
-              <option value="sku">The SKU line (keeps the name line)</option>
-              <option value="both">Both lines</option>
-            </select>
+            <p class="linkbox__text">Edit the two label lines. Corrections are saved for this product <b>store-wide</b>, so every future print uses them too.</p>
+            <label class="step__label" for="breprint-top">Top line</label>
+            <div class="phist-inputwrap">
+              <input class="linkbox__input" id="breprint-top" type="text" maxlength="76" autocomplete="off" autocapitalize="off" spellcheck="false" />
+              <button class="phist-clear" id="breprint-top-reset" type="button" title="Back to the store header">✕</button>
+            </div>
+            <label class="step__label" for="breprint-sku">SKU line</label>
+            <div class="phist-inputwrap">
+              <input class="linkbox__input" id="breprint-sku" type="text" maxlength="56" autocomplete="off" autocapitalize="off" spellcheck="false" />
+              <button class="phist-clear" id="breprint-sku-reset" type="button" title="Back to the plain SKU">✕</button>
+            </div>
             <label class="step__label" for="breprint-count">Labels to print</label>
-            <input id="breprint-count" type="number" min="1" max="200" />
+            <input class="linkbox__input breprint__count" id="breprint-count" type="number" min="1" max="200" />
+            <p class="breprint__fitwarn" id="breprint-fitwarn" hidden></p>
             <p class="linkbox__text" id="breprint-warn"></p>
             <div class="linkbox__actions">
               <button class="print__btn" id="breprint-go" type="button">Void old labels &amp; print fresh</button>

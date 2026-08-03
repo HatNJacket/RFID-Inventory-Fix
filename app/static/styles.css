@@ -1198,6 +1198,21 @@ a { color: var(--accent); }
 }
 .phist-clear:hover { color: var(--danger-ink, #d72c0d); }
 
+/* fix-label-&-reprint dialog: stacked line editors + fit warning */
+#breprint-overlay .step__label { display: block; margin: 10px 0 4px; }
+#breprint-overlay .phist-inputwrap { width: 100%; }
+.breprint__count { max-width: 110px; }
+.breprint__fitwarn {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--warn-ink);
+  background: var(--warn-bg);
+  white-space: pre-line;
+}
+
 /* check-item editor: arrows flanking the product */
 .bitem-nav { display: flex; align-items: stretch; gap: 8px; }
 .bitem-body { flex: 1; min-width: 0; }

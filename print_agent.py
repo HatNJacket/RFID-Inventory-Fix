@@ -162,6 +162,13 @@ def build_zpl(job: dict, encode_rfid: bool,
     else:
         header = HEADER_STORE.format(pw=pw)
 
+    # Both lines customized with DIFFERENT text: label_name (placement
+    # header) drew the top above, and this explicit centre line wins over
+    # the SKU. Jobs without label_sku behave exactly as before.
+    label_sku = clean(job.get("label_sku"), fallback="")
+    if label_sku:
+        sku_text = label_sku[:56]
+
     # A sealed case carries ONE tag but holds several units, so the centre
     # line has to say so ("8 x 93581") — otherwise the sticker reads as a
     # single item. Applied last, after any preferred name has had its say.

@@ -248,6 +248,10 @@ class PrintJob(Base):
     # Where the name goes: "header" replaces the store name, "sku" replaces
     # the SKU line above the barcode. NULL = header (back-compat).
     label_placement: Mapped[str | None] = mapped_column(String(10))
+    # Explicit centre-line text, when it differs from a name placed via
+    # label_placement (both lines customized differently). Newer print
+    # agents apply it; older ones fall back to label_name+placement.
+    label_sku: Mapped[str | None] = mapped_column(String(56))
 
     # Units this label's tag stands for. Set only for a sealed case, where
     # the label has to say "8 x 93581" so nobody treats the box as one item.
@@ -281,6 +285,7 @@ class PrintJob(Base):
             "shopify_product_id": self.shopify_product_id,
             "label_name": self.label_name,
             "label_placement": self.label_placement,
+            "label_sku": self.label_sku,
             # The agent prints "8 x SKU" when this is set.
             "case_units": self.case_units,
             "requested_by": self.requested_by,
@@ -514,6 +519,10 @@ class LabelName(Base):
     placement: Mapped[str] = mapped_column(
         String(10), nullable=False, default="header", server_default="header"
     )
+    # Set only when the operator customized BOTH lines with DIFFERENT text
+    # (label_name+placement can't express that): label_name is the top
+    # line, this is the centre line.
+    sku_text: Mapped[str | None] = mapped_column(String(56))
     updated_by: Mapped[str | None] = mapped_column(String(100))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
