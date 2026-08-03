@@ -604,6 +604,23 @@ class HiddenBin(Base):
     )
 
 
+class FlaggedBin(Base):
+    """Bins marked "ask first" — the operator isn't confident scanning them
+    without checking with someone who knows the inventory better. A visible
+    warning on the work list, nothing more: the bin still counts as to-do
+    and nothing about it is blocked."""
+
+    __tablename__ = "rfid_flagged_bins"
+
+    bin: Mapped[str] = mapped_column(String(100), primary_key=True)
+    # Why it needs a second pair of eyes, e.g. "mixed consignment stock".
+    note: Mapped[str | None] = mapped_column(String(255))
+    flagged_by: Mapped[str | None] = mapped_column(String(100))
+    flagged_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class EpcCapture(Base):
     """One RFID sweep sent from the C72 companion app: the operator scans a
     shelf freely (everything held on the device), then hits Send once —

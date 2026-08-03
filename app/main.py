@@ -42,6 +42,7 @@ from app.models import (
     BinMapEntry,
     CaseCode,
     EpcCapture,
+    FlaggedBin,
     HiddenBin,
     LabelName,
     PrintJob,
@@ -1406,6 +1407,33 @@ def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
         new_barcode=payload.bin[:64],
         changed_by=payload.changed_by,
     ))
+
+    # The LOCAL records move with it, immediately — otherwise the RFID
+    # system keeps the OLD shelf until the next full bin-map refresh:
+    # batch pre-seeds, bin checks and sweep reports would all disagree
+    # with the move that was just confirmed.
+    sku = (product.get("sku") or "").strip()
+    if sku:
+        map_rows = session.scalars(
+            select(BinMapEntry).where(
+                func.upper(BinMapEntry.sku) == sku.upper()
+            )
+        ).all()
+        if map_rows:
+            # The Shopify write replaced the whole bin value, so one local
+            # row with the new bin mirrors it; extra rows from an old
+            # split-across-shelves value are collapsed.
+            keep = map_rows[0]
+            keep.bin = payload.bin
+            keep.other_bins = None
+            for extra in map_rows[1:]:
+                session.delete(extra)
+        for tag in session.scalars(
+            select(RfidAssignment).where(
+                func.upper(RfidAssignment.sku) == sku.upper()
+            )
+        ):
+            tag.bin_location = payload.bin
     session.commit()
 
     product["bin_location"] = payload.bin
@@ -1946,6 +1974,11 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
         (h.bin or "").strip().lower()
         for h in session.scalars(select(HiddenBin))
     }
+    # "Ask first" flags: bin -> optional note.
+    flagged = {
+        (f.bin or "").strip().lower(): f.note
+        for f in session.scalars(select(FlaggedBin))
+    }
 
     todo = []
     done_bins = 0
@@ -1967,6 +2000,8 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
             "open_batch_id": openb.id if openb else None,
             "hidden": key in hidden,
             "malformed": odd_name,
+            "flagged": key in flagged,
+            "flag_note": flagged.get(key),
         })
     # Bins already in progress first, then the biggest jobs.
     todo.sort(key=lambda b: (b["open_batch_id"] is None, -b["products"],
@@ -1978,6 +2013,7 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
         "todo_count": sum(1 for b in todo if not b["hidden"]),
         "hidden_count": sum(1 for b in todo if b["hidden"]),
         "malformed_count": malformed_total,
+        "flagged_count": sum(1 for b in todo if b["flagged"]),
         "todo": todo,
         "recent": [
             {
@@ -2022,6 +2058,41 @@ def set_bin_hidden(
         session.delete(row)
     session.commit()
     return {"bin": name, "hidden": payload.hidden}
+
+
+class FlagBinIn(BaseModel):
+    flagged: bool = True
+    note: str | None = Field(default=None, max_length=255)
+    flagged_by: str | None = Field(default=None, max_length=100)
+
+
+@app.put(
+    "/api/bins/{bin_name}/flagged", dependencies=[Depends(require_user)]
+)
+def set_bin_flagged(
+    bin_name: str,
+    payload: FlagBinIn,
+    session: Session = Depends(get_session),
+):
+    """Mark a bin "ask first" (or clear it): the operator wants a word with
+    someone who knows the inventory before scanning it. A warning on the
+    work list only — nothing is hidden or blocked, and re-flagging updates
+    the note."""
+    name = bin_name.strip()
+    if not name:
+        raise HTTPException(422, "Bin required.")
+    row = session.get(FlaggedBin, name)
+    note = (payload.note or "").strip() or None
+    if payload.flagged:
+        if row is None:
+            row = FlaggedBin(bin=name)
+            session.add(row)
+        row.note = note
+        row.flagged_by = payload.flagged_by
+    elif row is not None:
+        session.delete(row)
+    session.commit()
+    return {"bin": name, "flagged": payload.flagged, "note": note}
 
 
 @app.get(
@@ -3635,11 +3706,11 @@ def divert_to_bin(
 
     The parent batch is left exactly as it was, minus the strays."""
     parent = _get_batch(session, batch_id)
-    if parent.status != "collecting":
+    if parent.status not in ("collecting", "printing"):
         raise HTTPException(
             409,
-            f"Labels for this batch are already {parent.status} — a side "
-            f"trip only works from the Check step, before anything prints.",
+            f"This batch is {parent.status} — side trips only run while "
+            f"it's still being worked.",
         )
     wanted = payload.bin.strip()
     if not wanted:
@@ -3668,6 +3739,27 @@ def divert_to_bin(
             409,
             "Some of those already have tags paired, so they can't be moved "
             "as if they were untouched. Undo the pairing first.",
+        )
+    # The batch-status test above is deliberately loose (a side trip's own
+    # labels print the moment it's created, so a stray scanned INSIDE one
+    # sits in a 'printing' batch — the EFW-mask case). The real invariant
+    # is per item: nothing moves that already has labels printed HERE,
+    # because those labels name this bin.
+    printed_here = {
+        (j.sku or "").upper()
+        for j in session.scalars(
+            select(PrintJob).where(
+                PrintJob.batch_id == batch_id,
+                PrintJob.status.in_(("pending", "printing", "done")),
+            )
+        )
+    }
+    stuck = [i for i in movers if (i.sku or "").upper() in printed_here]
+    if stuck:
+        raise HTTPException(
+            409,
+            f"{len(stuck)} of those already have labels printed for THIS "
+            f"bin — reprint/void those labels first, or pair them here.",
         )
 
     side = Batch(

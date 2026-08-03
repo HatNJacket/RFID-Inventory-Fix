@@ -526,6 +526,10 @@ public class MainActivity extends Activity {
         binChip.setTextSize(17);
         binChip.setTypeface(null, Typeface.BOLD);
         binChip.setTextColor(C_TEXT);
+        // Tap the bin name to flag it "ask first" on the work list — for
+        // shelves nobody should scan without a word with someone who knows
+        // the stock better.
+        binChip.setOnClickListener(view -> flagBinDialog());
         header.addView(binChip, weight());
         pwrChipBatch = chipBtn("PWR " + prefs.getInt("power", 5));
         wirePowerChip(pwrChipBatch);
@@ -948,6 +952,7 @@ public class MainActivity extends Activity {
     private TextView editMsg;
     private LinearLayout editBinRow;
     private TextView editBinText;
+    private Button editBinTripBtn;
     private Button editBinChip;
     private LinearLayout editLabelRow;
     private Button editLabelMode;
@@ -1068,6 +1073,19 @@ public class MainActivity extends Activity {
         editBinText.setTextSize(13);
         editBinText.setTextColor(Color.parseColor("#8a6116"));
         editBinRow.addView(editBinText);
+        // The productive answer gets its own full-width line: physically
+        // carry the box(es) to the shelf the record names, as a side trip —
+        // labels print with THAT bin, pair there, come straight back.
+        // Works from inside a side trip too (the EFW mask case); the
+        // server chains the batches.
+        editBinTripBtn = smallBtn("Take it there");
+        editBinTripBtn.setOnClickListener(v -> tripFromItem());
+        LinearLayout.LayoutParams tripLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        tripLp.topMargin = dp(4);
+        tripLp.bottomMargin = dp(4);
+        editBinRow.addView(editBinTripBtn, tripLp);
         LinearLayout binBtns = new LinearLayout(this);
         Button bDrop = smallBtn("Belongs elsewhere");
         bDrop.setOnClickListener(v -> dropItemFromBatch(false));
@@ -1280,6 +1298,12 @@ public class MainActivity extends Activity {
         if (wrongBin) {
             editBinText.setText("On this shelf (" + batchBin + ") but the "
                     + "system has it in " + it.binLocation + ".");
+            String home = firstBin(it.binLocation);
+            editBinTripBtn.setText("TAKE IT TO " + home
+                    + " — start a trip");
+            // A trip needs boxes to carry and no tags tying them here yet.
+            editBinTripBtn.setVisibility(home != null && it.qty > 0
+                    && it.paired == 0 ? View.VISIBLE : View.GONE);
         }
         editLabelRow.setVisibility(
                 it.resolved && !it.skipped ? View.VISIBLE : View.GONE);
@@ -1663,7 +1687,15 @@ public class MainActivity extends Activity {
                         + "or BACK to keep scanning.");
             } else batchScan(code);
         } else if (activeTab == TAB_STATION) {
-            stationLookup(code);
+            // The bins wear barcodes of their own that scan as the bin
+            // name ("D1-3"). With a product already up, that scan almost
+            // always means "this product lives HERE now" — but a few SKUs
+            // look like bin names too, so it ASKS instead of assuming.
+            if (stationProduct != null && looksLikeBin(code)) {
+                askBinRelocate(code);
+            } else {
+                stationLookup(code);
+            }
         } else if (activeTab == TAB_FIND) {
             findLookup(code);
         } else {
@@ -2851,9 +2883,11 @@ public class MainActivity extends Activity {
         // In VERIFY the advancing button IS the send, so the third slot
         // would only duplicate it — hide it and the row reads as one path.
         btnSweep.setVisibility(step == STEP_VERIFY ? View.GONE : View.VISIBLE);
+        // "BASE-\nLINE": the word alone is one letter too wide for the
+        // button, and the stray E on its own line read as a typo.
         btnSweep.setText(step == STEP_PAIR ? "SWEEP"
                 : step == STEP_COLLECT
-                  ? (baselineArmed ? "APPLY BASELINE" : "BASELINE")
+                  ? (baselineArmed ? "APPLY\nBASELINE" : "BASE-\nLINE")
                   : "UNPAIR");
         btnNext.setText(parentBatchId != 0 && step == STEP_PAIR
                 ? "FINISH TRIP"
@@ -3807,7 +3841,7 @@ public class MainActivity extends Activity {
             if (scanning) toggleScan();
             synchronized (tags) { tags.clear(); }
             baselineArmed = true;
-            btnSweep.setText("APPLY BASELINE");
+            btnSweep.setText("APPLY\nBASELINE");
             beep(SOUND_OTHER);
             status.setText("BASELINE: hold the trigger and sweep the whole "
                     + "shelf. Tags already on boxes here count as done. "
@@ -3819,7 +3853,7 @@ public class MainActivity extends Activity {
 
     private void applyBaselineSweep() {
         baselineArmed = false;
-        btnSweep.setText("BASELINE");
+        btnSweep.setText("BASE-\nLINE");
         if (scanning) {
             try {
                 reader.stopInventory();
@@ -3875,6 +3909,87 @@ public class MainActivity extends Activity {
     // batch is exactly where it was left.
     private int parentBatchId = 0;
     private String parentBinName = null;
+
+    /** Tap on the bin name: flag (or unflag) this bin as "ask first" on
+     *  the web work list. A note says WHY it needs a second opinion. */
+    private void flagBinDialog() {
+        if (batchBin == null || batchBin.isEmpty()) return;
+        final EditText in = new EditText(this);
+        in.setHint("Why? e.g. mixed consignment stock (optional)");
+        in.setTextSize(13);
+        int pad = dp(14);
+        in.setPadding(pad, pad, pad, pad);
+        new AlertDialog.Builder(this)
+                .setTitle("Flag bin " + batchBin + "?")
+                .setMessage("\"Ask first\": marks this bin on the work list "
+                        + "as needing a word with someone who knows the "
+                        + "inventory before it's scanned. Nothing is "
+                        + "blocked or hidden.")
+                .setView(in)
+                .setPositiveButton("FLAG IT", (d, w) ->
+                        postBinFlag(true, in.getText().toString().trim()))
+                .setNeutralButton("REMOVE FLAG", (d, w) ->
+                        postBinFlag(false, null))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void postBinFlag(boolean flagged, String note) {
+        final String bin = batchBin;
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("flagged", flagged)
+                        .put("flagged_by", prefs.getString("device", "C72"));
+                if (note != null && !note.isEmpty()) body.put("note", note);
+                api("PUT", "/api/bins/"
+                        + URLEncoder.encode(bin, "UTF-8") + "/flagged", body);
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    status.setText(flagged
+                            ? "Bin " + bin + " flagged ⚑ — it shows \"ask "
+                              + "first\" on the work list."
+                            : "Flag removed from " + bin + ".");
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Flag failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** First bin out of a possibly-split value: "G2-1 & B17" -> "G2-1". */
+    private static String firstBin(String bins) {
+        if (bins == null) return null;
+        String first = bins.split("[&,]")[0].trim();
+        return first.isEmpty()
+                || "No bin assigned".equalsIgnoreCase(first) ? null : first;
+    }
+
+    /** "TAKE IT TO <bin>" from a wrong-bin item's editor: same server-side
+     *  trip as the Check step's stray offer, but reachable per item — and
+     *  from inside a side trip, which the automatic offer never is. */
+    private void tripFromItem() {
+        if (editEntry == null) return;
+        final String bin = firstBin(editEntry.item.binLocation);
+        if (bin == null) return;
+        String name = editEntry.item.name();
+        new AlertDialog.Builder(this)
+                .setTitle("Take it to " + bin + "?")
+                .setMessage(name + " leaves this batch and becomes a short "
+                        + "side trip for " + bin + ": its labels print with "
+                        + bin + " on them, you pair them there, then you're "
+                        + "back here.\n\nAnything else in this batch that "
+                        + "belongs in " + bin + " comes along too.")
+                .setPositiveButton("Start the trip", (d, w) -> {
+                    closeItemEditor();
+                    startSideTrip(bin);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
 
     private void offerSideTrip(JSONArray strays) {
         if (strays == null || strays.length() == 0) return;
@@ -3950,9 +4065,26 @@ public class MainActivity extends Activity {
                         : parent.optInt("id");
                 final String backBin = parent == null ? parentBinName
                         : parent.optString("bin_name", parentBinName);
+                // The batch we drop back into may ITSELF be a side trip (a
+                // trip can start from inside one now). Restore ITS parent
+                // pointers, so its FINISH TRIP still knows the way home.
+                int gpId = parent == null ? 0
+                        : parent.optInt("parent_batch_id", 0);
+                String gpBin = null;
+                if (gpId != 0) {
+                    try {
+                        gpBin = api("GET", "/api/batches/" + gpId, null)
+                                .getJSONObject("batch")
+                                .optString("bin_name", "?");
+                    } catch (Exception ignored) {
+                        gpBin = "?";
+                    }
+                }
+                final int nextParentId = gpId;
+                final String nextParentBin = gpBin;
                 ui.post(() -> {
-                    parentBatchId = 0;
-                    parentBinName = null;
+                    parentBatchId = nextParentId;
+                    parentBinName = nextParentBin;
                     batchId = backId;
                     batchBin = backBin;
                     bItems.clear();
@@ -4045,6 +4177,66 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------ station ---
+    /** The canonical shelf format: one letter, 1-99, dash, 1-99 (D1-3). */
+    private static boolean looksLikeBin(String code) {
+        return code != null && code.trim().matches("[A-Za-z]\\d{1,2}-\\d{1,2}");
+    }
+
+    /** A bin barcode scanned while a product is up: offer to move the
+     *  product there — RFID records AND Shopify — or fall through to a
+     *  normal lookup (some SKUs look exactly like bin names). */
+    private void askBinRelocate(String code) {
+        final JSONObject p = stationProduct;
+        final String bin = code.trim().toUpperCase(java.util.Locale.ROOT);
+        final String was = p.isNull("bin_location") ? "none"
+                : p.optString("bin_location");
+        beep(SOUND_OTHER);
+        new AlertDialog.Builder(this)
+                .setTitle("Move it to bin " + bin + "?")
+                .setMessage(p.optString("product_title", "?")
+                        + "\n\nbin " + was + "  ->  " + bin
+                        + "\n\nUpdates the RFID system and Shopify. If \""
+                        + code + "\" is actually a product, look it up "
+                        + "instead.")
+                .setPositiveButton("SET BIN", (d, w) -> postBinRelocate(bin))
+                .setNegativeButton("No - look it up", (d, w) ->
+                        stationLookup(code))
+                .show();
+    }
+
+    private void postBinRelocate(String bin) {
+        final JSONObject p = stationProduct;
+        final String target = p.isNull("sku")
+                ? p.optString("barcode") : p.optString("sku");
+        status.setText("Setting bin to " + bin + "…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("target", target)
+                        .put("bin", bin)
+                        .put("changed_by", prefs.getString("device", "C72"));
+                api("POST", "/api/bin-updates", body);
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    try {
+                        p.put("bin_location", bin);
+                    } catch (Exception ignored) {
+                    }
+                    stationSku.setText((p.isNull("sku") ? "no SKU"
+                            : "SKU: " + p.optString("sku"))
+                            + "  ·  bin " + bin);
+                    status.setText(p.optString("product_title", "?")
+                            + " → bin " + bin + " ✓");
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Bin update failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
     private void stationLookup(String code) {
         status.setText("Looking up " + code + "…");
         new Thread(() -> {

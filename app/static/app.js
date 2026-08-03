@@ -1986,6 +1986,8 @@ function renderBinBoard() {
       binBoard.malformed_count
         ? ` · ${binBoard.malformed_count} odd name(s)`
         : ""
+    }${
+      binBoard.flagged_count ? ` · ${binBoard.flagged_count} flagged` : ""
     })`;
   hideBtn.innerHTML = showHiddenBins
     ? `${ICON_EYE_OFF}<span>Hide ignored</span>`
@@ -2018,16 +2020,29 @@ function renderBinBoard() {
     if (b.open_batch_id) li.classList.add("binlist--open");
     if (b.hidden) li.classList.add("binlist--hidden");
     if (b.malformed) li.classList.add("binlist--odd");
+    if (b.flagged) li.classList.add("binlist--flagged");
     li.innerHTML =
       `<button class="binlist__eye" type="button" title="${
         b.hidden ? "Show bin" : "Hide bin"
       }" aria-label="${b.hidden ? "Show bin" : "Hide bin"}">${
         b.hidden ? ICON_EYE : ICON_EYE_OFF
       }</button>` +
+      `<button class="binlist__flagbtn" type="button" title="${
+        b.flagged
+          ? "Remove the ask-first flag"
+          : "Flag: ask someone before scanning this bin"
+      }" aria-label="${b.flagged ? "Unflag bin" : "Flag bin"}">⚑</button>` +
       `<span class="binlist__name">${escapeHtml(b.bin)}</span>` +
       `${
         b.malformed
           ? `<span class="binlist__odd" title="Bin name doesn't match the A1-2 format (one letter, then 1-99, dash, 1-99). Usually means one product's stock is split across shelves — worth fixing in Shopify before tagging this bin.">⚠ odd name</span>`
+          : ""
+      }` +
+      `${
+        b.flagged
+          ? `<span class="binlist__flag" title="${escapeHtml(
+              b.flag_note || "Ask someone who knows this stock before scanning."
+            )}">⚑ ask first</span>`
           : ""
       }` +
       `<span class="binlist__count">${b.products} product(s)${
@@ -2070,6 +2085,41 @@ function renderBinBoard() {
         setBatchResult(err.message, "err");
       }
     });
+    li.querySelector(".binlist__flagbtn").addEventListener(
+      "click",
+      async (ev) => {
+        const flagged = !b.flagged;
+        let note = null;
+        if (flagged) {
+          note = prompt(
+            `Flag ${b.bin} as "ask first".\n\n` +
+              `Why does it need a second opinion? (optional)`,
+            b.flag_note || ""
+          );
+          if (note === null) return; // cancelled
+          note = note.trim() || null;
+        }
+        ev.currentTarget.disabled = true;
+        try {
+          await apiJson(`/api/bins/${encodeURIComponent(b.bin)}/flagged`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              flagged,
+              note,
+              flagged_by: operatorEl.value || null,
+            }),
+          });
+          b.flagged = flagged;
+          b.flag_note = note;
+          binBoard.flagged_count += flagged ? 1 : -1;
+          renderBinBoard();
+        } catch (err) {
+          ev.currentTarget.disabled = false;
+          setBatchResult(err.message, "err");
+        }
+      }
+    );
     list.append(li);
   });
 }
