@@ -39,7 +39,9 @@ class RfidAssignment(Base):
     shopify_product_id: Mapped[str | None] = mapped_column(String(300))
     product_title: Mapped[str] = mapped_column(String(255), nullable=False)
     variant_title: Mapped[str | None] = mapped_column(String(255))
-    sku: Mapped[str | None] = mapped_column(String(100))
+    # Indexed: bin checks and the Check step look tags up by SKU, and an
+    # unindexed scan here grew with every tag applied.
+    sku: Mapped[str | None] = mapped_column(String(100), index=True)
     barcode: Mapped[str | None] = mapped_column(String(64), index=True)
     bin_location: Mapped[str | None] = mapped_column(String(100))
     # Units this ONE tag stands for. None/1 = a single item, the normal

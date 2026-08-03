@@ -132,6 +132,8 @@ public class MainActivity extends Activity {
     private final Button[] tabBtns = new Button[TAB_COUNT];
     private Button gearBtn;
     private FrameLayout drawerScrim;
+    private FrameLayout loadingOverlay;
+    private TextView loadingText;
     private LinearLayout drawerPanel;
     private TextView tabTitle;
     private int activeTab = TAB_BATCH;
@@ -476,6 +478,34 @@ public class MainActivity extends Activity {
         outer.addView(drawerScrim);
 
         buildItemEditor(outer);
+
+        // Topmost veil: a spinner dead-centre while a network call runs, so
+        // a slow check reads as "working…" instead of a frozen screen. Added
+        // LAST so it draws over the drawer and the item editor too.
+        loadingOverlay = new FrameLayout(this);
+        loadingOverlay.setBackgroundColor(0x99000000);
+        loadingOverlay.setClickable(true); // swallow taps while busy
+        LinearLayout loadBox = new LinearLayout(this);
+        loadBox.setOrientation(LinearLayout.VERTICAL);
+        loadBox.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.widget.ProgressBar spin =
+                new android.widget.ProgressBar(this);
+        spin.setIndeterminate(true);
+        loadBox.addView(spin, new LinearLayout.LayoutParams(dp(64), dp(64)));
+        loadingText = new TextView(this);
+        loadingText.setTextColor(Color.WHITE);
+        loadingText.setTextSize(14);
+        loadingText.setTypeface(null, Typeface.BOLD);
+        loadingText.setGravity(Gravity.CENTER_HORIZONTAL);
+        loadingText.setPadding(dp(24), dp(10), dp(24), 0);
+        loadBox.addView(loadingText);
+        loadingOverlay.addView(loadBox, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+        loadingOverlay.setVisibility(View.GONE);
+        outer.addView(loadingOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
 
         setContentView(outer);
 
@@ -1374,6 +1404,8 @@ public class MainActivity extends Activity {
             else if ("unresolved".equals(f)) sb.append("unknown barcode");
             else if ("wrong-bin".equals(f)) sb.append("saved bin is a "
                     + "different shelf");
+            else if ("not-on-shelf".equals(f)) sb.append("expected here "
+                    + "per Shopify - none scanned; likely in another bin");
             else sb.append(f);
         }
         return sb.toString();
@@ -2610,8 +2642,19 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** Spinner veil while a network call runs. UI thread only. */
+    private void showLoading(String msg) {
+        loadingText.setText(msg);
+        loadingOverlay.setVisibility(View.VISIBLE);
+    }
+
+    private void hideLoading() {
+        loadingOverlay.setVisibility(View.GONE);
+    }
+
     private void fetchReview() {
         status.setText("Checking the batch…");
+        showLoading("Checking the batch…");
         checkEntries.clear();
         checkFlagText.clear();
         refreshBatchList();
@@ -2644,6 +2687,7 @@ public class MainActivity extends Activity {
                 }
                 final JSONArray strays = resp.optJSONArray("stray_bins");
                 ui.post(() -> {
+                    hideLoading();
                     checkEntries.clear();
                     checkEntries.addAll(loaded);
                     checkFlagText.clear();
@@ -2666,8 +2710,10 @@ public class MainActivity extends Activity {
                     }
                 });
             } catch (Exception e) {
-                ui.post(() -> status.setText("Check failed: "
-                        + e.getMessage()));
+                ui.post(() -> {
+                    hideLoading();
+                    status.setText("Check failed: " + e.getMessage());
+                });
             }
         }).start();
     }

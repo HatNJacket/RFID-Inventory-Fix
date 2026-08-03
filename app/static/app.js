@@ -2917,6 +2917,9 @@ const FLAG_TEXT = {
     "tags on file for this shelf, but the sweep read none — find the " +
     "tagged box(es) before printing more",
   bundle: "a bundle — no box of its own to tag",
+  "not-on-shelf":
+    "Shopify expects this here, but none was scanned — it's in another " +
+    "bin or the count is wrong",
   ambiguous: "barcode matches several listings",
   "count-mismatch": "count differs from Shopify",
   "unconfirmed-name": "serial name not confirmed",

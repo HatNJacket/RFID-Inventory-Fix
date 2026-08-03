@@ -12,6 +12,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -358,8 +359,25 @@ def delete_case(barcode: str, session: Session = Depends(get_session)):
     return {"deleted": barcode.strip()}
 
 
+def _live_barcode_map(session: Session) -> dict[str, str]:
+    """sku -> barcode per the live-sourced bin map, first row wins. The
+    Check step passes this in so a 50-item batch reads the table once, not
+    once per item — the per-item reads were what timed the C72 out."""
+    live: dict[str, str] = {}
+    for sku, bc in session.execute(
+        select(BinMapEntry.sku, BinMapEntry.barcode)
+        .where(BinMapEntry.sku.isnot(None))
+    ):
+        if sku and sku not in live:
+            live[sku] = (bc or "").strip()
+    return live
+
+
 def _drop_stale_mirror_matches(
-    code: str, products: list[dict], allow_empty: bool = False
+    code: str,
+    products: list[dict],
+    allow_empty: bool = False,
+    live: dict[str, str] | None = None,
 ) -> list[dict]:
     """Discard TELCAN matches whose barcode the live catalog contradicts.
 
@@ -381,20 +399,15 @@ def _drop_stale_mirror_matches(
     ]
     if not by_barcode:
         return products          # matched by SKU/alias — nothing to check
-    try:
-        from app.database import get_engine
+    if live is None:
+        try:
+            from app.database import get_engine
 
-        with Session(get_engine()) as session:
-            live: dict = {}
-            for sku, bc in session.execute(
-                select(BinMapEntry.sku, BinMapEntry.barcode)
-                .where(BinMapEntry.sku.isnot(None))
-            ):
-                if sku and sku not in live:
-                    live[sku] = (bc or "").strip()
-    except Exception as error:
-        logger.warning("stale-mirror check unavailable: %s", error)
-        return products
+            with Session(get_engine()) as session:
+                live = _live_barcode_map(session)
+        except Exception as error:
+            logger.warning("stale-mirror check unavailable: %s", error)
+            return products
 
     kept = []
     for p in products:
@@ -584,10 +597,13 @@ def _candidate_rank(p: dict) -> tuple:
     return (1 if _SECONDARY_TITLE.search(title) else 0,)
 
 
-def products_by_barcode_all(code: str) -> list[dict]:
+def products_by_barcode_all(
+    code: str, live_barcodes: dict[str, str] | None = None
+) -> list[dict]:
     """All catalog matches for a barcode, primary listing first. Falls back
     to the single-product resolver chain (alias/serial) when the direct
-    barcode search finds nothing."""
+    barcode search finds nothing. `live_barcodes` lets a caller that loops
+    over many items (the Check step) pay for the bin-map read once."""
     code = code.strip()
     mode = config.BARCODE_LOOKUP
     db_ok = database_configured()
@@ -601,7 +617,9 @@ def products_by_barcode_all(code: str) -> list[dict]:
                 candidates = catalog.lookup_barcode_all(session, code)
             # A stale mirror barcode makes two unrelated products look like
             # one listing with two variants; the live bin map settles it.
-            candidates = _drop_stale_mirror_matches(code, candidates)
+            candidates = _drop_stale_mirror_matches(
+                code, candidates, live=live_barcodes
+            )
         except Exception as error:
             logger.warning("TELCAN multi-lookup failed: %s", error)
     if not candidates and mode in ("auto", "api") and api_ok:
@@ -2070,13 +2088,20 @@ def bin_check(
         .where(func.lower(BinMapEntry.bin) == bin_name.strip().lower())
         .order_by(BinMapEntry.product_title)
     ).all()
+    # One query for every tag on file for the bin's products — this used to
+    # be one query PER product, which timed real bins out.
+    skus = sorted({e.sku for e in rows if e.sku})
+    tags_by_sku: dict[str, list[RfidAssignment]] = {}
+    if skus:
+        for t in session.scalars(
+            select(RfidAssignment).where(RfidAssignment.sku.in_(skus))
+        ):
+            tags_by_sku.setdefault(t.sku, []).append(t)
     report = []
     for e in rows:
         if not e.sku:
             continue
-        tags = session.scalars(
-            select(RfidAssignment).where(RfidAssignment.sku == e.sku)
-        ).all()
+        tags = tags_by_sku.get(e.sku, [])
         detected = [t for t in tags if t.rfid_id.upper() in swept]
         report.append({
             "sku": e.sku,
@@ -2166,12 +2191,15 @@ def _mirror_qty(session: Session, sku: str | None) -> int | None:
         return None
 
 
+@lru_cache(maxsize=16384)
 def _sku_root(sku: str | None) -> str | None:
     """The part of a SKU that identifies the PRODUCT, with open-box wording
     stripped: "OPEN BOX- 08891" and "08891" share the root "08891".
 
     Short roots are refused — a two-character root would tie half the
-    catalog together, and a wrong candidate list is worse than none."""
+    catalog together, and a wrong candidate list is worse than none.
+    Cached: the sibling scan calls this for every bin-map row for every
+    item it checks, and SKUs never change meaning mid-process."""
     if not sku:
         return None
     root = re.sub(r"open[\s-]*box", " ", sku, flags=re.I)
@@ -2180,7 +2208,10 @@ def _sku_root(sku: str | None) -> str | None:
 
 
 def _merge_siblings(
-    session: Session, item: BatchItem, candidates: list[dict]
+    session: Session,
+    item: BatchItem,
+    candidates: list[dict],
+    bin_rows: list[BinMapEntry] | None = None,
 ) -> list[dict]:
     """Add listings that are plainly the same product in another condition.
 
@@ -2205,7 +2236,9 @@ def _merge_siblings(
     }
     merged = list(candidates)
     try:
-        rows = session.execute(
+        # A caller checking many items (the Check step) hands the rows in
+        # so the table is read once, not once per item.
+        rows = bin_rows if bin_rows is not None else session.execute(
             select(BinMapEntry).where(BinMapEntry.sku.isnot(None))
         ).scalars()
         for row in rows:
@@ -2655,6 +2688,25 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
     product whose label name was never operator-confirmed), 'unresolved'
     (barcode matched nothing)."""
     batch = _get_batch(session, batch_id)
+    # The bin map is read ONCE here and handed to the per-item helpers.
+    # Before this, the stale-barcode check and the sibling scan each read
+    # the whole table for every touched item — ~2 full reads x 20 items on
+    # a real shelf, which grew past the C72's 20s timeout as the map grew.
+    bin_rows: list[BinMapEntry] | None = None
+    live_bc: dict[str, str] | None = None
+
+    def _catalog_once():
+        nonlocal bin_rows, live_bc
+        if bin_rows is None:
+            bin_rows = session.scalars(
+                select(BinMapEntry).where(BinMapEntry.sku.isnot(None))
+            ).all()
+            live_bc = {}
+            for r in bin_rows:
+                if r.sku and r.sku not in live_bc:
+                    live_bc[r.sku] = (r.barcode or "").strip()
+        return bin_rows, live_bc
+
     flagged = []
     for item in _batch_items(session, batch_id):
         # A skipped row is a decision already made, not a problem to solve.
@@ -2699,6 +2751,28 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                         "candidates": [],
                         "tags_on_file": len(tags_here),
                     })
+                    continue
+            # Shopify expects stock of this product HERE, yet the walk of
+            # the shelf never met a single box of it: it's sitting in some
+            # other bin (or the count is fiction). D1-1 was full of these
+            # and the Check step showed a clean bill — the one thing the
+            # operator wanted to hear about was the one thing hidden.
+            # Informational only; guarded to rows whose saved bin really is
+            # this shelf, so a scanned-then-zeroed stray doesn't nag too.
+            saved = (item.bin_location or "").strip()
+            if (
+                item.resolved
+                and (item.expected_qty or 0) > 0
+                and item.tagged_before == 0
+                and saved
+                and saved.lower() != "no bin assigned"
+                and bin_contains(saved, batch.bin_name)
+            ):
+                flagged.append({
+                    "item": item.as_dict(),
+                    "flags": ["not-on-shelf"],
+                    "candidates": [],
+                })
             continue
         flags = []
         candidates: list[dict] = []
@@ -2711,8 +2785,11 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                 flags.append("bundle")
             code = item.barcode or item.scanned_code
             if code:
+                rows_once, live_once = _catalog_once()
                 try:
-                    candidates = products_by_barcode_all(code)
+                    candidates = products_by_barcode_all(
+                        code, live_barcodes=live_once
+                    )
                 except Exception as error:
                     logger.warning("candidates failed for %s: %s",
                                    code, error)
@@ -2721,7 +2798,9 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                 # can never surface them and the operator is left holding a
                 # box with no way to pick the right listing. Fold in
                 # siblings found by SKU.
-                candidates = _merge_siblings(session, item, candidates)
+                candidates = _merge_siblings(
+                    session, item, candidates, bin_rows=rows_once
+                )
                 if len(candidates) > 1:
                     flags.append("ambiguous")
                 else:
