@@ -3579,21 +3579,90 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** Pick which product in this bin the scanned code really belongs to. */
+    /** Pick which product in this bin the scanned code really belongs to.
+     *  Proper cards — photo, title, SKU/barcode, and why it's a candidate —
+     *  instead of the stock text list, which was a wall of unpadded lines
+     *  on the gun's screen. Same card language as the rest of the app. */
     private void showOddPicker(List<JSONObject> found, String scanned) {
-        String[] labels = new String[found.size()];
-        for (int i = 0; i < found.size(); i++) {
-            JSONObject p = found.get(i);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(8), dp(14), dp(4));
+        GradientDrawable gapD = new GradientDrawable();
+        gapD.setSize(0, dp(8));
+        box.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
+        box.setDividerDrawable(gapD);
+
+        TextView head = new TextView(this);
+        head.setText("Scanned " + scanned
+                + " — tap the product it really belongs to:");
+        head.setTextSize(12);
+        head.setTextColor(C_MUTED);
+        box.addView(head);
+
+        final AlertDialog[] dlg = new AlertDialog[1];
+        for (JSONObject p : found) {
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setBackground(btnBg(Color.WHITE, C_LINE, C_PRESS, 10));
+            row.setPadding(dp(10), dp(8), dp(10), dp(8));
+
+            ImageView iv = new ImageView(this);
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setBackground(rr(C_BG, C_LINE, 8));
+            LinearLayout.LayoutParams il =
+                    new LinearLayout.LayoutParams(dp(52), dp(52));
+            il.rightMargin = dp(10);
+            row.addView(iv, il);
+            loadImage(p.isNull("image_url") ? null
+                    : p.optString("image_url"), iv);
+
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+
+            TextView nm = new TextView(this);
+            String title = p.optString("product_title", "?");
+            String vt = p.isNull("variant_title") ? ""
+                    : p.optString("variant_title");
+            nm.setText(vt.isEmpty() ? title : title + " (" + vt + ")");
+            nm.setTextSize(14);
+            nm.setTypeface(null, Typeface.BOLD);
+            nm.setTextColor(C_TEXT);
+            nm.setMaxLines(2);
+            col.addView(nm);
+
+            TextView meta = new TextView(this);
             String bc = p.isNull("barcode") ? "(none)"
                     : p.optString("barcode");
-            labels[i] = p.optString("product_title", "?")
-                    + "\nSKU " + p.optString("sku", "?")
-                    + "  ·  barcode " + bc;
+            meta.setText("SKU " + p.optString("sku", "?")
+                    + "  ·  barcode " + bc);
+            meta.setTextSize(12);
+            meta.setTextColor(C_MUTED);
+            col.addView(meta);
+
+            // The server's one-liner on WHY this row is offered ("no
+            // barcode set", "barcode is the SKU"…) — the deciding hint,
+            // and the old list never showed it at all.
+            String why = p.optString("reason", "");
+            if (!why.isEmpty()) {
+                TextView reason = new TextView(this);
+                reason.setText(why);
+                reason.setTextSize(11);
+                reason.setTextColor(C_BLUE);
+                col.addView(reason);
+            }
+            row.addView(col, weight());
+            row.setOnClickListener(v -> {
+                if (dlg[0] != null) dlg[0].dismiss();
+                confirmGiveBarcode(p, scanned);
+            });
+            box.addView(row);
         }
-        new AlertDialog.Builder(this)
+
+        ScrollView sc = new ScrollView(this);
+        sc.addView(box);
+        dlg[0] = new AlertDialog.Builder(this)
                 .setTitle("Which product is it?")
-                .setItems(labels, (d, which) ->
-                        confirmGiveBarcode(found.get(which), scanned))
+                .setView(sc)
                 .setNegativeButton("Cancel", null)
                 .show();
     }
