@@ -64,7 +64,7 @@
       <button class="tabs__tab" data-tab="inventory" role="tab">Inventory</button>
       <button class="tabs__tab" data-tab="queue" role="tab">Print queue</button>
       <button class="tabs__tab" data-tab="review" role="tab">Review <span class="wip">WIP</span></button>
-      <button class="tabs__tab" data-tab="audits" role="tab">Audits <span class="wip">WIP</span></button>
+      <button class="tabs__tab" data-tab="audits" role="tab">Audits</button>
       <button class="tabs__tab" data-tab="history" role="tab">History</button>
     </nav>
 
@@ -745,16 +745,22 @@
     <!-- Audits tab (WIP placeholder) -->
     <section class="inventory" id="tab-audits" hidden>
       <div class="recent__head">
-        <h2>Audits <span class="recent__note">(work in progress)</span></h2>
+        <h2>Shopify vs RFID, by bin <span class="recent__note" id="audit-meta"></span></h2>
+        <input id="audit-filter" class="recent__search" type="search" placeholder="Filter by bin or SKU…" autocomplete="off" />
       </div>
-      <p class="linkbox__text" style="max-width:70ch">
-        Planned: pick a bin (or one product), sweep it with the C72, and compare
-        what's detected against the tags on file and Shopify on-hand — missing,
-        recovered, and mismatched stock become proposals in Review, never
-        automatic changes. The reconciliation rules get designed once batch
-        tagging has produced real scan data. For now, product checks recommended
-        by completed batches appear below (and in Review).
+      <p class="linkbox__text" style="max-width:78ch">
+        Every bin scored by the sum of |Shopify on-hand − RFID units| across its
+        products — the biggest total mismatch first, so received-but-missing
+        stock floats to the top. Click a bin to see which products carry the
+        difference. A sealed-case tag counts its full unit value.
       </p>
+      <div class="linkbox__actions" style="margin-bottom:10px">
+        <button class="reset" id="audit-untagged" type="button">Show untagged bins</button>
+        <button class="reset" id="audit-refresh" type="button" title="Re-read every product's bin and on-hand from Shopify (takes about a minute), then reload this list">↻ Refresh on-hand from Shopify</button>
+        <button class="reset" id="audit-reload" type="button" title="Reload this list from what the server already has">↻ Reload list</button>
+      </div>
+      <ul class="recent__list binlist" id="audit-bins"></ul>
+      <div class="recent__head" style="margin-top:24px"><h2>Recommended product checks</h2></div>
       <ul class="recent__list" id="audit-list"></ul>
       <div class="recent__head" style="margin-top:24px"><h2>Recent C72 sweeps</h2></div>
       <ul class="recent__list" id="sweep-list"></ul>

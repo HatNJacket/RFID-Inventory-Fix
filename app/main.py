@@ -2229,6 +2229,93 @@ def bin_check(
     }
 
 
+@app.get("/api/audit/bins", dependencies=[Depends(require_user)])
+def audit_bins(session: Session = Depends(get_session)):
+    """Shopify on-hand vs RFID units on file, per product, grouped by the
+    product's bin and scored by the sum of ABSOLUTE differences — the
+    received-but-nowhere-to-be-found detector. On-hand comes from the
+    live-sourced bin map (its age is reported so a stale map is visible);
+    RFID units count each tag as 1 except sealed-case tags, which count
+    their case_units. Read-only."""
+    # Units on file per SKU, store-wide. A tag's home bin can lag a move,
+    # so the comparison is per PRODUCT (like Steve's worked example), with
+    # products grouped under the bin the live catalog says they live in.
+    tags = session.scalars(select(RfidAssignment)).all()
+    units: dict[str, int] = {}
+    for t in tags:
+        key = (t.sku or "").strip().upper()
+        if not key:
+            continue
+        units[key] = units.get(key, 0) + (t.case_units or 1)
+
+    noscan = _noscan_skus(session)
+    seen_skus: set[str] = set()
+    bins: dict[str, dict] = {}
+
+    def _bucket(name: str) -> dict:
+        return bins.setdefault(name, {"bin": name, "products": []})
+
+    for e in session.scalars(
+        select(BinMapEntry).where(BinMapEntry.sku.isnot(None))
+    ):
+        key = e.sku.strip().upper()
+        on_hand = e.qty or 0
+        have = units.get(key, 0)
+        seen_skus.add(key)
+        _bucket((e.bin or "").strip() or "(no bin)")["products"].append({
+            "sku": e.sku,
+            "product_title": e.product_title,
+            "on_hand": on_hand,
+            "rfid_units": have,
+            "diff": have - on_hand,
+            "rfid_incompatible": key in noscan,
+        })
+
+    # Tags for products the live catalog doesn't bin at all — they exist
+    # in the RFID system, Shopify says nowhere. Grouped by the bin the
+    # tags themselves claim, so someone can go look.
+    orphans: dict[tuple, dict] = {}
+    for t in tags:
+        key = (t.sku or "").strip().upper()
+        if not key or key in seen_skus:
+            continue
+        o = orphans.setdefault(
+            ((t.bin_location or "").strip() or "(no bin)", key),
+            {
+                "sku": t.sku,
+                "product_title": t.product_title,
+                "on_hand": None,   # not in the live bin map
+                "rfid_units": 0,
+                "diff": 0,
+                "rfid_incompatible": key in noscan,
+            },
+        )
+        o["rfid_units"] += t.case_units or 1
+        o["diff"] = o["rfid_units"]
+    for (bin_name, _key), row in orphans.items():
+        _bucket(f"{bin_name} · not in the bin map")["products"].append(row)
+
+    payload = []
+    for b in bins.values():
+        b["products"].sort(key=lambda p: (-abs(p["diff"]), p["sku"] or ""))
+        b["score"] = sum(abs(p["diff"]) for p in b["products"])
+        b["tagged"] = any(p["rfid_units"] > 0 for p in b["products"])
+        b["product_count"] = len(b["products"])
+        b["mismatched_count"] = sum(1 for p in b["products"] if p["diff"])
+        payload.append(b)
+    # Biggest total difference first — a zero-diff bin reads as audited ✓.
+    payload.sort(key=lambda b: (-b["score"], b["bin"]))
+
+    age = _bin_map_age(session)
+    return {
+        "bins": payload,
+        "bin_count": len(payload),
+        "tagged_bin_count": sum(1 for b in payload if b["tagged"]),
+        "onhand_age_minutes": None if age is None else int(age / 60),
+        "refreshing": _bin_map_state["running"],
+    }
+
+
 @app.post("/api/bin-map/refresh", dependencies=[Depends(require_user)])
 def bin_map_refresh():
     """Force a full re-read of every product's bin from Shopify. Takes

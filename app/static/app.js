@@ -4757,8 +4757,158 @@ async function loadReview() {
   }
 }
 
-// === Audits tab (WIP: recommended checks pointer) ==========================
+// === Audits tab =============================================================
+// Shopify on-hand vs RFID units, per product, summed per bin — biggest
+// total mismatch first (the received-but-nowhere-to-be-found detector).
+let auditData = null;
+let auditShowUntagged = false;
+let auditOpenBins = new Set();
+
+function renderAuditBins() {
+  const list = document.getElementById("audit-bins");
+  const meta = document.getElementById("audit-meta");
+  if (!auditData) return;
+  const q = document
+    .getElementById("audit-filter")
+    .value.trim()
+    .toLowerCase();
+  meta.textContent =
+    `(on-hand from Shopify ` +
+    (auditData.onhand_age_minutes == null
+      ? "— age unknown"
+      : auditData.onhand_age_minutes < 60
+        ? `${auditData.onhand_age_minutes} min ago`
+        : `${Math.round(auditData.onhand_age_minutes / 60)} h ago`) +
+    `${auditData.refreshing ? " · refreshing now…" : ""})`;
+  document.getElementById("audit-untagged").textContent = auditShowUntagged
+    ? "Hide untagged bins"
+    : `Show untagged bins (${auditData.bin_count - auditData.tagged_bin_count})`;
+
+  const rows = auditData.bins.filter((b) => {
+    if (!auditShowUntagged && !b.tagged) return false;
+    if (!q) return true;
+    return (
+      b.bin.toLowerCase().includes(q) ||
+      b.products.some((p) => (p.sku || "").toLowerCase().includes(q))
+    );
+  });
+  list.innerHTML = "";
+  if (!rows.length) {
+    list.innerHTML = `<li class="recent__empty">${
+      q
+        ? "No bins match that."
+        : "No tagged bins yet — batch-tag a shelf first."
+    }</li>`;
+    return;
+  }
+  rows.forEach((b) => {
+    const li = document.createElement("li");
+    li.style.display = "block";
+    const clean = b.score === 0;
+    const open = auditOpenBins.has(b.bin);
+    li.innerHTML =
+      `<div class="auditrow${clean ? " auditrow--clean" : ""}">
+         <span class="auditrow__score ${clean ? "auditrow__score--ok" : "auditrow__score--off"}">${
+           clean ? "✓" : b.score
+         }</span>
+         <span class="binlist__name">${escapeHtml(b.bin)}</span>
+         <span class="binlist__count">${b.product_count} product(s)${
+           clean
+             ? " · all match"
+             : ` · ${b.mismatched_count} mismatched`
+         }${b.tagged ? "" : " · untagged"}</span>
+         <span class="auditrow__chev">${open ? "▾" : "▸"}</span>
+       </div>` +
+      (open
+        ? `<div class="inventory__scroll" style="margin:6px 0 10px 30px"><table class="inventory__table">
+             <thead><tr><th>Product</th><th>SKU</th><th class="num">Shopify</th><th class="num">RFID</th><th class="num">Diff</th></tr></thead>
+             <tbody>${b.products
+               .map(
+                 (p) => `<tr>
+                   <td>${escapeHtml(p.product_title || "")}${
+                     p.rfid_incompatible
+                       ? ' <span class="noscan-chip" title="tag won\'t scan when on box">⊘</span>'
+                       : ""
+                   }</td>
+                   <td class="mono"><span class="skulink" data-sku="${escapeHtml(p.sku || "")}">${escapeHtml(p.sku || "—")}</span></td>
+                   <td class="num">${p.on_hand == null ? "—" : p.on_hand}</td>
+                   <td class="num">${p.rfid_units}</td>
+                   <td class="num${p.diff ? " bexp--off" : ""}">${
+                     p.diff > 0 ? "+" + p.diff : p.diff
+                   }</td>
+                 </tr>`
+               )
+               .join("")}</tbody>
+           </table></div>`
+        : "");
+    li.querySelector(".auditrow").addEventListener("click", () => {
+      if (auditOpenBins.has(b.bin)) auditOpenBins.delete(b.bin);
+      else auditOpenBins.add(b.bin);
+      renderAuditBins();
+    });
+    li.querySelectorAll(".skulink").forEach((s) =>
+      s.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (s.dataset.sku) openProductHistory(s.dataset.sku);
+      })
+    );
+    list.append(li);
+  });
+}
+
+async function loadAuditBins() {
+  const list = document.getElementById("audit-bins");
+  list.innerHTML = '<li class="recent__empty">Comparing…</li>';
+  try {
+    auditData = await apiJson("/api/audit/bins");
+    renderAuditBins();
+  } catch (err) {
+    list.innerHTML = `<li class="recent__empty">${escapeHtml(err.message)}</li>`;
+  }
+}
+
+document.getElementById("audit-untagged").addEventListener("click", () => {
+  auditShowUntagged = !auditShowUntagged;
+  renderAuditBins();
+});
+document
+  .getElementById("audit-reload")
+  .addEventListener("click", loadAuditBins);
+let auditFilterTimer;
+document.getElementById("audit-filter").addEventListener("input", () => {
+  clearTimeout(auditFilterTimer);
+  auditFilterTimer = setTimeout(renderAuditBins, 150);
+});
+// Full re-read of bins + on-hand from Shopify (~a minute in the
+// background), then the list reloads itself when the walk finishes.
+document.getElementById("audit-refresh").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    await postJson("/api/bin-map/refresh", {});
+    btn.textContent = "Refreshing… (about a minute)";
+    const poll = setInterval(async () => {
+      try {
+        const s = await apiJson("/api/bin-map/status");
+        if (!s.refreshing) {
+          clearInterval(poll);
+          btn.disabled = false;
+          btn.textContent = "↻ Refresh on-hand from Shopify";
+          loadAuditBins();
+        }
+      } catch {
+        clearInterval(poll);
+        btn.disabled = false;
+      }
+    }, 5000);
+  } catch (err) {
+    btn.disabled = false;
+    setResult(err.message, "err");
+  }
+});
+
 async function loadAudits() {
+  loadAuditBins();
   const list = document.getElementById("audit-list");
   try {
     const { tasks } = await apiJson("/api/review-tasks?status=open&limit=100");

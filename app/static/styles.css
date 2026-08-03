@@ -1209,6 +1209,28 @@ a { color: var(--accent); }
   .labeledit { flex-wrap: wrap; }
 }
 
+/* audit board: bins scored by |shopify − rfid| */
+.auditrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.auditrow__score {
+  flex: none;
+  min-width: 40px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 13px;
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+.auditrow__score--off { background: var(--bad-bg); color: var(--bad-ink); }
+.auditrow__score--ok { background: var(--ok-bg, #d5efe1); color: var(--ok-ink, #1d6f47); }
+.auditrow--clean .binlist__name { color: var(--ink-dim); }
+.auditrow__chev { flex: none; color: var(--ink-dim); }
+
 /* inventory SKUs open the product panel */
 .skulink { color: var(--accent); cursor: pointer; }
 .skulink:hover { text-decoration: underline; }
