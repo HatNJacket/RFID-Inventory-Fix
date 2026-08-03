@@ -488,6 +488,31 @@
         </div>
 
         <!-- Check-item editor (modal): candidates arrows + counts + name -->
+        <!-- Fix label & reprint (Pair step): correct the preferred name,
+             void the bad labels, print fresh ones, tracker back to 0/N. -->
+        <div class="phist-overlay" id="breprint-overlay" hidden>
+          <section class="linkbox serialbox phist-modal" style="max-width:560px">
+            <div class="linkbox__title">Fix label &amp; reprint — <span id="breprint-title">—</span></div>
+            <p class="linkbox__text">The corrected name is saved for this product <b>store-wide</b>, so every future print uses it too.</p>
+            <label class="step__label" for="breprint-name">Preferred label name (blank = standard label)</label>
+            <input id="breprint-name" type="text" maxlength="76" autocomplete="off" />
+            <label class="step__label" for="breprint-placement">Which line does it replace?</label>
+            <select id="breprint-placement">
+              <option value="header">The name line (keeps the SKU line)</option>
+              <option value="sku">The SKU line (keeps the name line)</option>
+              <option value="both">Both lines</option>
+            </select>
+            <label class="step__label" for="breprint-count">Labels to print</label>
+            <input id="breprint-count" type="number" min="1" max="200" />
+            <p class="linkbox__text" id="breprint-warn"></p>
+            <div class="linkbox__actions">
+              <button class="print__btn" id="breprint-go" type="button">Void old labels &amp; print fresh</button>
+              <button class="reset" id="breprint-cancel" type="button">Cancel</button>
+            </div>
+            <p class="linkbox__text" id="breprint-msg"></p>
+          </section>
+        </div>
+
         <div class="phist-overlay" id="bitem-overlay" hidden>
           <section class="linkbox serialbox phist-modal" style="max-width:640px">
             <div class="bitem-nav">
@@ -638,7 +663,10 @@
           <div class="linkbox serialbox" id="bpair-card" hidden>
             <div class="linkbox__title">Active: <span id="bpair-active">—</span></div>
             <p class="linkbox__text" id="bpair-progress">—</p>
-            <button class="reset" id="bpair-undo" type="button">Undo last tag</button>
+            <div class="linkbox__actions">
+              <button class="reset" id="bpair-undo" type="button">Undo last tag</button>
+              <button class="reset" id="bpair-reprint" type="button" title="The labels printed wrong — fix the name and print a fresh set">Fix label &amp; reprint…</button>
+            </div>
           </div>
           <p class="linkbox__text" id="bpair-summary"></p>
           <ul class="batch__items" id="bpair-items"></ul>

@@ -4089,6 +4089,95 @@ bEl.pairInput.addEventListener("keydown", async (event) => {
   bEl.pairInput.focus();
 });
 
+// --- Fix label & reprint ----------------------------------------------------
+// The labels printed wrong — usually a preferred name saved onto the wrong
+// line ("Telescopes Canada" fixed but the SKU line clobbered). Correct the
+// saved name store-wide, void this product's labels in the batch, release
+// any tags tied to them, and print a fresh set: the tracker returns to 0/N
+// with N the fresh count, never old-plus-new.
+document.getElementById("bpair-reprint").addEventListener("click", async () => {
+  const item = batchItems.find((i) => i.id === pairActiveItemId);
+  if (!item || !batch) return;
+  document.getElementById("breprint-title").textContent =
+    itemDisplayName(item);
+  document.getElementById("breprint-count").value =
+    item.printed_count ?? item.qty_scanned;
+  document.getElementById("breprint-warn").textContent = item.paired_count
+    ? `⚠ ${item.paired_count} tag(s) are already paired to the old labels. ` +
+      `PEEL THOSE STICKERS OFF the boxes before printing — a leftover ` +
+      `sticker answers sweeps alongside the new one. You'll be asked to ` +
+      `confirm they're off.`
+    : `The old printed labels become invalid — bin them so they never ` +
+      `end up on a box.`;
+  document.getElementById("breprint-msg").textContent = "";
+  // Prefill with what's saved now, so the wrong placement is visible.
+  try {
+    const cur = await apiJson(
+      `/api/label-names/${encodeURIComponent(item.sku || "")}`
+    );
+    document.getElementById("breprint-name").value = cur.label_name || "";
+    document.getElementById("breprint-placement").value =
+      cur.placement || "header";
+  } catch {
+    document.getElementById("breprint-name").value = "";
+    document.getElementById("breprint-placement").value = "header";
+  }
+  document.getElementById("breprint-overlay").hidden = false;
+});
+
+document
+  .getElementById("breprint-cancel")
+  .addEventListener("click", () => {
+    document.getElementById("breprint-overlay").hidden = true;
+  });
+
+document.getElementById("breprint-go").addEventListener("click", async () => {
+  const item = batchItems.find((i) => i.id === pairActiveItemId);
+  if (!item || !batch) return;
+  const count = parseInt(
+    document.getElementById("breprint-count").value,
+    10
+  );
+  if (!Number.isFinite(count) || count < 1) {
+    document.getElementById("breprint-msg").textContent =
+      "How many labels should print?";
+    return;
+  }
+  if (
+    item.paired_count &&
+    !confirm(
+      `${item.paired_count} tag(s) are paired to the old labels.\n\n` +
+        `Have you peeled the old RFID stickers OFF the boxes?\n\n` +
+        `OK = they're off, release the ties and reprint.`
+    )
+  )
+    return;
+  const btn = document.getElementById("breprint-go");
+  btn.disabled = true;
+  try {
+    const res = await postJson(
+      `/api/batches/${batch.id}/items/${item.id}/reprint-labels`,
+      {
+        count,
+        label_name: document.getElementById("breprint-name").value,
+        placement: document.getElementById("breprint-placement").value,
+        created_by: operatorEl.value || null,
+        old_stickers_removed: true,
+      }
+    );
+    document.getElementById("breprint-overlay").hidden = true;
+    pairHistory = [];
+    await pullBatch(false);
+    renderPairItems();
+    renderPairCard();
+    setBatchResult(res.message, "ok");
+  } catch (err) {
+    document.getElementById("breprint-msg").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 bEl.pairUndo.addEventListener("click", async () => {
   const last = pairHistory.pop();
   if (!last || !batch) return;

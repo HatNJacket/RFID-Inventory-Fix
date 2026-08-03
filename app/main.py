@@ -4045,6 +4045,138 @@ def batch_pair_undo(
     return {"item": item.as_dict()}
 
 
+class ReprintLabelsIn(BaseModel):
+    """Fix-and-reprint at the Pair step: the labels printed wrong (usually
+    a preferred name replacing the wrong line)."""
+
+    count: int = Field(ge=1, le=200)
+    # Optional store-wide correction of the preferred label name — saved
+    # BEFORE the new labels build, so they pick it up. None = leave the
+    # saved name alone; "" = clear it back to the standard label.
+    label_name: str | None = Field(default=None, max_length=76)
+    placement: str = Field(default="header", pattern="^(header|sku|both)$")
+    created_by: str | None = Field(default=None, max_length=100)
+    # The operator confirmed the OLD stickers are off the boxes — an old
+    # sticker left on would answer sweeps alongside the new one.
+    old_stickers_removed: bool = False
+
+
+@app.post(
+    "/api/batches/{batch_id}/items/{item_id}/reprint-labels",
+    dependencies=[Depends(require_user)],
+)
+def batch_item_reprint(
+    batch_id: int,
+    item_id: int,
+    payload: ReprintLabelsIn,
+    session: Session = Depends(get_session),
+):
+    """Void this product's labels in the batch, release any tags paired to
+    them, optionally fix the saved label name, and queue fresh labels.
+    The pair tracker returns to 0/N — N being the fresh count, not the
+    old plus the new."""
+    batch = _get_batch(session, batch_id)
+    if batch.status in ("done", "abandoned"):
+        raise HTTPException(409, f"This batch is {batch.status}.")
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    if not item.resolved:
+        raise HTTPException(422, "That item never resolved to a product.")
+    if item.kind == "bundle" or item.skipped:
+        raise HTTPException(422, "This row carries no labels of its own.")
+    if item.paired_count and not payload.old_stickers_removed:
+        raise HTTPException(
+            409,
+            f"{item.paired_count} tag(s) are already paired to the old "
+            f"labels. Peel those stickers OFF the boxes first — a leftover "
+            f"sticker would answer sweeps alongside the new one — then "
+            f"confirm and try again.",
+        )
+
+    sku_ci = (item.sku or "").strip().upper()
+
+    # 1. The saved preferred name is the usual culprit (right name, wrong
+    # line) — fix it store-wide so the NEXT print anywhere is right too.
+    if payload.label_name is not None and item.sku:
+        name = payload.label_name.strip()
+        row = session.get(LabelName, item.sku.strip())
+        if not name:
+            if row is not None:
+                session.delete(row)
+        else:
+            if row is None:
+                row = LabelName(sku=item.sku.strip())
+                session.add(row)
+            row.label_name = name
+            row.placement = payload.placement
+            row.updated_by = payload.created_by
+
+    # 2. Release the ties to the old stickers (they're coming off/binned).
+    released = 0
+    for tie in _batch_tie_rows(session, batch):
+        if (tie.sku or "").strip().upper() == sku_ci:
+            session.delete(tie)
+            released += 1
+    item.paired_count = 0
+
+    # 3. Void the old labels so the tracker counts only the fresh run:
+    # unprinted jobs are simply canceled; printed ones are marked voided.
+    voided = 0
+    for job in session.scalars(
+        select(PrintJob).where(
+            PrintJob.batch_id == batch.id,
+            PrintJob.status.in_(("pending", "printing", "done")),
+        )
+    ):
+        if (job.sku or "").strip().upper() == sku_ci:
+            job.status = "canceled" if job.status == "pending" else "voided"
+            voided += 1
+    session.flush()
+
+    # 4. Fresh labels, picking up the corrected name. Sealed-case labels
+    # are rebuilt at the tail, same order the original run used.
+    label_name, label_placement = _label_name_for(session, item)
+    cases = min(item.case_count, payload.count) if item.case_units else 0
+    per_label_units = (
+        [None] * (payload.count - cases) + [item.case_units] * cases
+    )
+    jobs = [
+        PrintJob(
+            epc=_new_epc(),
+            status="pending",
+            case_units=units,
+            batch_id=batch.id,
+            shopify_variant_id=item.shopify_variant_id,
+            shopify_product_id=item.shopify_product_id,
+            product_title=item.product_title or "",
+            variant_title=item.variant_title,
+            sku=item.sku,
+            barcode=item.barcode,
+            bin_location=batch.bin_name,
+            other_bins=item.other_bins,
+            label_name=label_name,
+            label_placement=label_placement,
+            requested_by=payload.created_by or batch.created_by,
+        )
+        for units in per_label_units
+    ]
+    session.add_all(jobs)
+    session.commit()
+    session.refresh(item)
+    return {
+        "item": item.as_dict(),
+        "queued": len(jobs),
+        "voided": voided,
+        "ties_released": released,
+        "message": (
+            f"{voided} old label(s) voided"
+            + (f", {released} tag tie(s) released" if released else "")
+            + f" — {len(jobs)} fresh label(s) queued."
+        ),
+    }
+
+
 class VerifyIn(BaseModel):
     epcs: list[str] = Field(max_length=2000)
 
@@ -4545,6 +4677,20 @@ class LabelNameIn(BaseModel):
     label_name: str = Field(default="", max_length=76)
     placement: str = Field(default="header", pattern="^(header|sku|both)$")
     updated_by: str | None = Field(default=None, max_length=100)
+
+
+@app.get("/api/label-names/{sku}", dependencies=[Depends(require_user)])
+def get_label_name(sku: str, session: Session = Depends(get_session)):
+    """What the preferred label for this SKU currently is — lets the fix-
+    and-reprint dialog show the operator what they're correcting."""
+    row = session.get(LabelName, sku.strip())
+    if row is None:
+        return {"sku": sku.strip(), "label_name": None, "placement": "header"}
+    return {
+        "sku": row.sku,
+        "label_name": row.label_name,
+        "placement": row.placement or "header",
+    }
 
 
 @app.put("/api/label-names/{sku}", dependencies=[Depends(require_user)])
