@@ -175,12 +175,13 @@ starting early" actively harmful.
 5. **Locate a product on the C72.** (Overlaps the locate-mode backlog
    entry below.)
 
-6. **Scan a batch of tags, then pick the closest by signal strength.**
-   Today a read takes the first tag seen, so the operator gets denied or
-   mis-targeted when another tagged item is nearby. Reading several and
-   choosing the strongest would make pairing precise and stop
-   "too close to an already-scanned tag" failures. Needs a look at what
-   the Chainway SDK exposes for RSSI per read.
+6. ~~**Scan a batch of tags, then pick the closest by signal strength.**~~
+   ✅ Done 2026-08-03 (C72 v3.15): every trigger read (batch pair + Scan
+   Station) now listens ~600 ms, collects every answering tag with its
+   RSSI, and pairs the STRONGEST — with a status note when several
+   answered, and a caution when the runner-up was within 2 dB. Falls back
+   to most-often-heard if the SDK returns no usable RSSI. Field test at
+   the warehouse still pending.
 
 7. **Unpair a single product during collect,** instead of undoing the
    whole batch because one product was got wrong early on.
@@ -189,10 +190,12 @@ starting early" actively harmful.
    unpair, so a mis-tagged sticker can be re-tagged as the right product
    during or after batch collection.
 
-9. **"?" help icon on every usable C72 window** (added 2026-07-29),
-   explaining how the current window is used. This is a concrete slice of
-   item 4's guidance work — if item 4 gets built first, fold this into it
-   rather than doing it twice.
+9. ~~**"?" help icon on every usable C72 window**~~ ✅ Done 2026-08-03
+   (C72 v3.15): a "?" next to the drawer button explains the CURRENT
+   screen — each batch step (collect/check/pair/verify) gets its own
+   text, plus Scan Station, Sweep, Find Bin, Locate, and the batch list.
+   The item editor has its own "?" covering every control in it. Still a
+   slice of item 4; the full guided-workflow redesign remains open.
 
 10. **Support page: name + message → opens a GitHub issue** (added
     2026-07-29; reworked same day — was "email Nicholas Drapak directly",

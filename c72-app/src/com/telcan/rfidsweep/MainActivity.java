@@ -341,6 +341,13 @@ public class MainActivity extends Activity {
         menuBtn.setOnClickListener(v -> toggleDrawer());
         header.addView(menuBtn, new LinearLayout.LayoutParams(dp(44),
                 LinearLayout.LayoutParams.WRAP_CONTENT));
+        // Context help: explains whatever screen (and batch step) is up.
+        Button helpBtn = smallBtn("?");
+        helpBtn.setOnClickListener(v -> showHelp());
+        LinearLayout.LayoutParams hl = new LinearLayout.LayoutParams(
+                dp(44), LinearLayout.LayoutParams.WRAP_CONTENT);
+        hl.leftMargin = dp(4);
+        header.addView(helpBtn, hl);
 
         // ---- shared scanner input + status --------------------------------
         btInput = new EditText(this);
@@ -1015,6 +1022,10 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams nxl = new FrameLayout.LayoutParams(
                 dp(40), dp(56), Gravity.END | Gravity.CENTER_VERTICAL);
         imgWrap.addView(editNext, nxl);
+        Button editHelp = smallBtn("?");
+        editHelp.setOnClickListener(v -> showEditorHelp());
+        imgWrap.addView(editHelp, new FrameLayout.LayoutParams(
+                dp(34), dp(34), Gravity.END | Gravity.TOP));
         panel.addView(imgWrap);
 
         LinearLayout mid = new LinearLayout(this);
@@ -3260,6 +3271,83 @@ public class MainActivity extends Activity {
         btInput.requestFocus();
     }
 
+    /** One strongest-tag read: what a single trigger pull returns. */
+    private static class TagRead {
+        String epc;          // the winner
+        double rssi = -999;  // its best RSSI (dBm; closer to 0 = nearer)
+        double runnerUp = -999;
+        int distinct;        // how many different tags answered
+    }
+
+    /** Read for a short window and hand back the STRONGEST tag heard —
+     *  so the sticker under the antenna wins over an already-applied tag
+     *  sitting an inch away, instead of whichever answered first (the old
+     *  single-shot behaviour, and the cause of "duplicate EPC" denials on
+     *  dense shelves). Falls back to most-often-heard when the SDK gives
+     *  no usable RSSI. Blocking — call off the UI thread. */
+    private TagRead readStrongestTag(long windowMs) {
+        final java.util.HashMap<String, Double> best =
+                new java.util.HashMap<>();
+        final java.util.HashMap<String, Integer> times =
+                new java.util.HashMap<>();
+        long until = System.currentTimeMillis() + windowMs;
+        try {
+            if (scanning) {
+                reader.stopInventory();
+                scanning = false;
+            }
+            while (System.currentTimeMillis() < until) {
+                UHFTAGInfo info = null;
+                try {
+                    info = reader.inventorySingleTag();
+                } catch (Exception ignored) {
+                }
+                if (info == null) continue;
+                String epc = info.getEPC();
+                if (epc == null || epc.isEmpty()) continue;
+                double rssi = -999;
+                try {
+                    rssi = Double.parseDouble(info.getRssi());
+                } catch (Exception ignored) {
+                }
+                Double prev = best.get(epc);
+                if (prev == null || rssi > prev) best.put(epc, rssi);
+                Integer n = times.get(epc);
+                times.put(epc, n == null ? 1 : n + 1);
+            }
+        } catch (Exception ignored) {
+        }
+        if (best.isEmpty()) return null;
+        boolean haveRssi = false;
+        for (double v : best.values()) {
+            if (v > -998) { haveRssi = true; break; }
+        }
+        TagRead out = new TagRead();
+        out.distinct = best.size();
+        for (String epc : best.keySet()) {
+            double score = haveRssi ? best.get(epc) : times.get(epc);
+            if (out.epc == null || score > out.rssi) {
+                if (out.epc != null) out.runnerUp = out.rssi;
+                out.rssi = score;
+                out.epc = epc;
+            } else if (score > out.runnerUp) {
+                out.runnerUp = score;
+            }
+        }
+        return out;
+    }
+
+    /** "picked the strongest of N" suffix, with a caution when a second
+     *  tag was almost as loud — the pick could plausibly be wrong. */
+    private static String pickNote(TagRead r) {
+        if (r == null || r.distinct <= 1) return "";
+        String s = " · strongest of " + r.distinct + " tags";
+        if (r.runnerUp > -998 && r.rssi - r.runnerUp < 2.0) {
+            s += " (another was NEARLY as close — check the pick)";
+        }
+        return s;
+    }
+
     private void pairReadTag() {
         if (pairActive == null) {
             beep(SOUND_ERR);
@@ -3277,16 +3365,8 @@ public class MainActivity extends Activity {
         status.setText("Reading tag… hold the antenna near ONE sticker");
         final BItem target = pairActive;
         new Thread(() -> {
-            UHFTAGInfo info = null;
-            try {
-                if (scanning) {
-                    reader.stopInventory();
-                    scanning = false;
-                }
-                info = reader.inventorySingleTag();
-            } catch (Exception ignored) {
-            }
-            final String epc = info == null ? null : info.getEPC();
+            final TagRead read = readStrongestTag(600);
+            final String epc = read == null ? null : read.epc;
             if (epc == null || epc.isEmpty()) {
                 ui.post(() -> {
                     tagReadBusy = false;
@@ -3322,7 +3402,7 @@ public class MainActivity extends Activity {
                                     Math.max(0, epc.length() - 6))
                             + "  (" + item.paired
                             + (item.qty > 0 ? "/" + item.qty : "")
-                            + " tags)");
+                            + " tags)" + pickNote(read));
                     updateBatchCard();
                     refreshBatchList();
                 });
@@ -3984,6 +4064,135 @@ public class MainActivity extends Activity {
     private int parentBatchId = 0;
     private String parentBinName = null;
 
+    // ------------------------------------------------------- context help ---
+    private void helpDialog(String title, String body) {
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(body)
+                .setPositiveButton("GOT IT", null)
+                .show();
+    }
+
+    /** The header "?": explains whatever screen — and batch step — is up. */
+    private void showHelp() {
+        if (activeTab == TAB_BATCH) {
+            if (!inBatch()) {
+                helpDialog("Batch tagging",
+                        "Tag one bin at a time.\n\n"
+                        + "• Type a bin name (or scan its bin barcode) and "
+                        + "START, or RESUME an open batch from the list.\n"
+                        + "• The flow is COLLECT → CHECK → PAIR → VERIFY; "
+                        + "the NEXT button always advances.\n"
+                        + "• Tap the bin name at the top any time to flag "
+                        + "the bin \"ask first\" on the work list.");
+            } else if (step == STEP_COLLECT) {
+                helpDialog("1 · COLLECT",
+                        "Scan the barcode of EVERY box in this bin — one "
+                        + "scan per box, so three of the same product means "
+                        + "three scans.\n\n"
+                        + "• Tap an item to fix its count, bin, or details."
+                        + "\n• Can't scan a box? Tap it and use CAN'T SCAN "
+                        + "— SKIP; it stays visible and no count is "
+                        + "invented.\n"
+                        + "• BASE-LINE first on a part-tagged shelf: sweep "
+                        + "the whole shelf and boxes already wearing tags "
+                        + "count as done.\n"
+                        + "• NEXT when every box is scanned.");
+            } else if (step == STEP_CHECK) {
+                helpDialog("2 · CHECK",
+                        "The system compares your scans against Shopify "
+                        + "and flags anything needing a decision: wrong "
+                        + "shelf, count mismatch, several listings on one "
+                        + "barcode, unknown barcodes, products expected "
+                        + "here but never seen.\n\n"
+                        + "• Tap a flagged item to review it — arrows pick "
+                        + "between listings, TAKE IT TO <bin> starts a "
+                        + "side trip for strays.\n"
+                        + "• Nothing here blocks you; flags are warnings.\n"
+                        + "• NEXT queues the labels for printing.");
+            } else if (step == STEP_PAIR) {
+                helpDialog("3 · PAIR",
+                        "Stick the printed labels on their boxes and tie "
+                        + "each label to its product:\n\n"
+                        + "• Scan the product's BARCODE — it becomes "
+                        + "active.\n"
+                        + "• Pull the TRIGGER close to ONE sticker. The "
+                        + "reader listens briefly and picks the strongest "
+                        + "tag, so a neighbour's tag doesn't steal the "
+                        + "pair.\n"
+                        + "• Green = every label paired; red = more tags "
+                        + "than labels. UNDO releases the last tag.\n"
+                        + "• Low power (1–2) pairs most precisely.\n"
+                        + "• NEXT moves to the bin sweep.");
+            } else {
+                helpDialog("4 · VERIFY",
+                        "Prove the shelf: hold the trigger and sweep the "
+                        + "whole bin, then SEND SWEEP.\n\n"
+                        + "• The table shows printed vs tagged vs heard "
+                        + "for every product — ⊘ rows are \"won't RFID "
+                        + "scan\" products, which never answer and don't "
+                        + "count against you.\n"
+                        + "• CONFIRM hands the bin to the PC/iPad for the "
+                        + "final Complete; SWEEP AGAIN clears and retries."
+                        + "\n• Raise power (10+) for sweeps — distance "
+                        + "matters here, precision doesn't.");
+            }
+        } else if (activeTab == TAB_STATION) {
+            helpDialog("Scan Station",
+                    "One-off tagging at the desk (Astronomik serials and "
+                    + "quick singles):\n\n"
+                    + "• Scan a barcode (or type a SKU) — the product "
+                    + "shows with its tag count.\n"
+                    + "• Pull the trigger near ONE sticker to link it. "
+                    + "The strongest tag wins, and UNDO unlinks the last."
+                    + "\n• Scan a BIN barcode (like D1-3) while a product "
+                    + "is up to move the product there — RFID records and "
+                    + "Shopify both.\n"
+                    + "• ⊘ means the product is flagged \"won't RFID "
+                    + "scan\": pair the sticker BEFORE applying it.");
+        } else if (activeTab == TAB_SWEEP) {
+            helpDialog("Sweep",
+                    "Free-scan any shelf: hold the trigger and walk. "
+                    + "Every unique tag is collected with a read count.\n\n"
+                    + "• SEND uploads the sweep; the web terminal's "
+                    + "Verify step and shelf tools can pull it.\n"
+                    + "• CLEAR starts over. Higher power reads farther.");
+        } else if (activeTab == TAB_FIND) {
+            helpDialog("Find Bin",
+                    "Where does this live? Scan any product barcode and "
+                    + "the screen shows its product, bin and details — "
+                    + "for putting strays back where they belong.");
+        } else {
+            helpDialog("Locate",
+                    "Not built yet — planned: pick a product and the "
+                    + "reader turns into a geiger counter that beeps "
+                    + "faster as you get closer to its tag.");
+        }
+    }
+
+    /** The item editor "?": what every control in this window does. */
+    private void showEditorHelp() {
+        helpDialog("Item editor",
+                "Everything about ONE product in this batch:\n\n"
+                + "• ◀ ▶ flip between listings sharing this barcode "
+                + "(open-box twins) — USE THIS LISTING reassigns.\n"
+                + "• − / + fix the box count; the number after / is what "
+                + "Shopify expects.\n"
+                + "• BIN changes the product's shelf in Shopify. The "
+                + "wrong-shelf row offers TAKE IT TO <bin> (side trip), "
+                + "Belongs elsewhere (drop), Move here, or Ignore.\n"
+                + "• CAN'T SCAN — SKIP keeps the row without inventing a "
+                + "count.\n"
+                + "• WON'T RFID SCAN flags the PRODUCT store-wide: label "
+                + "prints, pairing counts, sweeps stop expecting it to "
+                + "answer.\n"
+                + "• Label format changes what prints on the label's two "
+                + "lines.\n"
+                + "• Unknown barcode? The FIND buttons list this bin's "
+                + "products with odd barcodes so you can give one the "
+                + "scanned code (writes to Shopify after a confirm).");
+    }
+
     /** Tap on the bin name: flag (or unflag) this bin as "ask first" on
      *  the web work list. A note says WHY it needs a second opinion. */
     private void flagBinDialog() {
@@ -4389,16 +4598,8 @@ public class MainActivity extends Activity {
         status.setText("Reading tag… hold the antenna near ONE sticker");
         final JSONObject p = stationProduct;
         new Thread(() -> {
-            UHFTAGInfo info = null;
-            try {
-                if (scanning) {
-                    reader.stopInventory();
-                    scanning = false;
-                }
-                info = reader.inventorySingleTag();
-            } catch (Exception ignored) {
-            }
-            final String epc = info == null ? null : info.getEPC();
+            final TagRead read = readStrongestTag(600);
+            final String epc = read == null ? null : read.epc;
             if (epc == null || epc.isEmpty()) {
                 ui.post(() -> {
                     tagReadBusy = false;
@@ -4441,7 +4642,8 @@ public class MainActivity extends Activity {
                     status.setText((suspect ? "SUSPECT read saved — " : "")
                             + "Linked ✓ …" + epc.substring(
                                     Math.max(0, epc.length() - 6))
-                            + "  (" + stationTags + " on file)");
+                            + "  (" + stationTags + " on file)"
+                            + pickNote(read));
                 });
             } catch (Exception e) {
                 ui.post(() -> {
