@@ -3322,6 +3322,12 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                 )
             ):
                 flags.append("wrong-bin")
+            # Scans AND an already-tagged count on the same row: if the
+            # stickered boxes were among the scans, the units double up.
+            # A reminder with a one-tap fix, never an automatic change —
+            # "X new boxes plus Y tagged ones" is physically possible.
+            if item.qty_scanned and item.tagged_before:
+                flags.append("double-count")
         if flags:
             flagged.append({
                 "item": item.as_dict(),
@@ -4403,13 +4409,14 @@ def set_tagged_before(
     """The per-product answer to "some of these boxes are already tagged":
     sets the same field a baseline sweep fills, so all the downstream math
     (units on the shelf, labels to print, pair tracker) is already right.
-    Collect-stage only — once labels are queued the count has been spent."""
+    Allowed right up to verification — the web verify table resolves
+    "extra tags answered" rows by correcting exactly this count — but not
+    on a closed batch."""
     batch = _get_batch(session, batch_id)
-    if batch.status != "collecting":
+    if batch.status in ("done", "abandoned"):
         raise HTTPException(
             409,
-            f"This batch is already {batch.status} — the already-tagged "
-            f"count only matters before labels are queued.",
+            f"This batch is {batch.status} — its counts are settled.",
         )
     item = session.get(BatchItem, item_id)
     if item is None or item.batch_id != batch_id:
@@ -4758,6 +4765,9 @@ def batch_verify(
     batch_skus = {(i.sku or "").upper() for i in items if i.sku}
     skuless_barcodes = {i.barcode for i in items if not i.sku and i.barcode}
     detected = {}  # upper-SKU (or ("", barcode)) -> count
+    # Where each detected tag's RECORD says it lives — the expandable
+    # verify row uses this to explain "1 tag answered, recorded at I1-5".
+    detected_bins: dict = {}  # key -> {bin: count}
     foreign, unknown = [], []
     for epc in sorted(epcs):
         row = assignments.get(epc)
@@ -4772,6 +4782,9 @@ def batch_verify(
             key = ("", row.barcode)
         if key is not None:
             detected[key] = detected.get(key, 0) + 1
+            bkey = (row.bin_location or "").strip() or "(no bin)"
+            detected_bins.setdefault(key, {})
+            detected_bins[key][bkey] = detected_bins[key].get(bkey, 0) + 1
         else:
             foreign.append(
                 {
@@ -4797,6 +4810,13 @@ def batch_verify(
             "detected": detected.get(
                 (i.sku or "").upper() if i.sku else ("", i.barcode), 0
             ),
+            "detected_bins": [
+                {"bin": b, "count": c}
+                for b, c in sorted(detected_bins.get(
+                    (i.sku or "").upper() if i.sku else ("", i.barcode), {}
+                ).items())
+            ],
+            "image_url": i.image_url,
             # Expected silent: the tag never answers once it's on the box.
             "rfid_incompatible": (i.sku or "").strip().upper() in noscan,
             # What Shopify expected on this shelf (snapshot from scan

@@ -92,10 +92,19 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
                 json={"requested_by":"Steve"})
     check("labels queue only for the un-stickered boxes",
           r.status_code==201 and r.json()["count"]==3, r.text[:200])
+    # Guard relaxed 2026-08-06: verify-time resolution corrects this count
+    # after labels exist, so only a CLOSED batch refuses.
     r = cl.put(f"/api/batches/{bid}/items/{home['id']}/tagged-before",
                json={"count":1})
-    check("tagged-before refused once labels are queued",
-          r.status_code==409, r.status_code)
+    check("tagged-before allowed after labels queue (verify-time fix)",
+          r.status_code==200, r.status_code)
+    cl.put(f"/api/batches/{bid}/items/{home['id']}/tagged-before",
+           json={"count":2})
+    rev = cl.get(f"/api/batches/{bid}/review").json()
+    hentry = next((e for e in rev["items"]
+                   if e["item"]["sku"]=="HOME-1"), None)
+    check("scans + already-tagged together raise the double-count flag",
+          hentry is not None and "double-count" in hentry["flags"], hentry)
 
     # A stray scanned mid-batch gets prior_tags on its scan response too.
     with S(get_engine()) as s:
@@ -165,6 +174,9 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
     check("verify row carries tagged_before and counts the tag detected",
           row["tagged_before"]==1 and row["detected"]==1
           and row["qty_scanned"]==0 and row["paired_count"]==0, row)
+    check("verify row says where the detected tags' records point",
+          row.get("detected_bins")==[{"bin":"G1-1","count":1}]
+          and "image_url" in row, row)
     check("sweep hearing the earlier tags = verify ok",
           rep["ok"] is True, rep)
     rep = cl.post(f"/api/batches/{bidv}/verify", json={"epcs":[]}).json()
@@ -173,6 +185,10 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
     # Abandoned, not completed: a done batch on G1-1 would break the
     # side-trip assertions below, which need that bin still to-do.
     cl.post(f"/api/batches/{bidv}/abandon", json={"remove_ties": False})
+    r = cl.put(f"/api/batches/{bidv}/items/{itv['id']}/tagged-before",
+               json={"count":3})
+    check("tagged-before refused on a closed batch",
+          r.status_code==409, r.status_code)
 
     # ---- side trips are not finished bins --------------------------------
     cl.post(f"/api/batches/{bid2}/scan", json={"code":"111"})

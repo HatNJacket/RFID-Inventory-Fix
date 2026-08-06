@@ -67,7 +67,15 @@ with Session(get_engine()) as s:
                        shopify_variant_id="t:5", qty_scanned=0,
                        paired_count=0, tagged_before=2,
                        bin_location="T1-1", expected_qty=2)
-    s.add_all([normal, flagged, surplus, surplus2, pretag])
+    # The F9384A shape: 1 scanned+paired here, but the sweep also hears a
+    # second tag recorded at ANOTHER shelf -> flagged, expandable, and
+    # resolvable by setting already-tagged to 1.
+    mis = BatchItem(batch_id=b.id, scanned_code="666", resolved=True,
+                    sku="MIS-1", barcode="666",
+                    product_title="Svbony SV405CC (mismatch test)",
+                    shopify_variant_id="t:6", qty_scanned=1,
+                    paired_count=1, bin_location="T1-1", expected_qty=2)
+    s.add_all([normal, flagged, surplus, surplus2, pretag, mis])
     # Recommended checks with different mismatch sizes, for the sort.
     s.add_all([
         ReviewTask(category="inventory-check", sku="SMALL-1",
@@ -108,9 +116,21 @@ with Session(get_engine()) as s:
                                  barcode="111" if sku == "NORMAL-1"
                                  else "222", bin_location="T1-1",
                                  batch_id=b.id))
-    # The C72 sweep heard the normal product AND the pre-tagged boxes.
+    # MIS-1: one tag paired in this batch, one recorded at another shelf.
+    s.add(RfidAssignment(rfid_id="DDDD0000000000000000000A",
+                         shopify_variant_id="t:6",
+                         product_title="Svbony SV405CC", sku="MIS-1",
+                         barcode="666", bin_location="T1-1",
+                         batch_id=b.id))
+    s.add(RfidAssignment(rfid_id="DDDD0000000000000000000B",
+                         shopify_variant_id="t:6",
+                         product_title="Svbony SV405CC", sku="MIS-1",
+                         bin_location="Z9-9"))
+    # The C72 sweep heard the normal product, the pre-tagged boxes, and
+    # BOTH MIS-1 tags.
     swept = epcs["NORMAL-1"] + [
         "CCCC0000000000000000000A", "CCCC0000000000000000000B",
+        "DDDD0000000000000000000A", "DDDD0000000000000000000B",
     ]
     s.add(EpcCapture(device="C72-test", note="Bin T1-1 verify sweep",
                      batch_id=b.id, epc_count=len(swept),

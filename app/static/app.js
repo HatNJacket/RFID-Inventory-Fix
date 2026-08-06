@@ -3183,6 +3183,9 @@ const FLAG_TEXT = {
   "unconfirmed-name": "serial name not confirmed",
   unresolved: "unknown barcode",
   "wrong-bin": "saved bin is a different shelf",
+  "double-count":
+    "boxes scanned AND marked already-tagged — if the stickered boxes " +
+    "were among the scans, lower the scan count (−/+ in the editor)",
 };
 
 let checkEntries = [];
@@ -4592,6 +4595,51 @@ bEl.toVerify.addEventListener("click", () => showBatchStage("verify"));
 // shelf walk physically found. One confirmation, server-guarded to
 // increases only, logged with an Undo in History.
 bEl.verifyReport.addEventListener("click", async (e) => {
+  // Corrected counts from an expanded flagged row: scan count + already-
+  // tagged count. LOCAL batch numbers only — nothing here touches
+  // Shopify; the on-hand button stays the one explicit write.
+  const saveBtn = e.target.closest(".bvx-save");
+  if (saveBtn && batch) {
+    const detail = saveBtn.closest("tr.bvx-detail");
+    const qty = parseInt(detail.querySelector(".bvx-qty").value, 10);
+    const tb = parseInt(detail.querySelector(".bvx-tb").value, 10);
+    const id = parseInt(saveBtn.dataset.item, 10);
+    if (isNaN(qty) || isNaN(tb) || qty < 0 || tb < 0) return;
+    saveBtn.disabled = true;
+    try {
+      await postJson(`/api/batches/${batch.id}/items/${id}/qty`, { qty });
+      await apiJson(`/api/batches/${batch.id}/items/${id}/tagged-before`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          count: tb,
+          updated_by: operatorEl.value || null,
+        }),
+      });
+      await runVerifyCheck();
+      setBatchResult(
+        "Counts corrected ✓ — batch records only. If Shopify's on-hand " +
+          "should change too, use the row's Set-to button.",
+        "ok"
+      );
+    } catch (err) {
+      setBatchResult(err.message, "err");
+      saveBtn.disabled = false;
+    }
+    return;
+  }
+  // Flagged rows expand into their explanation, like the Review inbox.
+  const flagRow = e.target.closest("tr.bvx-flag");
+  if (flagRow && !e.target.closest("a, button, input, label")) {
+    const det = bEl.verifyReport.querySelector(
+      `tr.bvx-detail[data-for="${flagRow.dataset.item}"]`
+    );
+    if (det) {
+      det.hidden = !det.hidden;
+      if (!det.hidden) updateBvxSum(det);
+    }
+    return;
+  }
   // "Raise all": one confirmation listing every change, then each row's
   // update runs as its OWN write — separate API call, History entry and
   // Undo, exactly as if each button were pressed by hand.
@@ -4748,7 +4796,49 @@ async function runVerifyCheck() {
             title="Write the found count to Shopify on-hand — confirmed, logged, undoable from History">Set to ${found}</button></div>`;
         }
       }
-      return `<tr>
+      const flaggedRow = !(paired && detected) && !na;
+      // A flagged row expands (like the Review inbox) into the item's
+      // preview, what the sweep actually said, and the two counts whose
+      // sum is checked against Shopify — corrected here, never written
+      // anywhere automatically.
+      const binsSaid = (r.detected_bins || [])
+        .map((b) => `${escapeHtml(b.bin)} ×${b.count}`)
+        .join(", ");
+      const detail = flaggedRow
+        ? `<tr class="bvx-detail" data-for="${r.item_id}" data-exp="${r.expected_qty ?? ""}" hidden><td colspan="7">
+            <div class="bvx__wrap">
+              ${r.image_url ? `<img class="bvx__img" src="${escapeHtml(r.image_url)}" alt="">` : ""}
+              <div class="bvx__body">
+                <div class="bvx__why">${
+                  !paired
+                    ? `${r.paired_count} tag(s) paired vs ${r.qty_scanned} box(es) scanned — finish pairing at the gun, or fix the scan count below. `
+                    : ""
+                }${
+                  !detected
+                    ? `The sweep heard <b>${r.detected}</b> tag(s) of this product${
+                        binsSaid ? ` (records say: ${binsSaid})` : ""
+                      }; this batch paired ${r.paired_count}${
+                        tb ? ` and ${tb} were marked already-tagged` : ""
+                      }. If the extra box(es) are really on this shelf, raise "Already tagged" until the numbers agree.`
+                    : ""
+                }</div>
+                <div class="bvx__inputs">
+                  <label>New boxes scanned
+                    <input type="number" min="0" max="500" class="bvx-qty" value="${r.qty_scanned}"></label>
+                  <label>Already RFID-tagged
+                    <input type="number" min="0" max="500" class="bvx-tb" value="${tb}"></label>
+                  <span class="bvx__sum"></span>
+                  <button class="reset bvx-save" type="button" data-item="${r.item_id}">Save counts</button>
+                </div>
+              </div>
+            </div>
+          </td></tr>`
+        : "";
+      return `<tr${
+        flaggedRow
+          ? ` class="bvx-flag" data-item="${r.item_id}" title="Click to review — what the sweep heard vs this batch's counts"`
+          : ""
+      }>
         <td>${productLink(r.product_title, r.shopify_product_id)}${
           na
             ? ' <span class="noscan-chip" title="tag won\'t scan when on box — sweeps don\'t expect it to answer">⊘</span>'
@@ -4769,8 +4859,8 @@ async function runVerifyCheck() {
         <td class="num${detected ? "" : " bexp--off"}">${
           na ? (r.detected > 0 ? `${r.detected} ⊘` : "n/a") : r.detected
         }</td>
-        <td>${na && paired ? "⊘" : paired && detected ? "✓" : "⚠"}</td>
-      </tr>`;
+        <td>${na && paired ? "⊘" : paired && detected ? "✓" : "⚠ ▸"}</td>
+      </tr>${detail}`;
     })
     .join("");
 
@@ -4892,6 +4982,27 @@ bEl.verifyCheck.addEventListener("click", async () => {
   } finally {
     bEl.verifyCheck.disabled = false;
   }
+});
+
+// Live sum in an expanded verify row: (new + already-tagged) vs Shopify.
+function updateBvxSum(detail) {
+  const q = parseInt(detail.querySelector(".bvx-qty").value, 10) || 0;
+  const t = parseInt(detail.querySelector(".bvx-tb").value, 10) || 0;
+  const exp = detail.dataset.exp;
+  const sum = detail.querySelector(".bvx__sum");
+  let text = `= ${q + t} box(es) total`;
+  if (exp !== "") {
+    const diff = q + t - parseInt(exp, 10);
+    text += ` vs expected ${exp}${
+      diff ? ` (${diff > 0 ? "+" : "−"}${Math.abs(diff)})` : " ✓"
+    }`;
+  }
+  sum.textContent = text;
+}
+
+bEl.verifyReport.addEventListener("input", (e) => {
+  const detail = e.target.closest("tr.bvx-detail");
+  if (detail) updateBvxSum(detail);
 });
 
 bEl.complete.addEventListener("click", async () => {

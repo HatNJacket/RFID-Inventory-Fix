@@ -995,6 +995,7 @@ public class MainActivity extends Activity {
     private Button editSkipBtn;
     private Button editNoScanBtn;
     private Button editPriorBtn;
+    private Button editDblBtn;
     private Button editSplitBtn;
 
     private void buildItemEditor(FrameLayout outer) {
@@ -1205,6 +1206,29 @@ public class MainActivity extends Activity {
         });
         mid.addView(editPriorBtn);
 
+        // One-tap fix for the double-count flag: the stickered boxes were
+        // barcode-scanned too, so the scan count drops by that many.
+        // Local batch numbers only — nothing writes to Shopify.
+        editDblBtn = smallBtn("REMOVE DOUBLE COUNT");
+        editDblBtn.setOnClickListener(v -> {
+            if (editEntry == null) return;
+            BItem it = editEntry.item;
+            int fixed = Math.max(0, it.qty - it.taggedBefore);
+            new AlertDialog.Builder(this)
+                    .setTitle("Remove the double count?")
+                    .setMessage(it.qty + " scanned + " + it.taggedBefore
+                            + " already tagged — if the " + it.taggedBefore
+                            + " stickered box(es) were among the scans, "
+                            + "the true split is " + fixed + " new + "
+                            + it.taggedBefore + " tagged.\n\nBatch counts "
+                            + "only; Shopify is untouched.")
+                    .setPositiveButton("SET SCANNED TO " + fixed,
+                            (d, w) -> setItemQty(it, fixed))
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        });
+        mid.addView(editDblBtn);
+
         editDropBtn = smallBtn("REMOVE THIS SCAN");
         editDropBtn.setOnClickListener(v -> dropItemFromBatch(true));
         mid.addView(editDropBtn);
@@ -1381,6 +1405,10 @@ public class MainActivity extends Activity {
         editPriorBtn.setText(it.taggedBefore > 0
                 ? "✓ " + it.taggedBefore + " ALREADY TAGGED — CHANGE…"
                 : "ALREADY TAGGED…");
+        editDblBtn.setVisibility(it.resolved && it.qty > 0
+                && it.taggedBefore > 0 ? View.VISIBLE : View.GONE);
+        editDblBtn.setText("REMOVE DOUBLE COUNT (−" + it.taggedBefore
+                + ")");
         // Only an unresolved row has a barcode to give away.
         editFindBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
         editRecommendBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
@@ -1498,6 +1526,9 @@ public class MainActivity extends Activity {
                     + "different shelf");
             else if ("not-on-shelf".equals(f)) sb.append("expected here "
                     + "per Shopify - none scanned; likely in another bin");
+            else if ("double-count".equals(f)) sb.append("scanned AND "
+                    + "marked already-tagged - stickered boxes may be "
+                    + "counted twice");
             else sb.append(f);
         }
         return sb.toString();
@@ -1587,10 +1618,28 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     beep(SOUND_OK);
                     it.binLocation = bin;
+                    // The server now agrees, so the LOCAL flags must too —
+                    // this used to leave "wrong-bin" stuck in the check
+                    // list after a successful bin move (Nick, 2026-08-06).
+                    if (editEntry != null && editEntry.item.id == it.id) {
+                        if (bin.equalsIgnoreCase(batchBin)) {
+                            editEntry.flags.remove("wrong-bin");
+                        } else if (!editEntry.flags.contains("wrong-bin")) {
+                            editEntry.flags.add("wrong-bin");
+                        }
+                        if (editEntry.flags.isEmpty()) {
+                            checkEntries.remove(editEntry);
+                            checkFlagText.remove(it.id);
+                        } else {
+                            checkFlagText.put(it.id,
+                                    "⚠ " + flagText(editEntry.flags));
+                        }
+                    }
                     editMsg.setText("Bin set to " + bin + " ✓");
                     renderItemEditor();
                     status.setText(it.name() + " → bin " + bin);
                     reloadBatchOnly();
+                    refreshBatchList();
                 });
             } catch (Exception e) {
                 ui.post(() -> {

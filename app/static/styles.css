@@ -1376,6 +1376,34 @@ a { color: var(--accent); }
   white-space: nowrap;
   cursor: help;
 }
+/* Expandable flagged verify rows (Review-inbox style): the row opens
+   into the item preview, what the sweep said, and the two counts whose
+   sum is checked against Shopify. Display + local batch counts only. */
+tr.bvx-flag { cursor: pointer; }
+tr.bvx-flag:hover td { background: var(--card-2); }
+tr.bvx-detail td { background: var(--card-2); padding: 12px 14px; }
+.bvx__wrap { display: flex; gap: 14px; align-items: flex-start; }
+.bvx__img {
+  width: 72px; height: 72px; object-fit: contain; flex: none;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.bvx__body { flex: 1; min-width: 0; }
+.bvx__why { font-size: 13px; line-height: 1.5; margin-bottom: 10px; }
+.bvx__inputs {
+  display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap;
+}
+.bvx__inputs label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11.5px; color: var(--ink-dim);
+}
+.bvx__inputs input {
+  width: 86px; padding: 6px 8px; font-size: 14px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card); color: var(--ink);
+}
+.bvx__sum { font-size: 12.5px; font-weight: 600; padding-bottom: 8px; }
+.bvx-save { padding-bottom: 6px; }
 
 /* fix-label-&-reprint dialog: stacked line editors + fit warning */
 #breprint-overlay .step__label { display: block; margin: 10px 0 4px; }
