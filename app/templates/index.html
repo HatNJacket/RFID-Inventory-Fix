@@ -10,7 +10,7 @@
   <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="{{ app_bridge_key }}"></script>
   {% endif %}
 </head>
-<body data-remote-print="{{ 'on' if allow_remote_print else 'off' }}">
+<body data-remote-print="{{ 'on' if allow_remote_print else 'off' }}" data-shop="{{ shop_handle or '' }}">
   <div class="station">
     <header class="station__head">
       <div class="brand">

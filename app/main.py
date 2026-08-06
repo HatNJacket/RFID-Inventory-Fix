@@ -162,6 +162,9 @@ def index(request: Request):
             "allow_remote_print": config.ALLOW_REMOTE_PRINT,
             "operators": config.OPERATORS,
             "asset_version": ASSET_VERSION,
+            # For "open in Shopify admin" links: the store's handle, i.e.
+            # "telcan" out of "telcan.myshopify.com".
+            "shop_handle": (config.SHOPIFY_STORE or "").split(".")[0],
             # App Bridge only when loaded inside Shopify admin (it adds a
             # 'host' query param); the script is inert/broken outside it.
             "app_bridge_key": (
@@ -1687,11 +1690,31 @@ def inventory_summary(session: Session = Depends(get_session)):
             for p in products:
                 if p["sku"] in live:
                     p["shopify_qty"] = live[p["sku"]]
-        except RuntimeError as error:
+        except Exception as error:
+            # Broad on purpose: a Shopify hiccup (auth, network, HTTP —
+            # requests raises its own types, not RuntimeError) must degrade
+            # to the mirror numbers, never 500 the whole Inventory tab.
             logger.warning("live quantity fetch failed: %s", error)
+
+    # Product GID for "open in Shopify admin" links — the live bin map is
+    # the reliable source (assignments can carry TELCAN's "handle:…" ids,
+    # which no admin URL can be built from).
+    gid_by_sku: dict = {}
+    try:
+        for sku, pid in session.execute(
+            select(BinMapEntry.sku, BinMapEntry.shopify_product_id)
+            .where(BinMapEntry.shopify_product_id.isnot(None))
+        ):
+            if sku and str(pid).startswith("gid://"):
+                gid_by_sku.setdefault(sku.strip().upper(), pid)
+    except Exception as error:
+        logger.warning("gid lookup failed: %s", error)
 
     for p in products:
         p["vendor"] = vendor_by_sku.get(p["sku"])
+        p["shopify_product_id"] = gid_by_sku.get(
+            (p["sku"] or "").strip().upper()
+        )
 
     return {
         "count": len(products),
@@ -4428,6 +4451,13 @@ def batch_verify(
             "detected": detected.get(((i.sku or "").upper(), i.barcode), 0),
             # Expected silent: the tag never answers once it's on the box.
             "rfid_incompatible": (i.sku or "").strip().upper() in noscan,
+            # What Shopify expected on this shelf (snapshot from scan
+            # time) and the units actually found — display only, nothing
+            # here writes a count anywhere.
+            "expected_qty": i.expected_qty,
+            "units_total": _units_on_shelf(i),
+            # For the "open in Shopify admin" link on the product name.
+            "shopify_product_id": i.shopify_product_id,
         }
         for i in items
     ]

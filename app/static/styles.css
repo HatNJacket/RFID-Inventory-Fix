@@ -1235,6 +1235,10 @@ a { color: var(--accent); }
 .skulink { color: var(--accent); cursor: pointer; }
 .skulink:hover { text-decoration: underline; }
 
+/* product names that open the Shopify admin product page */
+.prodlink { color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+.prodlink:hover { color: var(--accent); text-decoration-style: solid; }
+
 /* won't-RFID-scan chip: same shape as the ask-first bin flag */
 .noscan-chip {
   display: inline-block;

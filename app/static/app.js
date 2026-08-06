@@ -1638,6 +1638,24 @@ async function loadInventory() {
   }
 }
 
+// Link to a product's page in Shopify admin. Only products with a real
+// Shopify GID can be linked — TELCAN-resolved rows carry "handle:…" ids
+// no admin URL can be built from; those names stay plain text.
+function adminProductUrl(pid) {
+  const shop = document.body.dataset.shop;
+  if (!shop || !pid) return null;
+  const m = String(pid).match(/(?:gid:\/\/shopify\/Product\/)?(\d+)$/);
+  return m ? `https://admin.shopify.com/store/${shop}/products/${m[1]}` : null;
+}
+
+function productLink(title, pid) {
+  const url = adminProductUrl(pid);
+  const name = escapeHtml(title || "");
+  return url
+    ? `<a class="prodlink" href="${url}" target="_blank" rel="noopener" title="Open in Shopify admin">${name}</a>`
+    : name;
+}
+
 function renderInventory() {
   const body = document.getElementById("inv-body");
   const countEl = document.getElementById("inv-count");
@@ -1694,7 +1712,7 @@ function renderInventory() {
   body.innerHTML = rows
     .map((p) => {
       const title =
-        escapeHtml(p.product_title || "") +
+        productLink(p.product_title, p.shopify_product_id) +
         (p.variant_title
           ? ` <span class="inventory__variant">(${escapeHtml(p.variant_title)})</span>`
           : "") +
@@ -4445,14 +4463,28 @@ async function runVerifyCheck() {
       if (r.qty_scanned !== r.paired_count) boxesOk = false;
       if (!paired) pairedOk = false;
       if (!detected) detectedOk = false;
+      // Shopify's expected count, with the shortfall/overage in brackets:
+      // "6 (−2)" = expected 6, found 4. DISPLAY ONLY — nothing here (and
+      // no click) ever writes a count back.
+      const found = r.units_total ?? r.qty_scanned;
+      let expCell = "—";
+      if (r.expected_qty != null) {
+        const diff = found - r.expected_qty;
+        expCell =
+          `${r.expected_qty}` +
+          (diff
+            ? ` <span class="bexp--off">(${diff > 0 ? "+" : "−"}${Math.abs(diff)})</span>`
+            : "");
+      }
       return `<tr>
-        <td>${escapeHtml(r.product_title || "")}${
+        <td>${productLink(r.product_title, r.shopify_product_id)}${
           na
             ? ' <span class="noscan-chip" title="tag won\'t scan when on box — sweeps don\'t expect it to answer">⊘</span>'
             : ""
         }</td>
         <td class="mono">${escapeHtml(r.sku || "—")}</td>
         <td class="num">${r.qty_scanned}</td>
+        <td class="num">${expCell}</td>
         <td class="num${paired ? "" : " bexp--off"}">${r.paired_count}</td>
         <td class="num${detected ? "" : " bexp--off"}">${
           na ? (r.detected > 0 ? `${r.detected} ⊘` : "n/a") : r.detected
@@ -4496,7 +4528,7 @@ async function runVerifyCheck() {
   bEl.verifyReport.innerHTML = `
     ${verdict}${naNote}
     <div class="inventory__scroll"><table class="inventory__table">
-      <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
+      <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num" title="Shopify on-hand for this shelf; brackets show scanned-vs-expected">Expected</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     ${
