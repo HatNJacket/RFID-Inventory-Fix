@@ -250,6 +250,14 @@ starting early" actively harmful.
 
 ## 🗓️ Later / backlog
 
+- **The "1-left check" app** (separate system — Inventory Verification,
+  the one that asks a human to confirm 0/1-left counts). Reconnaissance
+  written up in [docs/inventory-verification-app.md](docs/inventory-verification-app.md):
+  where it lives, its full endpoint list, that it's webhook-driven, and
+  that all ten operator-facing endpoints are ANONYMOUS. Possible RFID
+  tie-in: its queue is 200+ items, and tag data can already speak to any
+  batch-tagged SKU — read-only join first. Do NOT start without asking;
+  its backend source isn't recoverable yet and its API needs auth first.
 - Locate mode: max-power geiger-counter search for a specific EPC on the
   C72 (SDK supports radar/location APIs)
 - Weak-RFID product flag (e.g. Optolong filters detune stickers): verify
