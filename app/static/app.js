@@ -199,6 +199,169 @@ function requireOperator() {
   return null;
 }
 
+// --- Event chips -------------------------------------------------------------
+// Every event/category tag renders as readable text in a coloured chip.
+// Colours live in CSS variables (--ev-<type>) set from defaults merged
+// with the operator's own picks (Settings → Event colours, stored in this
+// browser) — editing one repaints every chip on the page instantly.
+const EVENT_META = {
+  "tag-assigned": ["Assigned Tag", "#29845a"],
+  "barcode-linked": ["Linked Barcode", "#6f42c1"],
+  "barcode-replaced": ["Replaced Barcode", "#b98900"],
+  "sku-updated": ["Updated SKU", "#b98900"],
+  "bin-updated": ["Updated Bin", "#0e7a8a"],
+  "rfid-flag-changed": ["RFID Flag", "#d72c0d"],
+  "on-hand-updated": ["Raised On-hand", "#0c5132"],
+  "on-hand-undone": ["Undid On-hand", "#6d7175"],
+  "label-queued": ["Queued Label", "#4a86d8"],
+  "label-printing": ["Printing Label", "#005bd3"],
+  "label-printed": ["Printed Label", "#005bd3"],
+  "label-failed": ["Label Failed", "#d72c0d"],
+  "label-canceled": ["Canceled Label", "#6d7175"],
+  "marked-bundle": ["Marked Bundle", "#6f42c1"],
+  "marked-multi-box": ["Marked Multi-box", "#6f42c1"],
+  "dropped-from-rfid": ["Dropped From RFID", "#d72c0d"],
+  "batch-started": ["Started Batch", "#3f51b5"],
+  "batch-verified": ["Verified Batch", "#3f51b5"],
+  "batch-completed": ["Completed Batch", "#29845a"],
+  "batch-abandoned": ["Abandoned Batch", "#6d7175"],
+  "batch-counted": ["Batch Counted", "#3f51b5"],
+  "review-opened": ["Opened Review", "#8a6116"],
+  "review-resolved": ["Resolved Review", "#29845a"],
+  "review-dismissed": ["Dismissed Review", "#6d7175"],
+  "inventory-check": ["Inventory Check", "#8a6116"],
+  "pairing-incomplete": ["Pairing Incomplete", "#d72c0d"],
+  "unresolved-barcode": ["Unresolved Barcode", "#d72c0d"],
+  "could-not-scan": ["Could Not Scan", "#8a6116"],
+  sweep: ["Sweep", "#0e7a8a"],
+};
+
+function evLabel(type) {
+  const m = EVENT_META[type];
+  if (m) return m[0];
+  // Unknown types still read as words, never as raw tags.
+  return String(type || "")
+    .split("-")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
+function evVarName(type) {
+  return "--ev-" + String(type).replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+}
+
+function eventColorOverrides() {
+  try {
+    return JSON.parse(localStorage.getItem("eventColors") || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function applyEventColors() {
+  const overrides = eventColorOverrides();
+  const root = document.documentElement.style;
+  Object.keys(EVENT_META).forEach((type) => {
+    root.setProperty(
+      evVarName(type),
+      overrides[type] || EVENT_META[type][1]
+    );
+  });
+}
+applyEventColors();
+
+function evChip(type, extraTitle) {
+  const known = !!EVENT_META[type];
+  const color = known
+    ? `var(${evVarName(type)})`
+    : "var(--chip-ink)";
+  const bg = known
+    ? `color-mix(in srgb, var(${evVarName(type)}) 15%, transparent)`
+    : "var(--chip-bg)";
+  return (
+    `<span class="evtype" style="color:${color};background:${bg}"` +
+    (extraTitle ? ` title="${escapeHtml(extraTitle)}"` : "") +
+    `>${escapeHtml(evLabel(type))}</span>`
+  );
+}
+
+// Settings → Event colours: a picker + hex box + live preview per event.
+function renderEvColorList() {
+  const wrap = document.getElementById("evcolor-list");
+  const overrides = eventColorOverrides();
+  wrap.innerHTML = "";
+  Object.keys(EVENT_META)
+    .sort((a, b) => evLabel(a).localeCompare(evLabel(b)))
+    .forEach((type) => {
+      const current = overrides[type] || EVENT_META[type][1];
+      const row = document.createElement("div");
+      row.className = "evcolor-row";
+      row.innerHTML = `
+        <span class="evcolor-preview">${evChip(type)}</span>
+        <input type="color" value="${current}" aria-label="colour for ${escapeHtml(evLabel(type))}" />
+        <input type="text" class="linkbox__input evcolor-hex" value="${current}" maxlength="7" spellcheck="false" />`;
+      const picker = row.querySelector('input[type="color"]');
+      const hex = row.querySelector(".evcolor-hex");
+      const save = (value) => {
+        if (!/^#[0-9a-fA-F]{6}$/.test(value)) return;
+        const o = eventColorOverrides();
+        if (value.toLowerCase() === EVENT_META[type][1].toLowerCase()) {
+          delete o[type];
+        } else {
+          o[type] = value;
+        }
+        localStorage.setItem("eventColors", JSON.stringify(o));
+        applyEventColors(); // every chip on the page follows instantly
+      };
+      picker.addEventListener("input", () => {
+        hex.value = picker.value;
+        save(picker.value);
+      });
+      hex.addEventListener("input", () => {
+        const v = hex.value.trim();
+        if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+          picker.value = v;
+          save(v);
+        }
+      });
+      wrap.append(row);
+    });
+}
+
+document.getElementById("evcolor-open").addEventListener("click", () => {
+  document.getElementById("settings-menu").open = false;
+  renderEvColorList();
+  document.getElementById("evcolor-overlay").hidden = false;
+});
+document.getElementById("evcolor-close").addEventListener("click", () => {
+  document.getElementById("evcolor-overlay").hidden = true;
+});
+document.getElementById("evcolor-reset").addEventListener("click", () => {
+  localStorage.removeItem("eventColors");
+  applyEventColors();
+  renderEvColorList();
+});
+document
+  .getElementById("evcolor-overlay")
+  .addEventListener("click", (e) => {
+    if (e.target.id === "evcolor-overlay")
+      document.getElementById("evcolor-overlay").hidden = true;
+  });
+
+// "3 days ago" style timestamps for list surfaces (exact time in hover).
+function fmtAgo(iso) {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return "—";
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
 // --- Tabs -------------------------------------------------------------------
 // Same tabs on PC and iPad; each tab loads (or refreshes) its data on entry.
 const tabSections = {
@@ -4855,49 +5018,120 @@ async function loadQueue() {
 }
 
 // === Review tab (WIP: task inbox) ==========================================
+let reviewTasks = [];
+let reviewFilter = "";
+let reviewOpenIds = new Set();
+
 async function loadReview() {
   const list = document.getElementById("review-list");
   try {
     const { tasks } = await apiJson("/api/review-tasks?status=open&limit=100");
-    list.innerHTML = "";
-    if (!tasks.length) {
-      list.innerHTML =
-        '<li class="recent__empty">Inbox zero — nothing needs review.</li>';
-      return;
-    }
-    tasks.forEach((t) => {
-      const li = document.createElement("li");
-      li.innerHTML = `
-        <span class="evtype">${escapeHtml(t.category)}</span>
-        <span class="recent__prod"><b>${escapeHtml(t.product_title || t.sku || "")}</b> ${escapeHtml(t.detail)}</span>
-        <span class="recent__meta recent__when">${escapeHtml(fmtWhen(t.created_at))}</span>
-        <button class="recent__unassign" data-act="resolve">resolve</button>
-        <button class="recent__unassign" data-act="dismiss">dismiss</button>`;
-      const act = async (dismissed) => {
-        const operator = operatorEl.value;
-        if (!operator) {
-          alert("Pick who's scanning (top right) first.");
-          return;
-        }
-        try {
-          await postJson(`/api/review-tasks/${t.id}/resolve`, {
-            resolved_by: operator,
-            dismissed,
-          });
-          li.remove();
-        } catch (err) {
-          alert(err.message);
-        }
-      };
-      li.querySelector('[data-act="resolve"]').addEventListener("click", () => act(false));
-      li.querySelector('[data-act="dismiss"]').addEventListener("click", () => act(true));
-      list.append(li);
-    });
+    reviewTasks = tasks;
+    // The type filter offers exactly the categories present right now.
+    const sel = document.getElementById("review-filter");
+    const cats = [...new Set(tasks.map((t) => t.category))].sort();
+    if (reviewFilter && !cats.includes(reviewFilter)) reviewFilter = "";
+    sel.innerHTML =
+      '<option value="">All types</option>' +
+      cats
+        .map(
+          (c) =>
+            `<option value="${escapeHtml(c)}"${c === reviewFilter ? " selected" : ""}>${escapeHtml(evLabel(c))}</option>`
+        )
+        .join("");
+    renderReview();
   } catch (err) {
     list.innerHTML =
       '<li class="recent__empty">Could not load review tasks.</li>';
   }
 }
+
+function renderReview() {
+  const list = document.getElementById("review-list");
+  const tasks = reviewFilter
+    ? reviewTasks.filter((t) => t.category === reviewFilter)
+    : reviewTasks;
+  list.innerHTML = "";
+  if (!tasks.length) {
+    list.innerHTML = `<li class="recent__empty">${
+      reviewFilter
+        ? "No open tasks of that type."
+        : "Inbox zero — nothing needs review."
+    }</li>`;
+    return;
+  }
+  tasks.forEach((t) => {
+    const li = document.createElement("li");
+    li.style.display = "block";
+    const open = reviewOpenIds.has(t.id);
+    // The boilerplate recommendation sentence lives behind the expansion,
+    // on its own line — the collapsed row keeps just the facts.
+    const rec = /Recommend[^.]*\.\s*$/.exec(t.detail || "");
+    const short = rec ? t.detail.slice(0, rec.index).trim() : t.detail;
+    li.innerHTML =
+      `<div class="rv-row">
+        ${evChip(t.category)}
+        <span class="recent__prod"><b>${escapeHtml(t.product_title || t.sku || "")}</b> ${escapeHtml(short)}</span>
+        <span class="recent__meta recent__when" title="${escapeHtml(fmtWhen(t.created_at))}">${escapeHtml(fmtAgo(t.created_at))}</span>
+        <button class="rv-btn rv-btn--resolve" data-act="resolve" type="button">resolve</button>
+        <button class="rv-btn rv-btn--dismiss" data-act="dismiss" type="button">dismiss</button>
+        <span class="auditrow__chev">${open ? "▾" : "▸"}</span>
+      </div>` +
+      (open
+        ? `<div class="rv-detail">
+            ${
+              t.image_url
+                ? `<img class="rv-img" src="${escapeHtml(t.image_url)}" alt="" />`
+                : ""
+            }
+            <div>
+              <div><b>${escapeHtml(t.product_title || "")}</b>${
+                t.sku
+                  ? ` <span class="mono recent__meta">· ${escapeHtml(t.sku)}</span>`
+                  : ""
+              }</div>
+              <div class="recent__meta" style="margin-top:2px">${escapeHtml(short)}</div>
+              ${
+                rec
+                  ? `<div class="recent__meta" style="margin-top:4px"><i>${escapeHtml(rec[0].trim())}</i></div>`
+                  : ""
+              }
+            </div>
+          </div>`
+        : "");
+    li.querySelector(".rv-row").addEventListener("click", (ev) => {
+      if (ev.target.closest("button")) return;
+      if (reviewOpenIds.has(t.id)) reviewOpenIds.delete(t.id);
+      else reviewOpenIds.add(t.id);
+      renderReview();
+    });
+    const act = async (dismissed) => {
+      const operator = operatorEl.value;
+      if (!operator) {
+        alert("Pick who's scanning (top right) first.");
+        return;
+      }
+      try {
+        await postJson(`/api/review-tasks/${t.id}/resolve`, {
+          resolved_by: operator,
+          dismissed,
+        });
+        reviewTasks = reviewTasks.filter((x) => x.id !== t.id);
+        renderReview();
+      } catch (err) {
+        alert(err.message);
+      }
+    };
+    li.querySelector('[data-act="resolve"]').addEventListener("click", () => act(false));
+    li.querySelector('[data-act="dismiss"]').addEventListener("click", () => act(true));
+    list.append(li);
+  });
+}
+
+document.getElementById("review-filter").addEventListener("change", (e) => {
+  reviewFilter = e.target.value;
+  renderReview();
+});
 
 // Looping ". .. ..." on a button while a slow refresh runs — proof of
 // life, not progress. Returns a stop function that restores the label.
@@ -4969,11 +5203,11 @@ function renderAuditBins() {
     const open = auditOpenBins.has(b.bin);
     li.innerHTML =
       `<div class="auditrow${clean ? " auditrow--clean" : ""}">
-         <span class="auditrow__score ${clean ? "auditrow__score--ok" : "auditrow__score--off"}">${
+         <span class="inventory__bin">${escapeHtml(b.bin)}</span>
+         <span class="auditrow__num ${clean ? "auditrow__num--ok" : ""}" title="sum of |Shopify − RFID| across this bin's products">${
            clean ? "✓" : b.score
          }</span>
-         <span class="binlist__name">${escapeHtml(b.bin)}</span>
-         <span class="binlist__count">${b.product_count} product(s)${
+         <span class="binlist__count" style="margin-left:auto">${b.product_count} product(s)${
            clean
              ? " · all match"
              : ` · ${b.mismatched_count} mismatched`
@@ -5106,11 +5340,14 @@ async function loadAudits() {
       ? ""
       : '<li class="recent__empty">No product checks recommended right now.</li>';
     checks.forEach((t) => {
+      // [Bin chip] [Product name] ......... [mismatch chip] [N days ago]
+      const binMatch = /^Bin\s+([^:]+):/.exec(t.detail || "");
       const li = document.createElement("li");
       li.innerHTML = `
-        <span class="audit-mm" title="units counted vs Shopify on-hand — the size of the disagreement">${t.mismatch || "?"}</span>
-        <span class="recent__prod"><b>${escapeHtml(t.product_title || t.sku || "")}</b> ${escapeHtml(t.detail)}</span>
-        <span class="recent__meta recent__when">${escapeHtml(fmtWhen(t.created_at))}</span>`;
+        <span class="inventory__bin">${escapeHtml(binMatch ? binMatch[1] : "—")}</span>
+        <span class="recent__prod" title="${escapeHtml(t.detail)}"><b>${escapeHtml(t.product_title || t.sku || "")}</b></span>
+        <span class="audit-mm" title="${escapeHtml(t.detail)}">${t.mismatch || "?"}</span>
+        <span class="recent__meta recent__when" title="${escapeHtml(fmtWhen(t.created_at))}">${escapeHtml(fmtAgo(t.created_at))}</span>`;
       list.append(li);
     });
   } catch (err) {
@@ -5128,9 +5365,9 @@ async function loadAudits() {
     captures.forEach((c) => {
       const li = document.createElement("li");
       li.innerHTML = `
-        <span class="evtype">sweep #${c.id}</span>
-        <span class="recent__prod"><b>${c.epc_count} tags</b> from ${escapeHtml(c.device || "C72")}${c.note ? " — " + escapeHtml(c.note) : ""}</span>
-        <span class="recent__meta recent__when">${escapeHtml(fmtWhen(c.created_at))}</span>`;
+        ${evChip("sweep")}
+        <span class="recent__prod"><b>#${c.id} · ${c.epc_count} tags</b> from ${escapeHtml(c.device || "C72")}${c.note ? " — " + escapeHtml(c.note) : ""}</span>
+        <span class="recent__meta recent__when">${escapeHtml(fmtAgo(c.created_at))}</span>`;
       sweeps.append(li);
     });
   } catch (err) {
@@ -5172,7 +5409,7 @@ function renderHistory() {
     .map(
       (e, i) => `<tr>
       <td class="recent__meta" style="white-space:nowrap">${escapeHtml(fmtWhen(e.at))}</td>
-      <td><span class="evtype">${escapeHtml(e.type)}</span></td>
+      <td>${evChip(e.type)}</td>
       <td>${escapeHtml(e.worker || "—")}</td>
       <td class="mono">${
         e.sku
@@ -5307,7 +5544,7 @@ async function openProductHistory(term) {
       .map(
         (e) => `<tr>
         <td class="recent__meta" style="white-space:nowrap">${escapeHtml(fmtWhen(e.at))}</td>
-        <td><span class="evtype">${escapeHtml(e.type)}</span></td>
+        <td>${evChip(e.type)}</td>
         <td>${escapeHtml(e.worker || "—")}</td>
         <td class="recent__meta">${escapeHtml(e.detail || "")}</td>
         <td>${
@@ -5588,6 +5825,27 @@ document
 // scanned code simply stops resolving to that product).
 async function undoHistoryEvent(e, btn) {
   if (!e || !e.undo) return;
+  // Resolved/dismissed review tasks: undo = reopen — the task returns to
+  // the Review inbox and this resolution entry leaves History (the task
+  // is simply open again, as if never closed).
+  if (e.undo.kind === "review-reopen") {
+    if (
+      !confirm(
+        `Reopen this review task?\n\n${e.title || e.sku || ""} — it goes ` +
+          `back to the Review inbox, as if it was never closed.`
+      )
+    )
+      return;
+    btn.disabled = true;
+    try {
+      await postJson(`/api/review-tasks/${e.undo.task_id}/reopen`, {});
+      await loadHistory();
+    } catch (err) {
+      btn.disabled = false;
+      alert(err.message);
+    }
+    return;
+  }
   // On-hand corrections: two-phase undo. The unconfirmed call answers
   // with exactly what will happen — including the CURRENT live value, in
   // case something else moved the number since — and that text IS the

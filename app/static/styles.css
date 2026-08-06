@@ -1244,6 +1244,67 @@ a { color: var(--accent); }
 .auditrow--clean .binlist__name { color: var(--ink-dim); }
 .auditrow__chev { flex: none; color: var(--ink-dim); }
 
+/* audit bin rows: bin chip + red mismatch number */
+.auditrow__num {
+  flex: none;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--bad-ink);
+}
+.auditrow__num--ok { color: var(--ok-ink); }
+
+/* review inbox: expandable rows, coloured action chips */
+.rv-row { display: flex; align-items: center; gap: 12px; cursor: pointer; }
+.rv-detail {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.rv-img {
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  flex: none;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.rv-btn {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: filter 0.12s, transform 0.12s;
+}
+.rv-btn:hover { filter: brightness(0.9); transform: translateY(-1px); }
+.rv-btn--resolve { background: var(--ok-bg); color: var(--ok-ink); }
+.rv-btn--dismiss { background: var(--bad-bg); color: var(--bad-ink); }
+
+/* event colour editor rows */
+.evcolor-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--line);
+}
+.evcolor-preview { flex: 1; min-width: 0; }
+.evcolor-row input[type="color"] {
+  width: 36px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  cursor: pointer;
+}
+.evcolor-hex { max-width: 96px; font-family: var(--mono); font-size: 12.5px; }
+
 /* recommended product checks: scrollable, biggest mismatch first */
 #audit-list { max-height: 340px; overflow-y: auto; }
 .audit-mm {

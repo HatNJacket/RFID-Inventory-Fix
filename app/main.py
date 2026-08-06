@@ -4949,7 +4949,22 @@ def list_review_tasks(
     if status != "all":
         stmt = stmt.where(ReviewTask.status == status.strip())
     rows = session.scalars(stmt.limit(min(limit, 500))).all()
-    return {"count": len(rows), "tasks": [t.as_dict() for t in rows]}
+    # Product images for the expandable preview, from the local bin map.
+    imgs: dict = {}
+    skus = {(t.sku or "").strip().upper() for t in rows if t.sku}
+    if skus:
+        for sku, img in session.execute(
+            select(BinMapEntry.sku, BinMapEntry.image_url)
+            .where(BinMapEntry.image_url.isnot(None))
+        ):
+            if sku and sku.strip().upper() in skus:
+                imgs.setdefault(sku.strip().upper(), img)
+    tasks = []
+    for t in rows:
+        d = t.as_dict()
+        d["image_url"] = imgs.get((t.sku or "").strip().upper())
+        tasks.append(d)
+    return {"count": len(tasks), "tasks": tasks}
 
 
 class ResolveIn(BaseModel):
@@ -4974,6 +4989,29 @@ def resolve_review_task(
     task.resolved_by = payload.resolved_by
     task.resolved_at = datetime.now(timezone.utc)
     task.resolution_note = payload.note
+    session.commit()
+    return task.as_dict()
+
+
+@app.post(
+    "/api/review-tasks/{task_id}/reopen",
+    dependencies=[Depends(require_user)],
+)
+def reopen_review_task(
+    task_id: int, session: Session = Depends(get_session)
+):
+    """Undo a resolve/dismiss: the task returns to the open inbox. The
+    original resolution stays in History (that event already happened) —
+    this just puts the work back on the list."""
+    task = session.get(ReviewTask, task_id)
+    if task is None:
+        raise HTTPException(404, "No such review task.")
+    if task.status == "open":
+        raise HTTPException(409, "That task is already open.")
+    task.status = "open"
+    task.resolved_by = None
+    task.resolved_at = None
+    task.resolution_note = None
     session.commit()
     return task.as_dict()
 
@@ -5619,6 +5657,8 @@ def history(
                 "detail": f"[{t.category}]"
                           + (f" {t.resolution_note}" if t.resolution_note
                              else ""),
+                # Undo = reopen: the task goes back to the inbox.
+                "undo": {"kind": "review-reopen", "task_id": t.id},
             })
 
     # ISO strings sort chronologically; string sort also avoids the

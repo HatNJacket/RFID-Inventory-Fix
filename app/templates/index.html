@@ -47,6 +47,7 @@
                 <span class="settings__hint">Hold the label when the product has no bin assigned — set the bin (click its chip) and the label prints.</span>
               </span>
             </label>
+            <button class="reset" id="evcolor-open" type="button" style="margin-top:8px">🎨 Event colours…</button>
           </div>
         </details>
         <select class="operator" id="operator" title="Who's using the station">
@@ -737,7 +738,10 @@
     <!-- Review tab (WIP: task inbox only) -->
     <section class="inventory" id="tab-review" hidden>
       <div class="recent__head">
-        <h2>Review — task inbox <span class="recent__note">(work in progress — resolution logic comes after real audit data)</span></h2>
+        <h2>Review — task inbox</h2>
+        <select id="review-filter" class="operator" title="Show only one kind of task">
+          <option value="">All types</option>
+        </select>
       </div>
       <ul class="recent__list" id="review-list"></ul>
     </section>
@@ -765,6 +769,20 @@
       <div class="recent__head" style="margin-top:24px"><h2>Recent C72 sweeps</h2></div>
       <ul class="recent__list" id="sweep-list"></ul>
     </section>
+
+    <!-- Event colour editor: per-event chip colour, saved in this browser;
+         edits repaint every chip on the page live. -->
+    <div class="phist-overlay" id="evcolor-overlay" hidden>
+      <section class="linkbox serialbox phist-modal" style="max-width:560px">
+        <div class="linkbox__title">Event colours</div>
+        <p class="linkbox__text">Pick a colour or type a hex value — the preview chip and every matching tag on the site update as you type. Saved on this device.</p>
+        <div id="evcolor-list" style="max-height:50vh;overflow-y:auto"></div>
+        <div class="linkbox__actions" style="margin-top:10px">
+          <button class="reset" id="evcolor-reset" type="button">Reset all to defaults</button>
+          <button class="reset" id="evcolor-close" type="button">Close</button>
+        </div>
+      </section>
+    </div>
 
     <!-- Product panel: opened from History OR Print queue (modal) -->
     <div class="phist-overlay" id="phist-overlay" hidden>
