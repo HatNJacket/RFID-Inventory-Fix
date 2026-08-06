@@ -110,6 +110,15 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
     check("scan response carries prior_tags for a mid-batch stray",
           r.json()["item"]["prior_tags"]==1, r.json()["item"])
 
+    # The Check step tells the keep-or-move dialog how many tagged boxes
+    # are already RECORDED at the stray's home shelf.
+    rev = cl.get(f"/api/batches/{bid2}/review").json()
+    stray = next((e for e in rev["items"]
+                  if e["item"]["sku"]=="DEEP-1"), None)
+    check("wrong-bin stray carries record_bin_tags for its home shelf",
+          stray is not None and "wrong-bin" in stray["flags"]
+          and stray.get("record_bin_tags")==1, stray)
+
     # ---- bin_check: tags_here vs tags_on_file ---------------------------
     r = cl.post("/api/bins/G1-1/check", json={"epcs":[]}).json()
     row = next(i for i in r["items"] if i["sku"]=="DEEP-1")

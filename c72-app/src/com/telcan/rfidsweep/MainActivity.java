@@ -267,6 +267,10 @@ public class MainActivity extends Activity {
         BItem item;
         final List<String> flags = new ArrayList<>();
         final List<JSONObject> candidates = new ArrayList<>();
+        // Tagged boxes already RECORDED at this stray's home bin - the
+        // keep-or-move question reads differently when the recommended
+        // shelf provably holds stock.
+        int recordBinTags;
     }
 
     private int batchId = -1;
@@ -2281,17 +2285,13 @@ public class MainActivity extends Activity {
             fetchReview();
             applyBatchUi();
         } else if (step == STEP_CHECK) {
-            // Print, or jump straight to pairing when the labels already
-            // exist (re-pairing a shelf shouldn't reprint 34 stickers).
-            new AlertDialog.Builder(this)
-                    .setTitle("Labels")
-                    .setMessage("Print labels for this bin, or skip "
-                            + "printing and go straight to pairing?")
-                    .setPositiveButton("Print labels",
-                            (d, w) -> queueLabels())
-                    .setNeutralButton("Skip → pair", (d, w) -> skipPrint())
-                    .setNegativeButton("Cancel", null)
-                    .show();
+            // Undecided wrong-shelf boxes come first: a label printed
+            // now names THIS bin, which forecloses the move.
+            if (parentBatchId == 0 && !strayEntries().isEmpty()) {
+                showStrayReview(true);
+                return;
+            }
+            askPrintOrSkip();
         } else if (step == STEP_PAIR) {
             // Sweep the finished bin here rather than sending the operator
             // back to the desk to do it.
@@ -2678,6 +2678,20 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** Print, or jump straight to pairing when the labels already exist
+     *  (re-pairing a shelf shouldn't reprint 34 stickers). */
+    private void askPrintOrSkip() {
+        new AlertDialog.Builder(this)
+                .setTitle("Labels")
+                .setMessage("Print labels for this bin, or skip "
+                        + "printing and go straight to pairing?")
+                .setPositiveButton("Print labels",
+                        (d, w) -> queueLabels())
+                .setNeutralButton("Skip → pair", (d, w) -> skipPrint())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
     private void skipPrint() {
         new Thread(() -> {
             try {
@@ -2927,9 +2941,9 @@ public class MainActivity extends Activity {
                     for (int j = 0; j < cs.length(); j++) {
                         e.candidates.add(cs.getJSONObject(j));
                     }
+                    e.recordBinTags = o.optInt("record_bin_tags", 0);
                     loaded.add(e);
                 }
-                final JSONArray strays = resp.optJSONArray("stray_bins");
                 ui.post(() -> {
                     hideLoading();
                     checkEntries.clear();
@@ -2947,10 +2961,10 @@ public class MainActivity extends Activity {
                                   + "look — tap one to review. NEXT queues "
                                   + "the labels.");
                         refreshBatchList();
-                        // Boxes on the wrong shelf: offer to carry them to
-                        // where the rest of that product already lives,
-                        // before any label exists to be reprinted.
-                        offerSideTrip(strays);
+                        // Boxes on the wrong shelf: walk them one by one
+                        // (keep here vs side trip) before any label
+                        // exists to be reprinted.
+                        showStrayReview(false);
                     }
                 });
             } catch (Exception e) {
@@ -3037,6 +3051,7 @@ public class MainActivity extends Activity {
                     batchBin = bin;
                     loadScanOrder();
                     loadPriorAsked();
+                    strayMove.clear();
                     bItems.clear();
                     bItems.addAll(loaded);
                     step = "awaiting-verify".equals(st) ? STEP_VERIFY
@@ -3208,6 +3223,12 @@ public class MainActivity extends Activity {
     private final java.util.HashSet<Integer> priorAsked =
             new java.util.HashSet<>();
 
+    // Wrong-shelf review decisions for THIS batch: item id -> "move".
+    // ("keep" resolves itself - the bin update erases the flag - and an
+    // undecided item simply stays in the map's absence.)
+    private final java.util.HashSet<Integer> strayMove =
+            new java.util.HashSet<>();
+
     private void notePriorAsked(int itemId) {
         priorAsked.add(itemId);
         try {
@@ -3222,6 +3243,7 @@ public class MainActivity extends Activity {
 
     private void loadPriorAsked() {
         priorAsked.clear();
+        strayMove.clear();
         try {
             JSONObject saved = new JSONObject(
                     prefs.getString("prior_asked_json", "{}"));
@@ -4032,6 +4054,7 @@ public class MainActivity extends Activity {
         scanOrder.clear();
         scanSeq = 0;
         priorAsked.clear();
+        strayMove.clear();
         bItems.clear();
         pairActive = null;
         previewItem = null;
@@ -4627,6 +4650,9 @@ public class MainActivity extends Activity {
                         + "• Tap a flagged item to review it — arrows pick "
                         + "between listings, TAKE IT TO <bin> starts a "
                         + "side trip for strays.\n"
+                        + "• Wrong-shelf boxes get their own review: each "
+                        + "one is MOVE (side trip) or KEEP HERE (the "
+                        + "recorded bin becomes this shelf).\n"
                         + "• Nothing here blocks you; flags are warnings.\n"
                         + "• NEXT queues the labels for printing.");
             } else if (step == STEP_PAIR) {
@@ -4793,26 +4819,237 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private void offerSideTrip(JSONArray strays) {
-        if (strays == null || strays.length() == 0) return;
-        if (parentBatchId != 0) return;   // already on one; no nesting
-        JSONObject s = strays.optJSONObject(0);
-        if (s == null) return;
-        final String bin = s.optString("bin", "");
-        int n = s.optInt("count", 0);
-        if (bin.isEmpty() || n == 0) return;
-        new AlertDialog.Builder(this)
-                .setTitle(n + " box(es) belong in " + bin)
-                .setMessage("These are on the wrong shelf. Carry them to "
-                        + bin + " and tag them there?\n\n"
-                        + "Their labels will say " + bin + ", you pair them, "
-                        + "then you're back in " + batchBin + ".\n\n"
-                        + "Nothing has printed yet, so there is nothing to "
-                        + "reprint or peel off.")
-                .setPositiveButton("Take them to " + bin, (d, w) ->
-                        startSideTrip(bin))
-                .setNegativeButton("Not now", null)
+    /** The wrong-shelf strays of this batch: resolved, counted, and still
+     *  movable (nothing paired). Each needs a keep-or-move decision
+     *  before labels print with THIS bin's name on them. */
+    private List<CheckEntry> strayEntries() {
+        List<CheckEntry> out = new ArrayList<>();
+        for (CheckEntry e : checkEntries) {
+            if (!e.flags.contains("wrong-bin")) continue;
+            if (!e.item.resolved || e.item.paired > 0) continue;
+            if (e.item.qty <= 0 && e.item.caseCount <= 0) continue;
+            out.add(e);
+        }
+        return out;
+    }
+
+    /** Wrong-shelf review (design per Nick 2026-08-06): every stray with
+     *  its product card, tapped one by one — MOVE (side trip) or KEEP
+     *  (the recorded bin becomes this shelf). Replaces the old bulk
+     *  "N boxes belong in X — take them?" offer that named no products. */
+    private void showStrayReview(boolean fromNext) {
+        List<CheckEntry> strays = strayEntries();
+        if (strays.isEmpty()) return;
+        if (parentBatchId != 0) return;   // trips don't nest from here
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(8), dp(14), dp(4));
+        GradientDrawable gapD = new GradientDrawable();
+        gapD.setSize(0, dp(6));
+        box.setShowDividers(LinearLayout.SHOW_DIVIDER_MIDDLE);
+        box.setDividerDrawable(gapD);
+
+        TextView head = new TextView(this);
+        head.setText(fromNext
+                ? "Decide these before labels print — a label printed "
+                  + "here names THIS bin:"
+                : "On the wrong shelf — tap each one to decide:");
+        head.setTextSize(12);
+        head.setTextColor(C_MUTED);
+        box.addView(head);
+
+        final AlertDialog[] dlg = new AlertDialog[1];
+        for (CheckEntry e : strays) {
+            final CheckEntry fe = e;
+            String home = firstBin(e.item.binLocation);
+            boolean moving = strayMove.contains(e.item.id);
+
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setBackground(rr(moving ? C_OK_BG : Color.WHITE,
+                    C_LINE, 8));
+            row.setPadding(dp(8), dp(6), dp(8), dp(6));
+            ImageView iv = new ImageView(this);
+            iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            iv.setBackgroundColor(C_BG);
+            LinearLayout.LayoutParams il =
+                    new LinearLayout.LayoutParams(dp(46), dp(46));
+            il.rightMargin = dp(8);
+            row.addView(iv, il);
+            loadImage(e.item.imageUrl, iv);
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            TextView nm = new TextView(this);
+            nm.setText(e.item.name());
+            nm.setTextSize(13);
+            nm.setTypeface(null, Typeface.BOLD);
+            nm.setTextColor(C_TEXT);
+            nm.setMaxLines(2);
+            col.addView(nm);
+            TextView sub = new TextView(this);
+            sub.setText("SKU " + (e.item.sku == null ? "—" : e.item.sku)
+                    + " · " + e.item.unitsTotal + " box(es) · here "
+                    + batchBin + " → home " + home
+                    + (e.recordBinTags > 0
+                       ? "\n⚠ " + e.recordBinTags + " tagged box(es) "
+                         + "already recorded at " + home
+                       : ""));
+            sub.setTextSize(11);
+            sub.setTextColor(C_MUTED);
+            col.addView(sub);
+            row.addView(col, weight());
+            TextView state = new TextView(this);
+            state.setText(moving ? "MOVING ✓" : "DECIDE ▸");
+            state.setTextSize(11);
+            state.setTypeface(null, Typeface.BOLD);
+            state.setTextColor(moving ? C_OK : C_BLUE);
+            row.addView(state);
+            row.setOnClickListener(vw -> {
+                if (dlg[0] != null) dlg[0].dismiss();
+                decideStray(fe);
+            });
+            box.addView(row);
+        }
+
+        ScrollView sc = new ScrollView(this);
+        sc.addView(box);
+        int undecided = 0;
+        for (CheckEntry e : strays) {
+            if (!strayMove.contains(e.item.id)) undecided++;
+        }
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle(strays.size() + " box(es) on the wrong shelf")
+                .setView(sc)
+                .setNegativeButton(fromNext
+                                ? "NOT NOW — LABELS PRINT HERE" : "LATER",
+                        fromNext ? (dg, w) -> askPrintOrSkip() : null);
+        if (undecided == 0) {
+            String dest = firstBin(strays.get(0).item.binLocation);
+            b.setPositiveButton("START TRIP TO " + dest,
+                    (dg, w) -> startSideTrip(dest));
+        }
+        dlg[0] = b.show();
+    }
+
+    /** One stray, one screen: the product, both bins, the recorded-stock
+     *  warning when its home shelf provably holds tagged boxes, and two
+     *  spelled-out choices. */
+    private void decideStray(CheckEntry e) {
+        final String home = firstBin(e.item.binLocation);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(6), dp(18), dp(2));
+
+        ImageView img = new ImageView(this);
+        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        img.setBackgroundColor(C_BG);
+        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(110));
+        il.bottomMargin = dp(8);
+        box.addView(img, il);
+        loadImage(e.item.imageUrl, img);
+
+        TextView meta = new TextView(this);
+        meta.setTextSize(13);
+        meta.setTextColor(C_TEXT);
+        meta.setText("SKU: " + (e.item.sku == null ? "—" : e.item.sku)
+                + "\nBoxes here: " + e.item.unitsTotal
+                + "\nThis shelf: " + batchBin
+                + "   ·   On record: " + home
+                + (e.recordBinTags > 0
+                   ? "\n\n⚠ " + e.recordBinTags + " tagged box(es) are "
+                     + "already recorded at " + home + ". Keeping this "
+                     + "one HERE moves the product's recorded bin — "
+                     + "those boxes' records come along too, even though "
+                     + "they sit at " + home + "."
+                   : ""));
+        box.addView(meta);
+
+        Button move = smallBtn("MOVE IT TO " + home + " — side trip");
+        move.setOnClickListener(vw -> {
+            strayMove.add(e.item.id);
+            ((AlertDialog) move.getTag()).dismiss();
+            showStrayReview(false);
+        });
+        LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        bl.topMargin = dp(10);
+        box.addView(move, bl);
+        TextView moveHint = new TextView(this);
+        moveHint.setText("Labels print with " + home + " on them; you "
+                + "carry the box(es) there and pair them, then you're "
+                + "back here.");
+        moveHint.setTextSize(11);
+        moveHint.setTextColor(C_MUTED);
+        box.addView(moveHint);
+
+        Button keep = smallBtn("KEEP IT HERE — bin becomes " + batchBin);
+        LinearLayout.LayoutParams kl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        kl.topMargin = dp(8);
+        box.addView(keep, kl);
+        TextView keepHint = new TextView(this);
+        keepHint.setText("Updates the recorded bin to " + batchBin
+                + " (RFID system AND Shopify) and its labels print here.");
+        keepHint.setTextSize(11);
+        keepHint.setTextColor(C_MUTED);
+        box.addView(keepHint);
+
+        ScrollView sc = new ScrollView(this);
+        sc.addView(box);
+        AlertDialog d = new AlertDialog.Builder(this)
+                .setTitle(e.item.name())
+                .setView(sc)
+                .setNegativeButton("LATER", (dg, w) ->
+                        showStrayReview(false))
                 .show();
+        move.setTag(d);
+        keep.setOnClickListener(vw -> {
+            d.dismiss();
+            postBinKeep(e);
+        });
+    }
+
+    /** KEEP: the recorded bin becomes this shelf, via the same audited
+     *  bin-update the Scan Station uses. The wrong-bin flag then clears
+     *  itself on the re-check. */
+    private void postBinKeep(CheckEntry e) {
+        final String target = e.item.sku != null ? e.item.sku
+                : e.item.barcode;
+        if (target == null) {
+            status.setText("No SKU or barcode to update the bin with.");
+            return;
+        }
+        status.setText("Setting bin to " + batchBin + "…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("target", target)
+                        .put("bin", batchBin)
+                        .put("changed_by", prefs.getString("device", "C72"));
+                api("POST", "/api/bin-updates", body);
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    strayMove.remove(e.item.id);
+                    e.item.binLocation = batchBin;
+                    e.flags.remove("wrong-bin");
+                    status.setText(e.item.name() + " now lives in "
+                            + batchBin + " ✓");
+                    // Re-check refreshes the flags from the server, then
+                    // the review reopens if strays remain.
+                    reloadBatchAndReview();
+                });
+            } catch (Exception ex) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Bin update failed: " + ex.getMessage());
+                    showStrayReview(false);
+                });
+            }
+        }).start();
     }
 
     private void startSideTrip(String bin) {
@@ -4836,6 +5073,7 @@ public class MainActivity extends Activity {
                     batchBin = newBin;
                     loadScanOrder();
                     loadPriorAsked();
+                    strayMove.clear();
                     bItems.clear();
                     checkEntries.clear();
                     checkFlagText.clear();
@@ -4893,6 +5131,7 @@ public class MainActivity extends Activity {
                     batchBin = backBin;
                     loadScanOrder();
                     loadPriorAsked();
+                    strayMove.clear();
                     bItems.clear();
                     checkEntries.clear();
                     checkFlagText.clear();

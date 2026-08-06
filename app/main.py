@@ -3337,6 +3337,35 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
         saved = entry["item"].get("bin_location")
         for name in parse_bins(saved):
             strays.setdefault(name, []).append(entry["item"].get("sku"))
+    # Boxes ALREADY tagged and recorded at each stray's home bin: the
+    # keep-or-move decision reads differently when the recommended shelf
+    # provably holds stock — keeping the stray here drags those boxes'
+    # records along with the bin update.
+    wrong_skus = {
+        (e["item"].get("sku") or "").strip().upper()
+        for e in flagged
+        if "wrong-bin" in e["flags"] and e["item"].get("sku")
+    }
+    if wrong_skus:
+        tags_of: dict[str, list] = {}
+        for t in session.scalars(
+            select(RfidAssignment).where(
+                func.upper(RfidAssignment.sku).in_(sorted(wrong_skus))
+            )
+        ):
+            tags_of.setdefault((t.sku or "").strip().upper(), []).append(t)
+        for entry in flagged:
+            if "wrong-bin" not in entry["flags"]:
+                continue
+            key = (entry["item"].get("sku") or "").strip().upper()
+            homes = {
+                b.lower()
+                for b in parse_bins(entry["item"].get("bin_location"))
+            }
+            entry["record_bin_tags"] = sum(
+                1 for t in tags_of.get(key, [])
+                if (t.bin_location or "").strip().lower() in homes
+            )
     for entry in flagged:
         entry["item"]["rfid_incompatible"] = (
             (entry["item"].get("sku") or "").strip().upper() in noscan
