@@ -2859,6 +2859,7 @@ public class MainActivity extends Activity {
                     if (scanning) toggleScan();
                     batchId = id;
                     batchBin = bin;
+                    loadScanOrder();
                     bItems.clear();
                     bItems.addAll(loaded);
                     step = "awaiting-verify".equals(st) ? STEP_VERIFY
@@ -2969,27 +2970,92 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    // ------------------------------------------------ local scan ordering ---
+    // Which item was scanned most recently: a plain counter that bumps on
+    // every scan, kept ON THE GUN only (prefs, keyed to the batch) — the
+    // server never hears about it. A resumed bin keeps its order; a
+    // different bin starts fresh.
+    private int scanSeq = 0;
+    private final java.util.HashMap<Integer, Integer> scanOrder =
+            new java.util.HashMap<>();
+
+    private void noteScanned(int itemId) {
+        scanOrder.put(itemId, ++scanSeq);
+        try {
+            JSONObject o = new JSONObject();
+            for (java.util.Map.Entry<Integer, Integer> e
+                    : scanOrder.entrySet()) {
+                o.put(String.valueOf(e.getKey()), e.getValue());
+            }
+            prefs.edit().putString("scan_order_json", new JSONObject()
+                    .put("batch", batchId)
+                    .put("seq", scanSeq)
+                    .put("order", o).toString()).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void loadScanOrder() {
+        scanOrder.clear();
+        scanSeq = 0;
+        try {
+            JSONObject saved = new JSONObject(
+                    prefs.getString("scan_order_json", "{}"));
+            if (saved.optInt("batch", -1) != batchId) return;
+            scanSeq = saved.optInt("seq", 0);
+            JSONObject o = saved.optJSONObject("order");
+            if (o == null) return;
+            java.util.Iterator<String> keys = o.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                scanOrder.put(Integer.parseInt(k), o.getInt(k));
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private int scanSeqOf(BItem b) {
+        Integer s = scanOrder.get(b.id);
+        return s == null ? 0 : s;
+    }
+
     private void refreshBatchList() {
         displayItems.clear();
         if (inBatch() && step == STEP_CHECK) {
             // Only flagged items — a clean bin shows an empty list.
             for (CheckEntry e : checkEntries) displayItems.add(e.item);
         } else if (inBatch() && step == STEP_VERIFY) {
-            // Everything that got tagged, worst first once checked.
+            // Everything that got tagged, most recently scanned first.
             for (BItem b : bItems) {
                 if (b.resolved && (b.paired > 0 || b.qty > 0)) {
                     displayItems.add(b);
                 }
             }
+            java.util.Collections.sort(displayItems,
+                    (a, b2) -> scanSeqOf(b2) - scanSeqOf(a));
         } else {
             // A row holding only a sealed case has qty 0 but is very much
             // "touched", so count cases too.
-            for (BItem b : bItems)
-                if (b.qty > 0 || b.caseCount > 0 || b.paired > 0)
-                    displayItems.add(b);
-            for (BItem b : bItems)
-                if (b.qty == 0 && b.caseCount == 0 && b.paired == 0)
-                    displayItems.add(b);
+            List<BItem> touched = new ArrayList<>();
+            List<BItem> waiting = new ArrayList<>();
+            for (BItem b : bItems) {
+                if (b.qty > 0 || b.caseCount > 0 || b.paired > 0) {
+                    touched.add(b);
+                } else if (b.expected == null || b.expected > 0) {
+                    // Pre-seeded rows with ZERO stock expected are noise —
+                    // they only earn a row once a box is actually scanned.
+                    waiting.add(b);
+                }
+            }
+            // Scanned: most recent first (local counter; ties keep server
+            // order). Not scanned yet: biggest expected stock first.
+            java.util.Collections.sort(touched,
+                    (a, b2) -> scanSeqOf(b2) - scanSeqOf(a));
+            java.util.Collections.sort(waiting, (a, b2) ->
+                    (b2.expected == null ? -1 : b2.expected)
+                    - (a.expected == null ? -1 : a.expected));
+            displayItems.addAll(touched);
+            displayItems.addAll(waiting);
         }
         batchAdapter.notifyDataSetChanged();
     }
@@ -3196,6 +3262,7 @@ public class MainActivity extends Activity {
                     } else {
                         bItems.add(0, item);
                     }
+                    noteScanned(item.id);
                     previewItem = item;
                     if (!item.resolved) {
                         beep(SOUND_ERR);
@@ -3513,6 +3580,8 @@ public class MainActivity extends Activity {
     private void exitBatch(boolean completed) {
         batchId = -1;
         batchBin = null;
+        scanOrder.clear();
+        scanSeq = 0;
         bItems.clear();
         pairActive = null;
         previewItem = null;
@@ -4315,6 +4384,7 @@ public class MainActivity extends Activity {
                     parentBinName = oldBin;
                     batchId = newId;
                     batchBin = newBin;
+                    loadScanOrder();
                     bItems.clear();
                     checkEntries.clear();
                     checkFlagText.clear();
@@ -4370,6 +4440,7 @@ public class MainActivity extends Activity {
                     parentBinName = nextParentBin;
                     batchId = backId;
                     batchBin = backBin;
+                    loadScanOrder();
                     bItems.clear();
                     checkEntries.clear();
                     checkFlagText.clear();
@@ -4440,6 +4511,7 @@ public class MainActivity extends Activity {
                     } else {
                         bItems.add(0, item);
                     }
+                    noteScanned(item.id);
                     previewItem = item;
                     beep(SOUND_OK);
                     status.setText(item.unitsTotal + " unit(s), "
