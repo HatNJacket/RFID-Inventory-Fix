@@ -257,6 +257,44 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
           any(f"(from batch #{bid2})" in (e.get("detail") or "")
               for e in evs if e["type"]=="side-trip-completed"), None)
 
+    # ---- record a bin as batch tagged from the audit ---------------------
+    # F9-9 holds one tag (the lower-case HOME-1 row) and no bin-map
+    # products, so marking it can't disturb the assertions above.
+    r = cl.post("/api/bins/F9-9/mark-tagged", json={"created_by":"Steve"})
+    check("mark-tagged needs confirmation first",
+          r.status_code==409 and "Confirm to record it" in r.text,
+          (r.status_code, r.text[:160]))
+    r = cl.post("/api/bins/NO-TAGS-HERE/mark-tagged",
+                json={"created_by":"Steve","confirmed":True})
+    check("a bin with no tags on file refuses to be marked",
+          r.status_code==422, (r.status_code, r.text[:120]))
+    r = cl.post("/api/bins/F9-9/mark-tagged",
+                json={"created_by":"Steve","confirmed":True})
+    check("confirmed mark-tagged records the bin",
+          r.status_code==201 and r.json()["tags"]==1
+          and r.json()["batch"]["status"]=="done", r.text[:200])
+    bid_m = r.json()["batch"]["id"]
+    items = cl.get(f"/api/batches/{bid_m}").json()["items"]
+    check("its items carry the tags as already-tagged, not as pairs",
+          len(items)==1 and items[0]["tagged_before"]==1
+          and items[0]["paired_count"]==0
+          and items[0]["qty_scanned"]==0, items)
+    chk = cl.post("/api/bins/F9-9/check", json={"epcs":[]}).json()
+    check("the audit now reports the bin as batch tagged",
+          chk["batch_done"] is True and chk["batch_done_id"]==bid_m, chk)
+    r = cl.post("/api/bins/F9-9/mark-tagged",
+                json={"created_by":"Steve","confirmed":True})
+    check("marking an already-done bin is refused",
+          r.status_code==409 and "already counts" in r.text,
+          (r.status_code, r.text[:140]))
+    evs = cl.get("/api/history").json()["events"]
+    marked = [e for e in evs if e["type"]=="bin-marked-tagged"]
+    check("History calls it a marked bin, not a batch walk",
+          len(marked)==1 and "no shelf walk" in marked[0]["detail"]
+          and not any(e["type"].startswith("batch-")
+                      and f"#{bid_m}" in (e.get("detail") or "")
+                      for e in evs), marked)
+
 print()
 print("FAILED: "+", ".join(fails) if fails else "ALL CHECKS PASSED")
 sys.exit(1 if fails else 0)

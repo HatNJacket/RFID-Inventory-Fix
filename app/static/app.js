@@ -230,6 +230,7 @@ const EVENT_META = {
   "side-trip-verified": ["Verified Side Trip", "#0e7a8a"],
   "side-trip-completed": ["Completed Side Trip", "#0e7a8a"],
   "side-trip-abandoned": ["Abandoned Side Trip", "#6d7175"],
+  "bin-marked-tagged": ["Bin Marked Tagged", "#8a6116"],
   "already-tagged-set": ["Already-tagged Count", "#6f42c1"],
   "review-opened": ["Opened Review", "#8a6116"],
   "review-resolved": ["Resolved Review", "#29845a"],
@@ -5101,7 +5102,11 @@ async function loadQueue() {
       const canReprint = ["done", "error", "canceled"].includes(j.status);
       tr.innerHTML = `
         <td class="mono">#${j.id}</td>
-        <td>${escapeHtml(j.label_name || j.product_title || "")}${
+        <td>${
+          j.sku
+            ? `<span class="prodopen queue-prod">${escapeHtml(j.label_name || j.product_title || "")}</span>`
+            : escapeHtml(j.label_name || j.product_title || "")
+        }${
           j.variant_title ? ` <span class="inventory__variant">(${escapeHtml(j.variant_title)})</span>` : ""
         }</td>
         <td class="mono">${
@@ -5119,12 +5124,13 @@ async function loadQueue() {
         <td>${canCancel ? '<button class="recent__unassign" data-act="cancel">cancel</button>' : ""}${
           canReprint ? '<button class="recent__unassign" data-act="reprint">reprint</button>' : ""
         }</td>`;
-      const skuLink = tr.querySelector(".queue-sku");
-      if (skuLink)
-        skuLink.addEventListener("click", (ev) => {
+      // SKU and product name both open the product's own window.
+      tr.querySelectorAll(".queue-sku, .queue-prod").forEach((a) =>
+        a.addEventListener("click", (ev) => {
           ev.preventDefault();
           openProductHistory(j.sku);
-        });
+        })
+      );
       const cancelBtn = tr.querySelector('[data-act="cancel"]');
       if (cancelBtn)
         cancelBtn.addEventListener("click", async () => {
@@ -5235,7 +5241,11 @@ function renderReview() {
                 : ""
             }
             <div>
-              <div><b>${escapeHtml(t.product_title || "")}</b>${
+              <div>${
+                t.sku
+                  ? `<b class="prodopen rv-prod" title="Open this product — label editor, RFID flag, full history">${escapeHtml(t.product_title || "")}</b>`
+                  : `<b>${escapeHtml(t.product_title || "")}</b>`
+              }${
                 t.sku
                   ? ` <span class="mono recent__meta">· ${escapeHtml(t.sku)}</span>`
                   : ""
@@ -5255,6 +5265,14 @@ function renderReview() {
       else reviewOpenIds.add(t.id);
       renderReview();
     });
+    // The product opens ONLY from the expanded detail — never from the
+    // collapsed row, where the click belongs to expand/resolve/dismiss.
+    const rvProd = li.querySelector(".rv-detail .rv-prod");
+    if (rvProd)
+      rvProd.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        openProductHistory(t.sku);
+      });
     const act = async (dismissed) => {
       const operator = operatorEl.value;
       if (!operator) {
@@ -5411,6 +5429,9 @@ function renderAuditBins() {
 // The Check-step story without a batch: per product, what Shopify expects,
 // what's tagged here, what the sweep actually heard — plus strays and
 // unknown tags. Display only.
+let binAudit = null; // { rep, cap } — kept so toggles re-render for free
+let binAuditShowUntagged = false;
+
 document.getElementById("binaudit-run").addEventListener("click", async () => {
   const binEl = document.getElementById("binaudit-bin");
   const out = document.getElementById("binaudit-report");
@@ -5427,16 +5448,24 @@ document.getElementById("binaudit-run").addEventListener("click", async () => {
       `/api/bins/${encodeURIComponent(bin)}/check`,
       { epcs: cap.epcs }
     );
-    renderBinAudit(out, rep, cap);
+    binAudit = { rep, cap };
+    binAuditShowUntagged = false;
+    renderBinAudit();
   } catch (err) {
     out.innerHTML = `<p class="result result--err">${escapeHtml(err.message)}</p>`;
   }
 });
 
-function renderBinAudit(out, rep, cap) {
-  const rows = rep.items
+function renderBinAudit() {
+  const out = document.getElementById("binaudit-report");
+  if (!binAudit) return;
+  const { rep, cap } = binAudit;
+
+  const scored = rep.items
+    // Nothing expected, nothing tagged, nothing heard: not part of this
+    // bin's story at all.
+    .filter((r) => (r.expected_qty || 0) > 0 || r.tags_here > 0 || r.detected > 0)
     .map((r) => {
-      const exp = r.expected_qty;
       const flags = [];
       if (r.rfid_incompatible) {
         flags.push(["⊘ won't scan on box", "chip--na"]);
@@ -5446,40 +5475,61 @@ function renderBinAudit(out, rep, cap) {
           "chip--warn",
         ]);
       }
-      if (exp != null && r.units_here < exp) {
-        flags.push([`−${exp - r.units_here} vs Shopify`, "chip--bad"]);
-      } else if (exp != null && exp >= 0 && r.units_here > exp) {
-        flags.push([`+${r.units_here - exp} vs Shopify`, "chip--warn"]);
-      }
-      return { r, flags };
+      // Untagged: Shopify expects stock here but the RFID system holds
+      // nothing for it. On a part-tagged shelf that's most of the list,
+      // so it sits behind a toggle, below everything that IS tagged.
+      const untagged = r.tags_here === 0 && r.detected === 0;
+      return { r, flags, untagged };
     })
-    // Nothing expected, nothing tagged, nothing heard: not part of this
-    // bin's story.
-    .filter(
-      ({ r }) =>
-        (r.expected_qty || 0) > 0 || r.tags_here > 0 || r.detected > 0
-    )
     .sort(
       (a, b) =>
+        a.untagged - b.untagged ||
         b.flags.length - a.flags.length ||
         String(a.r.product_title).localeCompare(String(b.r.product_title))
     );
+  const untaggedCount = scored.filter((s) => s.untagged).length;
+  const shown = binAuditShowUntagged
+    ? scored
+    : scored.filter((s) => !s.untagged);
 
-  const cells = rows
-    .map(({ r, flags }) => {
+  const cells = shown
+    .map(({ r, flags, untagged }) => {
       const tagsNote = (units, tags) =>
-        units !== tags ? ` <span class="bexp--note">(${tags} tag${tags === 1 ? "" : "s"})</span>` : "";
-      return `<tr>
+        units !== tags
+          ? ` <span class="bexp--note">(${tags} tag${tags === 1 ? "" : "s"})</span>`
+          : "";
+      // Expected reads exactly like the batch-tagging verify table:
+      // Shopify's number with the difference in brackets, and the
+      // increase-only on-hand write offered when the shelf holds more
+      // than Shopify knows about.
+      let expCell = "—";
+      if (r.expected_qty != null) {
+        const diff = r.units_here - r.expected_qty;
+        expCell =
+          `${r.expected_qty}` +
+          (diff
+            ? ` <span class="bexp--off">(${diff > 0 ? "+" : "−"}${Math.abs(diff)})</span>`
+            : "");
+        if (diff > 0 && r.sku) {
+          expCell += `<div><button class="reset binaudit-fix" type="button"
+            data-sku="${escapeHtml(r.sku)}" data-qty="${r.units_here}"
+            data-exp="${r.expected_qty}"
+            title="Write the tagged count to Shopify on-hand — confirmed, logged, undoable from History">Set to ${r.units_here}</button></div>`;
+        }
+      }
+      return `<tr${untagged ? ' class="binaudit-untagged"' : ""}>
         <td>${
           r.image_url
             ? `<img class="bvx__img" style="width:40px;height:40px" src="${escapeHtml(r.image_url)}" alt="">`
             : ""
         }</td>
-        <td>${escapeHtml(r.product_title || "(unknown)")}${
-          r.variant_title ? ` (${escapeHtml(r.variant_title)})` : ""
-        }</td>
+        <td>${
+          r.sku
+            ? `<span class="prodopen" data-sku="${escapeHtml(r.sku)}" title="Open this product — label editor, RFID flag, full history">${escapeHtml(r.product_title || "(unknown)")}</span>`
+            : escapeHtml(r.product_title || "(unknown)")
+        }${r.variant_title ? ` (${escapeHtml(r.variant_title)})` : ""}</td>
         <td class="mono"><span class="skulink" data-sku="${escapeHtml(r.sku || "")}" title="Open this product — label editor, RFID flag, full history">${escapeHtml(r.sku || "—")}</span></td>
-        <td class="num">${r.expected_qty ?? "—"}</td>
+        <td class="num">${expCell}</td>
         <td class="num">${r.units_here}${tagsNote(r.units_here, r.tags_here)}</td>
         <td class="num">${r.detected_units}${tagsNote(r.detected_units, r.detected)}</td>
         <td>${
@@ -5499,7 +5549,11 @@ function renderBinAudit(out, rep, cap) {
   const strays = rep.foreign
     .map(
       (f) =>
-        `<li>${escapeHtml(f.product_title || "?")} <span class="mono">${escapeHtml(f.sku || "")}</span>${
+        `<li>${
+          f.sku
+            ? `<span class="prodopen" data-sku="${escapeHtml(f.sku)}">${escapeHtml(f.product_title || "?")}</span>`
+            : escapeHtml(f.product_title || "?")
+        } <span class="mono">${escapeHtml(f.sku || "")}</span>${
           f.bin_location ? " · recorded at " + escapeHtml(f.bin_location) : ""
         } <span class="mono">${escapeHtml(f.epc)}</span></li>`
     )
@@ -5513,24 +5567,128 @@ function renderBinAudit(out, rep, cap) {
       cap.device || "the C72"
     )} — ${cap.epc_count} tag(s), ${escapeHtml(fmtWhen(cap.created_at))} —
     checked against ${escapeHtml(rep.bin)}.</p>
+    ${
+      rep.batch_done
+        ? ""
+        : `<p class="result result--warn-soft">This bin has no completed batch —
+           it doesn't count as tagged. If the shelf really is fully tagged (a
+           batch abandoned after every tag was paired), you can record it:
+           <button class="reset" id="binaudit-marktagged" type="button"
+             title="Records the bin as batch tagged from the tags already on file — tags nothing, prints nothing, writes nothing to Shopify">Record ${escapeHtml(rep.bin)} as batch tagged…</button></p>`
+    }
     <div class="inventory__scroll"><table class="inventory__table">
       <thead><tr><th></th><th>Product</th><th>SKU</th>
-        <th class="num" title="Shopify on-hand for this bin">Expected</th>
+        <th class="num" title="Shopify on-hand for this bin; brackets show tagged-vs-expected">Expected</th>
         <th class="num" title="Units whose tag records say this bin">Tagged here</th>
         <th class="num" title="Units whose tags answered this sweep">Seen</th>
         <th></th></tr></thead>
-      <tbody>${cells || `<tr><td colspan="7">Nothing expected or tagged in ${escapeHtml(rep.bin)}.</td></tr>`}</tbody>
+      <tbody>${
+        cells ||
+        `<tr><td colspan="7">${
+          untaggedCount
+            ? "Nothing on this shelf is tagged yet."
+            : `Nothing expected or tagged in ${escapeHtml(rep.bin)}.`
+        }</td></tr>`
+      }</tbody>
     </table></div>
+    ${
+      untaggedCount
+        ? `<div class="linkbox__actions" style="margin-top:8px">
+             <button class="reset" id="binaudit-toggle" type="button">${
+               binAuditShowUntagged ? "Hide" : "Show"
+             } ${untaggedCount} product(s) with no tags here</button>
+           </div>`
+        : ""
+    }
     ${
       strays || unknowns
         ? `<div class="recent__head" style="margin-top:14px"><h2>Also heard on this shelf (${rep.foreign.length + rep.unknown_epcs.length})</h2></div>
            <ul class="recent__list">${strays}${unknowns}</ul>`
         : `<p class="result">No stray or unknown tags in the sweep.</p>`
     }`;
-  out.querySelectorAll(".skulink").forEach((s) =>
-    s.addEventListener("click", () => openProductHistory(s.dataset.sku))
-  );
 }
+
+// One delegated handler for the whole panel — the report re-renders on
+// every toggle and every write, so per-element listeners would go stale.
+document
+  .getElementById("binaudit-report")
+  .addEventListener("click", async (e) => {
+    const open = e.target.closest(".prodopen, .skulink");
+    if (open && open.dataset.sku) {
+      openProductHistory(open.dataset.sku);
+      return;
+    }
+    if (e.target.closest("#binaudit-toggle")) {
+      binAuditShowUntagged = !binAuditShowUntagged;
+      renderBinAudit();
+      return;
+    }
+    // Increase-only on-hand write, same contract as the verify table's
+    // button: confirmed, logged, undoable from History.
+    const fix = e.target.closest(".binaudit-fix");
+    if (fix) {
+      const sku = fix.dataset.sku;
+      const qty = parseInt(fix.dataset.qty, 10);
+      if (
+        !confirm(
+          `Set Shopify ON-HAND for ${sku} to ${qty}?\n\n` +
+            `Shopify expects ${fix.dataset.exp}; this bin holds ${qty} ` +
+            `tagged unit(s).\n\nThis WRITES the number to Shopify. Undo ` +
+            `stays available in History.`
+        )
+      )
+        return;
+      fix.disabled = true;
+      try {
+        const res = await postJson("/api/onhand-updates", {
+          sku,
+          new_qty: qty,
+          changed_by: operatorEl.value || null,
+          confirmed: true,
+        });
+        alert(res.message);
+        document.getElementById("binaudit-run").click();
+      } catch (err) {
+        alert(err.message);
+        fix.disabled = false;
+      }
+      return;
+    }
+    const mark = e.target.closest("#binaudit-marktagged");
+    if (mark && binAudit) {
+      const bin = binAudit.rep.bin;
+      mark.disabled = true;
+      try {
+        // Unconfirmed first: the server answers 409 with the exact
+        // consequence text, which becomes the confirmation.
+        await postJson(`/api/bins/${encodeURIComponent(bin)}/mark-tagged`, {
+          created_by: operatorEl.value || null,
+        });
+      } catch (err) {
+        if (!/Confirm to record it/.test(err.message)) {
+          alert(err.message);
+          mark.disabled = false;
+          return;
+        }
+        if (!confirm(err.message)) {
+          mark.disabled = false;
+          return;
+        }
+        try {
+          const res = await postJson(
+            `/api/bins/${encodeURIComponent(bin)}/mark-tagged`,
+            { created_by: operatorEl.value || null, confirmed: true }
+          );
+          alert(res.message);
+          document.getElementById("binaudit-run").click();
+          loadAuditBins();
+        } catch (err2) {
+          alert(err2.message);
+          mark.disabled = false;
+        }
+      }
+    }
+  });
 
 async function loadAuditBins() {
   const list = document.getElementById("audit-bins");
@@ -5691,7 +5849,11 @@ function renderHistory() {
           ? `<a href="#" class="hist-sku" data-sku="${escapeHtml(e.sku)}">${escapeHtml(e.sku)}</a>`
           : "—"
       }</td>
-      <td>${escapeHtml(e.title || "—")}</td>
+      <td>${
+        e.sku && e.title
+          ? `<span class="prodopen hist-prod" data-sku="${escapeHtml(e.sku)}">${escapeHtml(e.title)}</span>`
+          : escapeHtml(e.title || "—")
+      }</td>
       <td class="recent__meta">${escapeHtml(e.detail || "")}</td>
       <td>${
         e.undo
@@ -5704,7 +5866,7 @@ function renderHistory() {
   body.querySelectorAll(".hist-undo").forEach((btn) => {
     btn.addEventListener("click", () => undoHistoryEvent(rows[+btn.dataset.idx], btn));
   });
-  body.querySelectorAll(".hist-sku").forEach((a) => {
+  body.querySelectorAll(".hist-sku, .hist-prod").forEach((a) => {
     a.addEventListener("click", (ev) => {
       ev.preventDefault();
       openProductHistory(a.dataset.sku);

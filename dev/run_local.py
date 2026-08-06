@@ -146,6 +146,9 @@ with Session(get_engine()) as s:
     s.add_all([
         nm,
         m("OPTO-LPRO", "Optolong L-Pro 2in (won't-scan test)", "T1-1", 2),
+        # Expected here, nothing tagged: the row that hides behind the
+        # audit's untagged toggle.
+        m("PROD-Z", "Product Z (never tagged)", "BIN-T", 3),
         m("PROD-A", "Product A", "BIN-T", 6),
         m("PROD-B", "Product B", "BIN-T", 5),
         m("PROD-C", "Product C", "BIN-T", 4),

@@ -2475,6 +2475,15 @@ def bin_check(
                     "product_title": a.product_title,
                     "bin_location": a.bin_location,
                 })
+    # Does this shelf already count as batch tagged? The audit offers to
+    # record it when it doesn't (the abandoned-after-pairing case).
+    done_batch = session.scalars(
+        select(Batch).where(
+            func.lower(Batch.bin_name) == bin_key,
+            Batch.status == "done",
+            Batch.parent_batch_id.is_(None),
+        )
+    ).first()
     return {
         "bin": bin_name.strip(),
         "swept": len(swept),
@@ -2482,6 +2491,129 @@ def bin_check(
         "items": report,
         "foreign": foreign,
         "unknown_epcs": unknown,
+        "batch_done": done_batch is not None,
+        "batch_done_id": done_batch.id if done_batch else None,
+    }
+
+
+class MarkTaggedIn(BaseModel):
+    created_by: str | None = Field(default=None, max_length=100)
+    confirmed: bool = False
+
+
+@app.post(
+    "/api/bins/{bin_name}/mark-tagged",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def mark_bin_tagged(
+    bin_name: str,
+    payload: MarkTaggedIn,
+    session: Session = Depends(get_session),
+):
+    """Record a shelf as batch tagged WITHOUT walking a batch — the rescue
+    for a batch abandoned after every tag was already paired, where the
+    work is done but no completed batch says so.
+
+    Deliberately narrow: it refuses when the bin already counts as tagged,
+    and when no tags are recorded there at all (nothing to justify the
+    claim). The batch it writes carries the tags as `tagged_before` — they
+    were paired in an earlier session, not by this record — and is marked
+    as an audit completion so History never passes it off as a shelf walk.
+    """
+    name = bin_name.strip()
+    key = name.lower()
+    if not name:
+        raise HTTPException(422, "Which bin?")
+    existing = session.scalars(
+        select(Batch).where(
+            func.lower(Batch.bin_name) == key,
+            Batch.status == "done",
+            Batch.parent_batch_id.is_(None),
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(
+            409,
+            f"{name} already counts as batch tagged (batch #{existing.id}).",
+        )
+    tags = session.scalars(
+        select(RfidAssignment).where(
+            func.lower(RfidAssignment.bin_location) == key
+        )
+    ).all()
+    if not tags:
+        raise HTTPException(
+            422,
+            f"No RFID tags are recorded in {name}, so there's nothing to "
+            f"mark as tagged. Tag the shelf with a batch instead.",
+        )
+    by_sku: dict[str, list[RfidAssignment]] = {}
+    for t in tags:
+        by_sku.setdefault((t.sku or "").strip().upper(), []).append(t)
+    if not payload.confirmed:
+        raise HTTPException(
+            409,
+            f"Mark {name} as batch tagged? {len(tags)} tag(s) across "
+            f"{len(by_sku)} product(s) are recorded there. This records "
+            f"the shelf as done — it does NOT tag anything, print "
+            f"anything, or touch Shopify. Confirm to record it.",
+        )
+
+    # Shopify's expected count per SKU, so the recorded batch reads like
+    # any other in History and Review.
+    expected: dict[str, BinMapEntry] = {}
+    for e in session.scalars(
+        select(BinMapEntry).where(func.lower(BinMapEntry.bin) == key)
+    ):
+        if e.sku:
+            expected.setdefault(e.sku.strip().upper(), e)
+
+    now = datetime.now(timezone.utc)
+    batch = Batch(
+        bin_name=name,
+        status="done",
+        created_by=payload.created_by,
+        completed_at=now,
+        verified_at=now,
+        # No spare column for provenance, and ui_step is dead data on a
+        # closed batch — so it carries the marker History reads.
+        ui_step="audit-complete",
+    )
+    session.add(batch)
+    session.flush()
+    for key_sku, rows in sorted(by_sku.items()):
+        newest = max(rows, key=lambda t: t.id)
+        ent = expected.get(key_sku)
+        session.add(BatchItem(
+            batch_id=batch.id,
+            scanned_code=(newest.barcode or newest.sku or "")[:64],
+            resolved=True,
+            shopify_variant_id=newest.shopify_variant_id,
+            shopify_product_id=newest.shopify_product_id,
+            product_title=newest.product_title,
+            variant_title=newest.variant_title,
+            sku=newest.sku,
+            barcode=newest.barcode,
+            bin_location=name,
+            image_url=ent.image_url if ent else None,
+            qty_scanned=0,
+            paired_count=0,
+            # Tagged in an earlier session — units on the shelf, but this
+            # record neither scanned nor paired them.
+            tagged_before=sum((t.case_units or 1) for t in rows),
+            expected_qty=ent.qty if ent else None,
+        ))
+    session.commit()
+    return {
+        "batch": batch.as_dict(),
+        "products": len(by_sku),
+        "tags": len(tags),
+        "message": (
+            f"{name} recorded as batch tagged ✓ — {len(tags)} tag(s) "
+            f"across {len(by_sku)} product(s), from the tags already on "
+            f"file. Nothing was tagged, printed or written to Shopify."
+        ),
     }
 
 
@@ -5858,6 +5990,22 @@ def history(
             {"kind": "batch-ties", "batch_id": b.id, "ties": tie_count}
             if tie_count else None
         )
+        # A bin recorded as tagged from an audit never had a shelf walk:
+        # one honest event, not the started/verified/completed triple
+        # (which would all carry the same timestamp anyway).
+        if b.ui_step == "audit-complete":
+            events.append({
+                "at": iso(b.completed_at or b.created_at),
+                "type": "bin-marked-tagged",
+                "worker": b.created_by,
+                "sku": None,
+                "title": f"Bin {b.bin_name}",
+                "detail": f"Recorded as batch tagged from an audit sweep "
+                          f"(#{b.id}) — from tags already on file; no "
+                          f"shelf walk, nothing printed or written",
+                "undo": undo,
+            })
+            continue
         # A side trip is a few boxes carried to their real shelf, not a
         # check of that shelf — its events must never read as if the bin
         # was batch-verified.

@@ -1421,6 +1421,23 @@ tr.bvx-detail td { background: var(--card-2); padding: 12px 14px; }
   background: var(--warn-bg, #fff8e1);
 }
 .binaudit-chip.chip--na { color: var(--ink-dim); background: var(--card-2); }
+/* Products Shopify expects here but nothing is tagged for — shown only
+   behind the toggle, and dimmed so the tagged rows stay the subject. */
+tr.binaudit-untagged td { opacity: 0.72; }
+.result--warn-soft {
+  color: var(--warn-ink, #8a6116);
+  background: var(--warn-bg, #fff8e1);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+/* Any product name that opens the product window. Same affordance as
+   .skulink so "clickable product" reads the same everywhere. */
+.prodopen {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.prodopen:hover { color: var(--accent); }
 
 /* fix-label-&-reprint dialog: stacked line editors + fit warning */
 #breprint-overlay .step__label { display: block; margin: 10px 0 4px; }
