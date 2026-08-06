@@ -530,9 +530,11 @@ query ItemLoc($search: String!) {
 }
 """
 
+# 2026-07 requires @idempotent on this mutation: a unique key per attempt
+# means a retried/duplicated request can't apply the same change twice.
 _SET_ON_HAND_MUTATION = """
-mutation SetOnHand($input: InventorySetOnHandQuantitiesInput!) {
-  inventorySetOnHandQuantities(input: $input) {
+mutation SetOnHand($input: InventorySetOnHandQuantitiesInput!, $key: String!) {
+  inventorySetOnHandQuantities(input: $input) @idempotent(key: $key) {
     userErrors { field message }
   }
 }
@@ -570,15 +572,19 @@ def set_on_hand(sku: str, qty: int) -> int:
     # it): the write only lands if on-hand still holds the value we just
     # read — a sale or another correction slipping in between makes this
     # fail loudly instead of silently clobbering it.
-    result = query_shopify(_SET_ON_HAND_MUTATION, {"input": {
-        "reason": "correction",
-        "setQuantities": [{
-            "inventoryItemId": item["id"],
-            "locationId": levels[0]["location"]["id"],
-            "quantity": int(qty),
-            "changeFromQuantity": before,
-        }],
-    }})
+    import uuid
+    result = query_shopify(_SET_ON_HAND_MUTATION, {
+        "key": str(uuid.uuid4()),
+        "input": {
+            "reason": "correction",
+            "setQuantities": [{
+                "inventoryItemId": item["id"],
+                "locationId": levels[0]["location"]["id"],
+                "quantity": int(qty),
+                "changeFromQuantity": before,
+            }],
+        },
+    })
     errors = result["inventorySetOnHandQuantities"]["userErrors"]
     if errors:
         raise RuntimeError("; ".join(e["message"] for e in errors))
