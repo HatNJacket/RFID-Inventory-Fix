@@ -370,6 +370,21 @@ public class MainActivity extends Activity {
         btInput.setInputType(InputType.TYPE_CLASS_TEXT
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         btInput.setShowSoftInputOnFocus(false);
+        // The flag above stops the BT scanner's keystrokes summoning the
+        // keyboard on every scan — but it also made TAPPING the field do
+        // nothing, so there was no way to type a SKU by hand (bit Nick on
+        // the LOCATE tab). A deliberate tap now pulls the keyboard up;
+        // it tucks away again after each entry.
+        btInput.setOnClickListener(v -> {
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager)
+                            getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.showSoftInput(btInput,
+                        android.view.inputmethod.InputMethodManager
+                                .SHOW_IMPLICIT);
+            }
+        });
         btInput.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int a, int b, int c) {
@@ -386,6 +401,7 @@ public class MainActivity extends Activity {
                     String code = text.replace("\n", "").replace("\r", "")
                             .trim();
                     btInput.setText("");
+                    hideSoftKeyboard();
                     if (!code.isEmpty()) onScanInput(code);
                 }
             }
@@ -393,6 +409,7 @@ public class MainActivity extends Activity {
         btInput.setOnEditorActionListener((v, actionId, ev) -> {
             String code = btInput.getText().toString().trim();
             btInput.setText("");
+            hideSoftKeyboard();
             if (!code.isEmpty()) onScanInput(code);
             return true;
         });
@@ -2295,6 +2312,18 @@ public class MainActivity extends Activity {
         } else {
             status.setText("Scanned " + code + " — switch to BATCH, "
                     + "STATION or FIND BIN to use barcodes.");
+        }
+    }
+
+    /** Tuck the soft keyboard away (no-op when it isn't showing) — the
+     *  scanner path never shows it, so this only ever closes a keyboard
+     *  the operator opened by tapping the field. */
+    private void hideSoftKeyboard() {
+        android.view.inputmethod.InputMethodManager imm =
+                (android.view.inputmethod.InputMethodManager)
+                        getSystemService(INPUT_METHOD_SERVICE);
+        if (imm != null && btInput != null) {
+            imm.hideSoftInputFromWindow(btInput.getWindowToken(), 0);
         }
     }
 
