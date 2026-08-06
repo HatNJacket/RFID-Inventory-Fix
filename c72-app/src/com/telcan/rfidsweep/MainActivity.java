@@ -1196,7 +1196,7 @@ public class MainActivity extends Activity {
         editPriorBtn = smallBtn("ALREADY TAGGED…");
         editPriorBtn.setOnClickListener(v -> {
             if (editEntry != null) {
-                askPriorCount(editEntry.item, false);
+                showAlreadyTaggedDialog(editEntry.item, false);
             }
         });
         mid.addView(editPriorBtn);
@@ -3235,65 +3235,139 @@ public class MainActivity extends Activity {
     }
 
     /** First scan of a product that already has tags in the system (a side
-     *  trip, an earlier session): ask how many boxes here are already
-     *  stickered, so those queue no second label. Asked once per product
-     *  per batch, collect step only. */
+     *  trip, an earlier session): one screen asks how many boxes here are
+     *  already stickered, so those queue no second label. Asked once per
+     *  product per batch, collect step only. */
     private void maybePriorTagAlert(BItem it, boolean offerUncount) {
         if (!inBatch() || step != STEP_COLLECT) return;
         if (it == null || !it.resolved || it.skipped) return;
         if (it.priorTags <= 0 || it.taggedBefore > 0) return;
         if (priorAsked.contains(it.id)) return;
         notePriorAsked(it.id);
-        final int n = it.priorTags;
         beep(SOUND_OTHER);
-        new AlertDialog.Builder(this)
-                .setTitle("Already tagged?")
-                .setMessage(it.name() + "\n\n" + n + " RFID tag(s) for "
-                        + "this product are already in the system — tagged "
-                        + "earlier (a side trip or a previous session).\n\n"
-                        + "A box that already wears a sticker must NOT get "
-                        + "a second label. How many boxes on this shelf "
-                        + "are already stickered?")
-                .setCancelable(false)
-                .setPositiveButton("ALL " + n, (dg, w) ->
-                        putTaggedBefore(it, n, offerUncount))
-                .setNeutralButton("SOME — PICK…", (dg, w) ->
-                        askPriorCount(it, offerUncount))
-                .setNegativeButton("NONE — ALL NEW", (dg, w) ->
-                        putTaggedBefore(it, 0, false))
-                .show();
+        showAlreadyTaggedDialog(it, offerUncount);
     }
 
-    private void askPriorCount(BItem it, boolean offerUncount) {
-        final android.widget.EditText input =
-                new android.widget.EditText(this);
-        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        input.setText(String.valueOf(
-                it.taggedBefore > 0 ? it.taggedBefore : it.priorTags));
-        input.selectAll();
+    /** The whole already-tagged answer on ONE screen (design settled with
+     *  Nick 2026-08-06): a −/+ stepper for the stickered-box count, a live
+     *  consequence line, and — when a scan triggered this — a checkbox
+     *  that un-counts the box in hand. Count 0 gets a heads-up first. */
+    private void showAlreadyTaggedDialog(BItem it, boolean offerUncount) {
+        final int n = it.priorTags > 0 ? it.priorTags : it.taggedBefore;
+        final int[] count = {
+                it.taggedBefore > 0 ? it.taggedBefore : Math.max(1, n)
+        };
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(6), dp(18), dp(2));
+
+        TextView msg = new TextView(this);
+        msg.setTextSize(13);
+        msg.setTextColor(C_TEXT);
+        msg.setText(it.name() + " was RFID-tagged before this batch (side "
+                + "trip or earlier session) — " + n + " tag(s) in the "
+                + "system. Stickered boxes must not get a second label.\n\n"
+                + "Count the boxes on this shelf that already wear a "
+                + "sticker:");
+        box.addView(msg);
+
+        LinearLayout steprow = new LinearLayout(this);
+        steprow.setGravity(Gravity.CENTER);
+        steprow.setPadding(0, dp(10), 0, dp(4));
+        Button minus = smallBtn("−");
+        TextView num = new TextView(this);
+        num.setTextSize(30);
+        num.setTypeface(null, Typeface.BOLD);
+        num.setTextColor(C_TEXT);
+        num.setGravity(Gravity.CENTER);
+        num.setMinWidth(dp(64));
+        Button plus = smallBtn("+");
+        steprow.addView(minus, new LinearLayout.LayoutParams(dp(56),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        steprow.addView(num);
+        steprow.addView(plus, new LinearLayout.LayoutParams(dp(56),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        box.addView(steprow);
+
+        TextView consequence = new TextView(this);
+        consequence.setTextSize(12);
+        consequence.setTextColor(C_BLUE);
+        consequence.setGravity(Gravity.CENTER);
+        consequence.setPadding(dp(8), dp(4), dp(8), dp(8));
+        box.addView(consequence);
+
+        final android.widget.CheckBox held =
+                new android.widget.CheckBox(this);
+        held.setText("The box I just scanned is one of the stickered ones "
+                + "— don't count its scan again");
+        held.setTextSize(12);
+        held.setTextColor(C_TEXT);
+        held.setChecked(true);
+        held.setVisibility(offerUncount ? View.VISIBLE : View.GONE);
+        box.addView(held);
+
+        Runnable refresh = () -> {
+            num.setText(String.valueOf(count[0]));
+            consequence.setText(count[0] > 0
+                    ? "→ " + count[0] + " box(es) counted as already done "
+                      + "· labels print only for the others"
+                    : "→ no stickered boxes here — every box scanned "
+                      + "gets a label");
+            held.setEnabled(count[0] > 0);
+            if (count[0] == 0) held.setChecked(false);
+        };
+        minus.setOnClickListener(v2 -> {
+            if (count[0] > 0) count[0]--;
+            refresh.run();
+        });
+        plus.setOnClickListener(v2 -> {
+            if (count[0] < 500) count[0]++;
+            refresh.run();
+        });
+        refresh.run();
+
+        ScrollView sc = new ScrollView(this);
+        sc.addView(box);
         new AlertDialog.Builder(this)
-                .setTitle("Boxes already stickered")
-                .setMessage(it.name() + "\n\nCount the boxes on this shelf "
-                        + "that already wear an RFID sticker:")
-                .setView(input)
+                .setTitle(n + " box(es) may already be stickered")
+                .setView(sc)
                 .setCancelable(false)
-                .setPositiveButton("SET", (dg, w) -> {
-                    int c;
-                    try {
-                        c = Integer.parseInt(input.getText()
-                                .toString().trim());
-                    } catch (Exception e) {
-                        c = 0;
+                .setPositiveButton("CONFIRM", (dg, w) -> {
+                    if (count[0] == 0) {
+                        confirmNoneStickered(it, offerUncount);
+                    } else {
+                        putTaggedBefore(it, count[0],
+                                offerUncount && held.isChecked());
                     }
-                    c = Math.max(0, Math.min(500, c));
-                    putTaggedBefore(it, c, offerUncount && c > 0);
                 })
-                .setNegativeButton("CANCEL", (dg, w) ->
-                        priorAsked.remove(it.id))
+                .setNegativeButton("CANCEL", (dg, w) -> {
+                    // Re-asks on the next scan rather than silently
+                    // printing doubles.
+                    priorAsked.remove(it.id);
+                    btInput.requestFocus();
+                })
                 .show();
     }
 
-    private void putTaggedBefore(BItem it, int count, boolean offerUncount) {
+    /** Count 0 is a real answer with a quiet consequence — say it before
+     *  saving, with a way back. */
+    private void confirmNoneStickered(BItem it, boolean offerUncount) {
+        new AlertDialog.Builder(this)
+                .setTitle("No stickered boxes here")
+                .setMessage(it.priorTags + " tag(s) stay in the system "
+                        + "pointing at stock somewhere else. If you find a "
+                        + "stickered box on this shelf later, use ALREADY "
+                        + "TAGGED… in the item editor.")
+                .setCancelable(false)
+                .setPositiveButton("OK — SAVE", (dg, w) ->
+                        putTaggedBefore(it, 0, false))
+                .setNegativeButton("BACK", (dg, w) ->
+                        showAlreadyTaggedDialog(it, offerUncount))
+                .show();
+    }
+
+    private void putTaggedBefore(BItem it, int count, boolean uncountHeld) {
         status.setText("Saving already-tagged count…");
         new Thread(() -> {
             try {
@@ -3310,8 +3384,13 @@ public class MainActivity extends Activity {
                     status.setText(msg);
                     updateBatchCard();
                     refreshBatchList();
-                    if (offerUncount && count > 0) askHeldBoxUncount(fresh);
-                    else btInput.requestFocus();
+                    // The dialog's checkbox already answered the "box in
+                    // your hand" question — act on it, don't re-ask.
+                    if (uncountHeld && fresh.qty > 0) {
+                        postItemQty(fresh, fresh.qty - 1);
+                    } else {
+                        btInput.requestFocus();
+                    }
                 });
             } catch (Exception e) {
                 ui.post(() -> {
@@ -3325,24 +3404,6 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
-    }
-
-    /** The box that triggered the question was counted by its scan — if
-     *  it's one of the stickered ones it's now counted twice. One tap
-     *  fixes it. */
-    private void askHeldBoxUncount(BItem it) {
-        new AlertDialog.Builder(this)
-                .setTitle("The box in your hand")
-                .setMessage("The box you just scanned — does it already "
-                        + "wear an RFID sticker?\n\nIf yes it's covered by "
-                        + "the already-stickered count, so its scan "
-                        + "shouldn't also be counted.")
-                .setCancelable(false)
-                .setPositiveButton("YES — UNCOUNT IT", (dg, w) ->
-                        postItemQty(it, Math.max(0, it.qty - 1)))
-                .setNegativeButton("NO — KEEP THE COUNT", (dg, w) ->
-                        btInput.requestFocus())
-                .show();
     }
 
     private void postItemQty(BItem it, int qty) {
