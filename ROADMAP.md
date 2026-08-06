@@ -18,7 +18,14 @@ warehouse confirmation pending (Nick is running the bins):
 - Side trips excluded from "Recently done"/bin-done everywhere; History
   labels them as side trips.
 - Verify tag ownership is CI-SKU alone (replaced barcodes no longer
-  read as "foreign").
+  read as "foreign"); flagged verify rows expand into a resolution
+  panel (new/already-tagged counts vs expected); detected accepted at
+  X or X+Y, flagged in between.
+- Audit tab: sweep-a-bin audit (C72 SWEEP → SEND → pull vs any bin;
+  Check-step verdicts, strays, unknown tags; display only).
+- LOCATE tab (v3.24) — Steve's TODO #5 + the locate backlog item,
+  built: RSSI hunt, FAR/NEAR/TOUCH power, geiger audio, power-1
+  confirm-a-find that filters found boxes. Field test pending.
 
 ## Architecture (target)
 
