@@ -573,6 +573,15 @@ public class MainActivity extends Activity {
         batchSku = sk[0];
         batchTracker = tr[0];
         batchCard.setVisibility(View.GONE);
+        // Tapping the preview card edits the product it shows — no hunting
+        // for the same item down in the list.
+        batchCard.setOnClickListener(view -> {
+            BItem it = focusedItem();
+            if (it == null) return;
+            CheckEntry e = new CheckEntry();
+            e.item = it;
+            openItemEditor(e);
+        });
         v.addView(batchCard);
 
         batchListView = new ListView(this);
@@ -2577,9 +2586,20 @@ public class MainActivity extends Activity {
                     loaded.add(BItem.from(items.getJSONObject(i)));
                 }
                 ui.post(() -> {
+                    // Re-point the focused/pairing references at the FRESH
+                    // rows by id. Nulling them (or leaving them on the old
+                    // objects) froze the preview card's count after a
+                    // sweep-pair until the barcode was scanned again.
+                    Integer prevId =
+                            previewItem == null ? null : previewItem.id;
+                    Integer activeId =
+                            pairActive == null ? null : pairActive.id;
                     bItems.clear();
                     bItems.addAll(loaded);
-                    previewItem = null;
+                    previewItem =
+                            prevId == null ? null : itemById(prevId);
+                    pairActive =
+                            activeId == null ? null : itemById(activeId);
                     refreshBatchList();
                     updateBatchCard();
                 });
@@ -2950,10 +2970,16 @@ public class MainActivity extends Activity {
         if (activeTab == TAB_BATCH) btInput.requestFocus();
     }
 
-    private void updateBatchCard() {
+    /** The product the preview card shows: the pair target while pairing,
+     *  else the most recently scanned item. Null at the Check step. */
+    private BItem focusedItem() {
         BItem it = step == STEP_PAIR && pairActive != null
                 ? pairActive : previewItem;
-        if (step == STEP_CHECK) it = null; // check step: the list IS the view
+        return step == STEP_CHECK ? null : it;
+    }
+
+    private void updateBatchCard() {
+        BItem it = focusedItem();
         if (it == null) {
             batchCard.setVisibility(View.GONE);
             return;
@@ -3185,7 +3211,16 @@ public class MainActivity extends Activity {
             // so fill colour means one thing and one thing alone: done or
             // over-paired.
             if (b == pairActive) stroke = C_BLUE;
-            h.card.setBackground(rr(fill, stroke, 10));
+            BItem focus = focusedItem();
+            if (focus != null && b.id == focus.id) {
+                // The just-scanned product wears a HEAVY accent border, so
+                // it stands apart from the rest of the list at a glance.
+                GradientDrawable g = rr(fill, C_BLUE, 10);
+                g.setStroke(dp(3), C_BLUE);
+                h.card.setBackground(g);
+            } else {
+                h.card.setBackground(rr(fill, stroke, 10));
+            }
             h.tracker.setTextColor(trk);
             h.name.setText(b.name());
             h.sku.setText(b.sku != null ? "SKU: " + b.sku

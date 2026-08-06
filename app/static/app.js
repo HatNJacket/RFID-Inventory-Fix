@@ -2181,7 +2181,7 @@ document.getElementById("binboard-refresh").addEventListener("click", async () =
   const countEl = document.getElementById("binboard-count");
   btn.disabled = true;
   const original = countEl.textContent;
-  countEl.textContent = "(re-reading bins from Shopify…)";
+  const stopDots = startDots(countEl, "(re-reading bins from Shopify");
   try {
     await postJson("/api/bin-map/refresh", {});
     for (let i = 0; i < 40; i++) {
@@ -2189,8 +2189,10 @@ document.getElementById("binboard-refresh").addEventListener("click", async () =
       const s = await apiJson("/api/bin-map/status");
       if (!s.refreshing) break;
     }
+    stopDots();
     await loadBinBoard();
   } catch (err) {
+    stopDots();
     countEl.textContent = original;
     setBatchResult(err.message, "err");
   } finally {
@@ -4417,6 +4419,53 @@ bEl.toVerify.addEventListener("click", () => showBatchStage("verify"));
 // shelf walk physically found. One confirmation, server-guarded to
 // increases only, logged with an Undo in History.
 bEl.verifyReport.addEventListener("click", async (e) => {
+  // "Raise all": one confirmation listing every change, then each row's
+  // update runs as its OWN write — separate API call, History entry and
+  // Undo, exactly as if each button were pressed by hand.
+  const allBtn = e.target.closest("#bverify-fixall");
+  if (allBtn && batch) {
+    const btns = [...bEl.verifyReport.querySelectorAll(".onhand-fix")];
+    if (!btns.length) return;
+    const lines = btns.map(
+      (b) => `${b.dataset.sku}: ${b.dataset.exp} → ${b.dataset.qty}`
+    );
+    if (
+      !confirm(
+        `Raise Shopify ON-HAND for ${btns.length} product(s)?\n\n` +
+          lines.join("\n") +
+          `\n\nEach writes separately — every product gets its own ` +
+          `History entry and Undo.`
+      )
+    )
+      return;
+    allBtn.disabled = true;
+    let done = 0;
+    const failed = [];
+    for (const b of btns) {
+      try {
+        await postJson("/api/onhand-updates", {
+          sku: b.dataset.sku,
+          new_qty: parseInt(b.dataset.qty, 10),
+          changed_by: operatorEl.value || null,
+          confirmed: true,
+          batch_id: batch.id,
+          item_id: parseInt(b.dataset.item, 10) || null,
+        });
+        done++;
+      } catch (err) {
+        failed.push(`${b.dataset.sku}: ${err.message}`);
+      }
+    }
+    await runVerifyCheck();
+    setBatchResult(
+      `${done} on-hand value(s) raised` +
+        (failed.length
+          ? ` · ${failed.length} FAILED — ${failed.join(" · ")}`
+          : " ✓ (each has its own Undo in History)"),
+      failed.length ? "err" : "ok"
+    );
+    return;
+  }
   const btn = e.target.closest(".onhand-fix");
   if (!btn || !batch) return;
   const sku = btn.dataset.sku;
@@ -4569,12 +4618,29 @@ async function runVerifyCheck() {
     ? `<p class="result">⊘ ${naSilent} product(s) flagged "won't RFID scan" answered nothing, as expected — their tags are paired and counted; the sweep can't hear them on the box.</p>`
     : "";
 
+  // One button to press every eligible "Set to N" in turn — each write
+  // stays its own API call and its own History row with its own Undo.
+  const fixable = rep.items.filter(
+    (r) =>
+      r.sku &&
+      r.expected_qty != null &&
+      (r.units_total ?? r.qty_scanned) > r.expected_qty
+  );
+  const fixAll =
+    fixable.length > 1
+      ? `<div class="linkbox__actions" style="margin-top:8px">
+           <button class="reset" id="bverify-fixall" type="button"
+             title="Runs each row's Set-to button in turn — every product gets its own confirmation summary line, History entry and Undo">
+             Raise on-hand for all ${fixable.length} short products…</button>
+         </div>`
+      : "";
+
   bEl.verifyReport.innerHTML = `
     ${verdict}${naNote}
     <div class="inventory__scroll"><table class="inventory__table">
       <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num" title="Shopify on-hand for this shelf; brackets show scanned-vs-expected">Expected</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
-    </table></div>
+    </table></div>${fixAll}
     ${
       otherCount
         ? `<div class="linkbox__actions" style="margin-top:8px">
@@ -4833,6 +4899,22 @@ async function loadReview() {
   }
 }
 
+// Looping ". .. ..." on a button while a slow refresh runs — proof of
+// life, not progress. Returns a stop function that restores the label.
+function startDots(el, base) {
+  const prev = el.textContent;
+  let n = 0;
+  const timer = setInterval(() => {
+    n = (n % 3) + 1;
+    el.textContent = base + ".".repeat(n);
+  }, 400);
+  el.textContent = base + ".";
+  return () => {
+    clearInterval(timer);
+    el.textContent = prev;
+  };
+}
+
 // === Audits tab =============================================================
 // Shopify on-hand vs RFID units, per product, summed per bin — biggest
 // total mismatch first (the received-but-nowhere-to-be-found detector).
@@ -4958,7 +5040,14 @@ document.getElementById("audit-untagged").addEventListener("click", () => {
 });
 document
   .getElementById("audit-reload")
-  .addEventListener("click", loadAuditBins);
+  .addEventListener("click", async (ev) => {
+    const stopDots = startDots(ev.currentTarget, "Reloading");
+    try {
+      await loadAuditBins();
+    } finally {
+      stopDots();
+    }
+  });
 let auditFilterTimer;
 document.getElementById("audit-filter").addEventListener("input", () => {
   clearTimeout(auditFilterTimer);
@@ -4969,24 +5058,26 @@ document.getElementById("audit-filter").addEventListener("input", () => {
 document.getElementById("audit-refresh").addEventListener("click", async (ev) => {
   const btn = ev.currentTarget;
   btn.disabled = true;
+  const stopDots = startDots(btn, "Refreshing from Shopify (about a minute)");
   try {
     await postJson("/api/bin-map/refresh", {});
-    btn.textContent = "Refreshing… (about a minute)";
     const poll = setInterval(async () => {
       try {
         const s = await apiJson("/api/bin-map/status");
         if (!s.refreshing) {
           clearInterval(poll);
+          stopDots();
           btn.disabled = false;
-          btn.textContent = "↻ Refresh on-hand from Shopify";
           loadAuditBins();
         }
       } catch {
         clearInterval(poll);
+        stopDots();
         btn.disabled = false;
       }
     }, 5000);
   } catch (err) {
+    stopDots();
     btn.disabled = false;
     setResult(err.message, "err");
   }
@@ -4997,14 +5088,27 @@ async function loadAudits() {
   const list = document.getElementById("audit-list");
   try {
     const { tasks } = await apiJson("/api/review-tasks?status=open&limit=100");
-    const checks = tasks.filter((t) => t.category === "inventory-check");
+    // Biggest single-product mismatch first — the size is parsed out of
+    // the task's own wording ("N unit(s) counted but Shopify on-hand is
+    // M"); anything unparsable sorts last rather than lying.
+    const checks = tasks
+      .filter((t) => t.category === "inventory-check")
+      .map((t) => {
+        const m = /(\d+)\s+unit\(s\).*?on-hand is (\d+)/.exec(t.detail || "");
+        return { ...t, mismatch: m ? Math.abs(+m[1] - +m[2]) : 0 };
+      })
+      .sort(
+        (a, b) =>
+          b.mismatch - a.mismatch ||
+          String(b.created_at || "").localeCompare(String(a.created_at || ""))
+      );
     list.innerHTML = checks.length
       ? ""
       : '<li class="recent__empty">No product checks recommended right now.</li>';
     checks.forEach((t) => {
       const li = document.createElement("li");
       li.innerHTML = `
-        <span class="evtype">check</span>
+        <span class="audit-mm" title="units counted vs Shopify on-hand — the size of the disagreement">${t.mismatch || "?"}</span>
         <span class="recent__prod"><b>${escapeHtml(t.product_title || t.sku || "")}</b> ${escapeHtml(t.detail)}</span>
         <span class="recent__meta recent__when">${escapeHtml(fmtWhen(t.created_at))}</span>`;
       list.append(li);

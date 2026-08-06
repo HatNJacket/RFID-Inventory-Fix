@@ -54,6 +54,19 @@
 
 * { box-sizing: border-box; }
 
+/* Scrollbars that follow the theme — the OS default reads unfinished in
+   dark mode. Thin, track-less, thumb from the theme's hairline colour. */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-dim); }
+::-webkit-scrollbar-corner { background: transparent; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -1230,6 +1243,20 @@ a { color: var(--accent); }
 .auditrow__score--ok { background: var(--ok-bg, #d5efe1); color: var(--ok-ink, #1d6f47); }
 .auditrow--clean .binlist__name { color: var(--ink-dim); }
 .auditrow__chev { flex: none; color: var(--ink-dim); }
+
+/* recommended product checks: scrollable, biggest mismatch first */
+#audit-list { max-height: 340px; overflow-y: auto; }
+.audit-mm {
+  flex: none;
+  min-width: 34px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 12.5px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+}
 
 /* inventory SKUs open the product panel */
 .skulink { color: var(--accent); cursor: pointer; }
