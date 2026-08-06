@@ -1,7 +1,24 @@
 # RFID Inventory System — Roadmap
 
 Source of truth for project status. Updated by Claude each working session.
-Last updated: 2026-07-29.
+Last updated: 2026-08-06.
+
+## 🔶 Current field-test round (C72 v3.21, installed from the terminal)
+
+Everything below shipped 2026-08-03 → 08-06 and works in tests/browser;
+warehouse confirmation pending (Nick is running the bins):
+- Already-tagged flow: first scan of a product with prior tags asks how
+  many boxes are stickered (one-screen stepper + held-box checkbox,
+  v3.20); verify counts those boxes everywhere (web + C72 + server).
+- Wrong-shelf review at Check: per-item keep-or-move with product
+  cards; KEEP = audited bin update, MOVE = side trip; warns when the
+  home shelf already holds recorded tagged boxes (v3.21).
+- C72 verify popup rebuilt on the whole-bin check (SKUs shown, off-map
+  products counted, tappable preview cards) (v3.18–3.19).
+- Side trips excluded from "Recently done"/bin-done everywhere; History
+  labels them as side trips.
+- Verify tag ownership is CI-SKU alone (replaced barcodes no longer
+  read as "foreign").
 
 ## Architecture (target)
 
