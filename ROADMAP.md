@@ -25,7 +25,10 @@ warehouse confirmation pending (Nick is running the bins):
   Check-step verdicts, strays, unknown tags; display only).
 - LOCATE tab (v3.24) — Steve's TODO #5 + the locate backlog item,
   built: RSSI hunt, FAR/NEAR/TOUCH power, geiger audio, power-1
-  confirm-a-find that filters found boxes. Field test pending.
+  confirm-a-find that filters found boxes. FIELD TESTED 2026-08-06
+  (Nick): works, but finicky around the metal bins (multipath) — usable
+  as-is; tuning knobs identified (smoothing weight, best-of window,
+  dBm range) if it starts to annoy.
 
 ## Architecture (target)
 
