@@ -2493,6 +2493,21 @@ def bin_check(
         "unknown_epcs": unknown,
         "batch_done": done_batch is not None,
         "batch_done_id": done_batch.id if done_batch else None,
+        "batch_done_at": (
+            done_batch.completed_at.isoformat()
+            if done_batch is not None and done_batch.completed_at else None
+        ),
+        # Named so the audit can say WHY it isn't offering to record the
+        # bin: an earlier abandoned attempt is the usual reason someone
+        # believes a finished shelf was never recorded.
+        "abandoned_batches": [
+            b.id for b in session.scalars(
+                select(Batch).where(
+                    func.lower(Batch.bin_name) == bin_key,
+                    Batch.status == "abandoned",
+                ).order_by(Batch.id)
+            )
+        ],
     }
 
 

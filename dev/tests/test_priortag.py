@@ -280,8 +280,14 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
           and items[0]["paired_count"]==0
           and items[0]["qty_scanned"]==0, items)
     chk = cl.post("/api/bins/F9-9/check", json={"epcs":[]}).json()
-    check("the audit now reports the bin as batch tagged",
-          chk["batch_done"] is True and chk["batch_done_id"]==bid_m, chk)
+    check("the audit now reports the bin as batch tagged, with when",
+          chk["batch_done"] is True and chk["batch_done_id"]==bid_m
+          and chk["batch_done_at"], chk)
+    # An abandoned attempt is named so the audit can explain why it isn't
+    # offering to record a bin that's already done (Nick's I1-5 case).
+    chk = cl.post("/api/bins/G1-1/check", json={"epcs":[]}).json()
+    check("the audit names the bin's abandoned attempts",
+          chk["abandoned_batches"] == [bidv], chk["abandoned_batches"])
     r = cl.post("/api/bins/F9-9/mark-tagged",
                 json={"created_by":"Steve","confirmed":True})
     check("marking an already-done bin is refused",

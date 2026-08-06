@@ -5428,7 +5428,9 @@ function renderAuditBins() {
 // === Bin audit: newest C72 sweep vs any bin =================================
 // The Check-step story without a batch: per product, what Shopify expects,
 // what's tagged here, what the sweep actually heard — plus strays and
-// unknown tags. Display only.
+// unknown tags. The check is read-only; the panel's two WRITES are both
+// operator-confirmed — "Set to N" (Shopify on-hand, increase-only, undoable
+// from History) and "Record as batch tagged" (local batch record only).
 let binAudit = null; // { rep, cap } — kept so toggles re-render for free
 let binAuditShowUntagged = false;
 
@@ -5569,7 +5571,20 @@ function renderBinAudit() {
     checked against ${escapeHtml(rep.bin)}.</p>
     ${
       rep.batch_done
-        ? ""
+        ? `<p class="result result--ok">✓ Already recorded as batch tagged —
+           batch #${rep.batch_done_id}${
+             rep.batch_done_at
+               ? `, finished ${escapeHtml(fmtWhen(rep.batch_done_at))}`
+               : ""
+           }. Nothing to record here.${
+             (rep.abandoned_batches || []).length
+               ? ` (Bin also has ${
+                   rep.abandoned_batches.length
+                 } abandoned attempt(s): ${rep.abandoned_batches
+                   .map((n) => "#" + n)
+                   .join(", ")} — superseded by #${rep.batch_done_id}.)`
+               : ""
+           }</p>`
         : `<p class="result result--warn-soft">This bin has no completed batch —
            it doesn't count as tagged. If the shelf really is fully tagged (a
            batch abandoned after every tag was paired), you can record it:
