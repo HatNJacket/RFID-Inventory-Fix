@@ -1182,6 +1182,22 @@ a { color: var(--accent); }
   white-space: nowrap;
   cursor: help;
 }
+/* Recently-done rows that were only a side trip: the boxes carried over
+   got tags, but the shelf itself was never checked. */
+.binlist__sidetrip {
+  margin-left: 8px;
+  vertical-align: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ev-side-trip-completed, #0e7a8a);
+  background: color-mix(
+    in srgb, var(--ev-side-trip-completed, #0e7a8a) 15%, transparent
+  );
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  cursor: help;
+}
 #binboard-showhidden {
   padding: 4px 10px;
   font-size: 12px;

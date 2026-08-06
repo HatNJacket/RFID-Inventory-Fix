@@ -203,6 +203,12 @@ public class MainActivity extends Activity {
         // Product-wide "won't RFID scan": the tag reads in hand but never
         // once it's on the box, so sweeps don't expect an answer.
         boolean noScan;
+        // Boxes on this shelf already wearing a sticker (baseline sweep or
+        // the first-scan question) — units on the shelf, but never labels.
+        int taggedBefore;
+        // Tags for this product already in the system from BEFORE this
+        // batch (side trip, earlier session): triggers the first-scan ask.
+        int priorTags;
 
         static BItem from(JSONObject o) {
             BItem b = new BItem();
@@ -237,6 +243,8 @@ public class MainActivity extends Activity {
             b.skipReason = o.isNull("skip_reason") ? null
                     : o.optString("skip_reason");
             b.noScan = o.optBoolean("rfid_incompatible", false);
+            b.taggedBefore = o.optInt("tagged_before", 0);
+            b.priorTags = o.optInt("prior_tags", 0);
             return b;
         }
 
@@ -982,6 +990,7 @@ public class MainActivity extends Activity {
     private Button editRecommendBtn;
     private Button editSkipBtn;
     private Button editNoScanBtn;
+    private Button editPriorBtn;
     private Button editSplitBtn;
 
     private void buildItemEditor(FrameLayout outer) {
@@ -1181,6 +1190,17 @@ public class MainActivity extends Activity {
         editNoScanBtn.setOnClickListener(v -> toggleNoScan());
         mid.addView(editNoScanBtn);
 
+        // "Some of these boxes already wear a sticker" — the same answer
+        // the first-scan question sets, reachable again here for the shelf
+        // where EVERY box was already tagged and nothing gets scanned.
+        editPriorBtn = smallBtn("ALREADY TAGGED…");
+        editPriorBtn.setOnClickListener(v -> {
+            if (editEntry != null) {
+                askPriorCount(editEntry.item, false);
+            }
+        });
+        mid.addView(editPriorBtn);
+
         editDropBtn = smallBtn("REMOVE THIS SCAN");
         editDropBtn.setOnClickListener(v -> dropItemFromBatch(true));
         mid.addView(editDropBtn);
@@ -1349,6 +1369,14 @@ public class MainActivity extends Activity {
                 it.resolved && it.sku != null ? View.VISIBLE : View.GONE);
         editNoScanBtn.setText(it.noScan
                 ? "⊘ RFID FLAG ON — REMOVE" : "WON'T RFID SCAN");
+        // Only while the count still matters (labels not queued yet) and
+        // only when there ARE earlier tags to account for.
+        editPriorBtn.setVisibility(it.resolved && step <= STEP_CHECK
+                && (it.priorTags > 0 || it.taggedBefore > 0)
+                ? View.VISIBLE : View.GONE);
+        editPriorBtn.setText(it.taggedBefore > 0
+                ? "✓ " + it.taggedBefore + " ALREADY TAGGED — CHANGE…"
+                : "ALREADY TAGGED…");
         // Only an unresolved row has a barcode to give away.
         editFindBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
         editRecommendBtn.setVisibility(it.resolved ? View.GONE : View.VISIBLE);
@@ -2333,27 +2361,18 @@ public class MainActivity extends Activity {
                         .put("epcs", new JSONArray(epcs));
                 api("POST", "/api/epc-captures", body);
                 // Then the same sweep against the bin, for the on-device
-                // table: which of each product's tags were actually seen.
+                // table: every product the bin knows about, with tags on
+                // file / in this bin / actually heard.
                 JSONObject check = api("POST", "/api/bins/"
                         + URLEncoder.encode(batchBin, "UTF-8") + "/check",
                         new JSONObject().put("epcs", new JSONArray(epcs)));
-                final java.util.HashMap<String, Integer> seen =
-                        new java.util.HashMap<>();
-                JSONArray arr = check.optJSONArray("items");
-                for (int i = 0; arr != null && i < arr.length(); i++) {
-                    JSONObject o = arr.getJSONObject(i);
-                    // Upper-cased key: the batch row and the bin map can
-                    // disagree on a SKU's CASE (dead mirror drift).
-                    seen.put(o.optString("sku")
-                            .toUpperCase(java.util.Locale.ROOT),
-                            o.optInt("detected"));
-                }
+                final JSONArray checkItems = check.optJSONArray("items");
                 final int sweptCount = epcs.size();
                 ui.post(() -> {
                     beep(SOUND_OK);
                     status.setText("Sweep sent \u2713 (" + sweptCount
                             + " tags) - the PC/iPad is showing it too.");
-                    showVerifyReport(seen);
+                    showVerifyReport(checkItems);
                 });
             } catch (Exception e) {
                 ui.post(() -> {
@@ -2366,32 +2385,104 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    /** The verify table: per product, labels printed / tags paired / tags
-     *  seen by this sweep, worst rows first, check or cross per row. From
-     *  here the operator either confirms (bin hands to the web terminal
-     *  and the batch closes on-device) or sweeps again. */
-    private void showVerifyReport(java.util.Map<String, Integer> seen) {
-        List<BItem> rows = new ArrayList<>();
-        for (BItem b : bItems) {
-            if (!b.resolved || (b.labelsTotal == 0 && b.paired == 0)) {
-                continue;
+    /** One line of the on-device verify table: a batch item, a bin-map
+     *  product, or both merged by (case-insensitive) SKU. */
+    private static class VRow {
+        String sku, title, variant, imageUrl;
+        Integer expected;
+        int printed, paired, detected, tagsHere, tagsOnFile;
+        boolean noScan, inBatch;
+
+        String name() {
+            String n = title == null || title.isEmpty() ? "(unknown)"
+                    : title;
+            if (variant != null && !variant.isEmpty()) {
+                n += " (" + variant + ")";
             }
-            rows.add(b);
+            return n;
         }
-        final java.util.HashMap<Integer, Integer> det =
-                new java.util.HashMap<>();
+    }
+
+    /** A row passes when every printed label got a tag AND every tag this
+     *  bin should hold answered the sweep \u2014 including tags from earlier
+     *  sessions the batch itself never touched. "Won't RFID scan"
+     *  products are expected silent, so only pairing is judged. */
+    private boolean verifyRowOk(VRow r) {
+        if (r.noScan) return r.paired >= r.printed;
+        return r.paired >= r.printed
+                && r.detected >= Math.max(r.paired, r.tagsHere);
+    }
+
+    /** The verify table: the WHOLE bin's story, not just this batch's \u2014
+     *  a product tagged on an earlier side trip shows its tags and
+     *  whether the sweep heard them. Worst rows first; every row shows
+     *  its SKU and taps open a preview. */
+    private void showVerifyReport(JSONArray checkItems) {
+        java.util.HashMap<String, VRow> bySku = new java.util.HashMap<>();
+        List<VRow> rows = new ArrayList<>();
+        for (int i = 0; checkItems != null && i < checkItems.length(); i++) {
+            JSONObject o = checkItems.optJSONObject(i);
+            if (o == null || o.isNull("sku")) continue;
+            VRow r = new VRow();
+            r.sku = o.optString("sku");
+            r.title = o.isNull("product_title") ? ""
+                    : o.optString("product_title");
+            r.variant = o.isNull("variant_title") ? null
+                    : o.optString("variant_title");
+            r.imageUrl = o.isNull("image_url") ? null
+                    : o.optString("image_url");
+            r.expected = o.isNull("expected_qty") ? null
+                    : o.optInt("expected_qty");
+            r.tagsOnFile = o.optInt("tags_on_file", 0);
+            // Older servers don't send tags_here; the store-wide count is
+            // the honest fallback.
+            r.tagsHere = o.optInt("tags_here", r.tagsOnFile);
+            r.detected = o.optInt("detected", 0);
+            r.noScan = o.optBoolean("rfid_incompatible", false);
+            bySku.put(r.sku.toUpperCase(java.util.Locale.ROOT), r);
+            rows.add(r);
+        }
+        // Batch rows fold in on top: printed/paired counts, and any stray
+        // worked here that the bin map doesn't list gets its own line.
+        for (BItem b : bItems) {
+            if (!b.resolved) continue;
+            VRow r = b.sku == null ? null
+                    : bySku.get(b.sku.toUpperCase(java.util.Locale.ROOT));
+            if (r == null) {
+                if (b.labelsTotal == 0 && b.paired == 0) continue;
+                r = new VRow();
+                r.sku = b.sku == null ? "\u2014" : b.sku;
+                r.title = b.title;
+                r.variant = b.variant;
+                r.imageUrl = b.imageUrl;
+                r.expected = b.expected;
+                rows.add(r);
+            }
+            r.inBatch = true;
+            r.printed = b.labelsTotal;
+            r.paired = b.paired;
+            r.noScan = r.noScan || b.noScan;
+            if (r.imageUrl == null) r.imageUrl = b.imageUrl;
+        }
+        // Nothing printed, nothing paired, no tags to hear: there is
+        // nothing to verify on that line \u2014 it's collect/check business.
+        java.util.Iterator<VRow> itr = rows.iterator();
+        while (itr.hasNext()) {
+            VRow r = itr.next();
+            if (r.printed == 0 && r.paired == 0 && r.tagsHere == 0
+                    && r.detected == 0) {
+                itr.remove();
+            }
+        }
         int bad = 0;
-        for (BItem b : rows) {
-            Integer d = b.sku == null ? null
-                    : seen.get(b.sku.toUpperCase(java.util.Locale.ROOT));
-            det.put(b.id, d == null ? 0 : d);
-            if (!verifyRowOk(b, det.get(b.id))) bad++;
+        for (VRow r : rows) {
+            if (!verifyRowOk(r)) bad++;
         }
         // Worst first: the rows needing eyes should not hide under a page
         // of green.
         java.util.Collections.sort(rows, (a, b2) -> {
-            boolean oa = verifyRowOk(a, det.get(a.id));
-            boolean ob = verifyRowOk(b2, det.get(b2.id));
+            boolean oa = verifyRowOk(a);
+            boolean ob = verifyRowOk(b2);
             return oa == ob ? 0 : (oa ? 1 : -1);
         });
 
@@ -2412,15 +2503,15 @@ public class MainActivity extends Activity {
         head.setTextColor(bad == 0 ? C_OK : C_OVER);
         box.addView(head);
 
-        for (BItem b : rows) {
-            int d = det.get(b.id);
-            boolean ok = verifyRowOk(b, d);
+        for (VRow r : rows) {
+            final VRow fr = r;
+            boolean ok = verifyRowOk(r);
             LinearLayout row = new LinearLayout(this);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setBackground(rr(ok ? C_OK_BG : C_OVER_BG, 0, 8));
             row.setPadding(dp(8), dp(6), dp(8), dp(6));
             TextView mark = new TextView(this);
-            mark.setText(b.noScan && ok ? "\u2298" : ok ? "\u2713" : "\u2717");
+            mark.setText(r.noScan && ok ? "\u2298" : ok ? "\u2713" : "\u2717");
             mark.setTextSize(18);
             mark.setTypeface(null, Typeface.BOLD);
             mark.setTextColor(ok ? C_OK : C_OVER);
@@ -2429,26 +2520,30 @@ public class MainActivity extends Activity {
             LinearLayout col = new LinearLayout(this);
             col.setOrientation(LinearLayout.VERTICAL);
             TextView nm = new TextView(this);
-            nm.setText(b.name());
+            nm.setText(r.name());
             nm.setTextSize(13);
             nm.setTypeface(null, Typeface.BOLD);
             nm.setTextColor(C_TEXT);
             nm.setMaxLines(2);
             col.addView(nm);
             TextView counts = new TextView(this);
-            counts.setText("printed " + b.labelsTotal + "  \u00b7  tagged "
-                    + b.paired + "  \u00b7  "
-                    + (b.noScan ? "won't scan on box \u2014 seen n/a"
-                       : "seen " + d));
+            counts.setText("SKU " + r.sku + "  \u00b7  "
+                    + (r.inBatch
+                       ? "printed " + r.printed + "  \u00b7  tagged " + r.paired
+                       : "not in this batch")
+                    + "  \u00b7  "
+                    + (r.noScan ? "won't scan on box \u2014 seen n/a"
+                       : "seen " + r.detected + " of " + r.tagsHere));
             counts.setTextSize(12);
             counts.setTextColor(C_MUTED);
             col.addView(counts);
-            row.addView(col);
+            row.addView(col, weight());
+            row.setOnClickListener(vw -> showVerifyRowPreview(fr));
             box.addView(row);
         }
         if (rows.isEmpty()) {
             TextView none = new TextView(this);
-            none.setText("Nothing was labelled in this batch.");
+            none.setText("Nothing here has labels or tags to verify.");
             none.setTextSize(12);
             none.setTextColor(C_MUTED);
             box.addView(none);
@@ -2469,13 +2564,52 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    /** A row passes when every printed label got a tag and every one of
-     *  those tags answered the sweep. "Won't RFID scan" products are
-     *  expected silent, so only the pairing half is judged for them. */
-    private boolean verifyRowOk(BItem b, Integer detected) {
-        if (b.noScan) return b.paired >= b.labelsTotal;
-        int d = detected == null ? 0 : detected;
-        return b.paired >= b.labelsTotal && d >= b.paired;
+    /** Tap a verify row: the product card \u2014 image, names, SKU, expected
+     *  stock, and the tag story in words. Read-only. */
+    private void showVerifyRowPreview(VRow r) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(10), dp(16), dp(4));
+
+        ImageView img = new ImageView(this);
+        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        img.setBackgroundColor(C_BG);
+        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(140));
+        il.bottomMargin = dp(8);
+        box.addView(img, il);
+        loadImage(r.imageUrl, img);
+
+        TextView meta = new TextView(this);
+        meta.setTextSize(14);
+        meta.setTextColor(C_TEXT);
+        StringBuilder sb = new StringBuilder();
+        sb.append("SKU: ").append(r.sku);
+        if (r.expected != null) {
+            sb.append("\nExpected on this shelf: ").append(r.expected);
+        }
+        sb.append("\nTags in the system: ").append(r.tagsOnFile)
+          .append(" (").append(r.tagsHere).append(" in this bin)");
+        if (r.inBatch) {
+            sb.append("\nThis batch: printed ").append(r.printed)
+              .append(", tagged ").append(r.paired);
+        } else {
+            sb.append("\nNot part of this batch \u2014 tagged in an earlier "
+                    + "session.");
+        }
+        sb.append("\nSweep heard: ").append(
+                r.noScan ? "n/a \u2014 flagged \"won't scan on box\""
+                         : r.detected + " of " + r.tagsHere);
+        meta.setText(sb.toString());
+        box.addView(meta);
+
+        ScrollView sc = new ScrollView(this);
+        sc.addView(box);
+        new AlertDialog.Builder(this)
+                .setTitle(r.name())
+                .setView(sc)
+                .setPositiveButton("CLOSE", null)
+                .show();
     }
 
     /** Confirm from the report: park the batch as awaiting-verify (the
@@ -2880,6 +3014,7 @@ public class MainActivity extends Activity {
                     batchId = id;
                     batchBin = bin;
                     loadScanOrder();
+                    loadPriorAsked();
                     bItems.clear();
                     bItems.addAll(loaded);
                     step = "awaiting-verify".equals(st) ? STEP_VERIFY
@@ -3043,6 +3178,198 @@ public class MainActivity extends Activity {
     private int scanSeqOf(BItem b) {
         Integer s = scanOrder.get(b.id);
         return s == null ? 0 : s;
+    }
+
+    // Which items already got the "some of these are already tagged"
+    // question, kept ON THE GUN like the scan order — asking once per
+    // product per batch is the whole point.
+    private final java.util.HashSet<Integer> priorAsked =
+            new java.util.HashSet<>();
+
+    private void notePriorAsked(int itemId) {
+        priorAsked.add(itemId);
+        try {
+            org.json.JSONArray ids = new org.json.JSONArray();
+            for (Integer id : priorAsked) ids.put(id);
+            prefs.edit().putString("prior_asked_json", new JSONObject()
+                    .put("batch", batchId)
+                    .put("ids", ids).toString()).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void loadPriorAsked() {
+        priorAsked.clear();
+        try {
+            JSONObject saved = new JSONObject(
+                    prefs.getString("prior_asked_json", "{}"));
+            if (saved.optInt("batch", -1) != batchId) return;
+            org.json.JSONArray ids = saved.optJSONArray("ids");
+            for (int i = 0; ids != null && i < ids.length(); i++) {
+                priorAsked.add(ids.getInt(i));
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** First scan of a product that already has tags in the system (a side
+     *  trip, an earlier session): ask how many boxes here are already
+     *  stickered, so those queue no second label. Asked once per product
+     *  per batch, collect step only. */
+    private void maybePriorTagAlert(BItem it, boolean offerUncount) {
+        if (!inBatch() || step != STEP_COLLECT) return;
+        if (it == null || !it.resolved || it.skipped) return;
+        if (it.priorTags <= 0 || it.taggedBefore > 0) return;
+        if (priorAsked.contains(it.id)) return;
+        notePriorAsked(it.id);
+        final int n = it.priorTags;
+        beep(SOUND_OTHER);
+        new AlertDialog.Builder(this)
+                .setTitle("Already tagged?")
+                .setMessage(it.name() + "\n\n" + n + " RFID tag(s) for "
+                        + "this product are already in the system — tagged "
+                        + "earlier (a side trip or a previous session).\n\n"
+                        + "A box that already wears a sticker must NOT get "
+                        + "a second label. How many boxes on this shelf "
+                        + "are already stickered?")
+                .setCancelable(false)
+                .setPositiveButton("ALL " + n, (dg, w) ->
+                        putTaggedBefore(it, n, offerUncount))
+                .setNeutralButton("SOME — PICK…", (dg, w) ->
+                        askPriorCount(it, offerUncount))
+                .setNegativeButton("NONE — ALL NEW", (dg, w) ->
+                        putTaggedBefore(it, 0, false))
+                .show();
+    }
+
+    private void askPriorCount(BItem it, boolean offerUncount) {
+        final android.widget.EditText input =
+                new android.widget.EditText(this);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        input.setText(String.valueOf(
+                it.taggedBefore > 0 ? it.taggedBefore : it.priorTags));
+        input.selectAll();
+        new AlertDialog.Builder(this)
+                .setTitle("Boxes already stickered")
+                .setMessage(it.name() + "\n\nCount the boxes on this shelf "
+                        + "that already wear an RFID sticker:")
+                .setView(input)
+                .setCancelable(false)
+                .setPositiveButton("SET", (dg, w) -> {
+                    int c;
+                    try {
+                        c = Integer.parseInt(input.getText()
+                                .toString().trim());
+                    } catch (Exception e) {
+                        c = 0;
+                    }
+                    c = Math.max(0, Math.min(500, c));
+                    putTaggedBefore(it, c, offerUncount && c > 0);
+                })
+                .setNegativeButton("CANCEL", (dg, w) ->
+                        priorAsked.remove(it.id))
+                .show();
+    }
+
+    private void putTaggedBefore(BItem it, int count, boolean offerUncount) {
+        status.setText("Saving already-tagged count…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("count", count)
+                        .put("updated_by", prefs.getString("device", "C72"));
+                JSONObject resp = api("PUT", "/api/batches/" + batchId
+                        + "/items/" + it.id + "/tagged-before", body);
+                final BItem fresh = BItem.from(resp.getJSONObject("item"));
+                final String msg = resp.optString("message", "Saved.");
+                ui.post(() -> {
+                    replaceItem(fresh);
+                    beep(SOUND_OK);
+                    status.setText(msg);
+                    updateBatchCard();
+                    refreshBatchList();
+                    if (offerUncount && count > 0) askHeldBoxUncount(fresh);
+                    else btInput.requestFocus();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    // Not marked asked anymore — the next scan re-asks
+                    // rather than silently printing doubles.
+                    priorAsked.remove(it.id);
+                    status.setText("Couldn't save the already-tagged "
+                            + "count: " + e.getMessage());
+                    btInput.requestFocus();
+                });
+            }
+        }).start();
+    }
+
+    /** The box that triggered the question was counted by its scan — if
+     *  it's one of the stickered ones it's now counted twice. One tap
+     *  fixes it. */
+    private void askHeldBoxUncount(BItem it) {
+        new AlertDialog.Builder(this)
+                .setTitle("The box in your hand")
+                .setMessage("The box you just scanned — does it already "
+                        + "wear an RFID sticker?\n\nIf yes it's covered by "
+                        + "the already-stickered count, so its scan "
+                        + "shouldn't also be counted.")
+                .setCancelable(false)
+                .setPositiveButton("YES — UNCOUNT IT", (dg, w) ->
+                        postItemQty(it, Math.max(0, it.qty - 1)))
+                .setNegativeButton("NO — KEEP THE COUNT", (dg, w) ->
+                        btInput.requestFocus())
+                .show();
+    }
+
+    private void postItemQty(BItem it, int qty) {
+        new Thread(() -> {
+            try {
+                JSONObject resp = api("POST", "/api/batches/" + batchId
+                        + "/items/" + it.id + "/qty",
+                        new JSONObject().put("qty", qty));
+                final BItem fresh = BItem.from(resp);
+                ui.post(() -> {
+                    replaceItem(fresh);
+                    beep(SOUND_OK);
+                    status.setText("Count fixed — " + fresh.qty
+                            + " box(es) to label, " + fresh.taggedBefore
+                            + " already stickered.");
+                    updateBatchCard();
+                    refreshBatchList();
+                    btInput.requestFocus();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Couldn't fix the count: "
+                            + e.getMessage());
+                    btInput.requestFocus();
+                });
+            }
+        }).start();
+    }
+
+    /** Swap an item in place by id, keeping the pair/preview pointers on
+     *  the fresh object. */
+    private void replaceItem(BItem fresh) {
+        BItem existing = itemById(fresh.id);
+        if (existing != null) {
+            bItems.set(bItems.indexOf(existing), fresh);
+            if (pairActive == existing) pairActive = fresh;
+            if (previewItem == existing) previewItem = fresh;
+        } else {
+            bItems.add(0, fresh);
+        }
+        // An open editor keeps talking about the fresh row, not a ghost.
+        if (editEntry != null && editEntry.item != null
+                && editEntry.item.id == fresh.id) {
+            editEntry.item = fresh;
+            if (editScrim.getVisibility() == View.VISIBLE) {
+                renderItemEditor();
+            }
+        }
     }
 
     private void refreshBatchList() {
@@ -3223,8 +3550,11 @@ public class MainActivity extends Activity {
             }
             h.tracker.setTextColor(trk);
             h.name.setText(b.name());
-            h.sku.setText(b.sku != null ? "SKU: " + b.sku
-                    : (b.resolved ? "no SKU" : "⚠ unknown barcode"));
+            h.sku.setText((b.sku != null ? "SKU: " + b.sku
+                    : (b.resolved ? "no SKU" : "⚠ unknown barcode"))
+                    + (b.taggedBefore > 0
+                       ? "  ·  ✓" + b.taggedBefore + " already tagged"
+                       : ""));
             String flags = checkFlagText.get(b.id);
             String bc = b.barcode != null ? b.barcode : b.scannedCode;
             if (b.skipped) {
@@ -3315,6 +3645,7 @@ public class MainActivity extends Activity {
                     }
                     updateBatchCard();
                     refreshBatchList();
+                    maybePriorTagAlert(item, true);
                     btInput.requestFocus();
                 });
             } catch (Exception e) {
@@ -3617,6 +3948,7 @@ public class MainActivity extends Activity {
         batchBin = null;
         scanOrder.clear();
         scanSeq = 0;
+        priorAsked.clear();
         bItems.clear();
         pairActive = null;
         previewItem = null;
@@ -4420,6 +4752,7 @@ public class MainActivity extends Activity {
                     batchId = newId;
                     batchBin = newBin;
                     loadScanOrder();
+                    loadPriorAsked();
                     bItems.clear();
                     checkEntries.clear();
                     checkFlagText.clear();
@@ -4476,6 +4809,7 @@ public class MainActivity extends Activity {
                     batchId = backId;
                     batchBin = backBin;
                     loadScanOrder();
+                    loadPriorAsked();
                     bItems.clear();
                     checkEntries.clear();
                     checkFlagText.clear();
@@ -4554,6 +4888,9 @@ public class MainActivity extends Activity {
                             + (sealed ? " · box left sealed." : "."));
                     updateBatchCard();
                     refreshBatchList();
+                    // A case is never "the stickered box in your hand", so
+                    // no uncount offer on this path.
+                    maybePriorTagAlert(item, false);
                     btInput.requestFocus();
                 });
             } catch (Exception e) {

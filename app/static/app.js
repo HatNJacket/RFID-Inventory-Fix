@@ -226,6 +226,11 @@ const EVENT_META = {
   "batch-completed": ["Completed Batch", "#29845a"],
   "batch-abandoned": ["Abandoned Batch", "#6d7175"],
   "batch-counted": ["Batch Counted", "#3f51b5"],
+  "side-trip-started": ["Started Side Trip", "#0e7a8a"],
+  "side-trip-verified": ["Verified Side Trip", "#0e7a8a"],
+  "side-trip-completed": ["Completed Side Trip", "#0e7a8a"],
+  "side-trip-abandoned": ["Abandoned Side Trip", "#6d7175"],
+  "already-tagged-set": ["Already-tagged Count", "#6f42c1"],
   "review-opened": ["Opened Review", "#8a6116"],
   "review-resolved": ["Resolved Review", "#29845a"],
   "review-dismissed": ["Dismissed Review", "#6d7175"],
@@ -2100,6 +2105,11 @@ async function loadBinBoard() {
       const li = document.createElement("li");
       li.innerHTML =
         `<span class="binlist__name">${escapeHtml(r.bin)}</span>` +
+        (r.side_trip
+          ? '<span class="binlist__sidetrip" title="Only the boxes ' +
+            "carried over were tagged — the rest of this shelf was " +
+            'never checked">side trip</span>'
+          : "") +
         `<div class="binlist__count">${r.products} product(s) · ` +
         `${r.boxes} box(es) · ${r.tags} tag(s)</div>` +
         `<div class="binlist__count">${escapeHtml(fmtWhen(r.completed_at))}` +
@@ -2873,7 +2883,7 @@ function itemCard(item, mode) {
       }
       ${
         item.tagged_before
-          ? `<div class="bcell__meta bcell__done">✓ ${item.tagged_before} already tagged (baseline sweep) — no labels will print for those</div>`
+          ? `<div class="bcell__meta bcell__done">✓ ${item.tagged_before} already tagged — no labels will print for those</div>`
           : ""
       }
       ${

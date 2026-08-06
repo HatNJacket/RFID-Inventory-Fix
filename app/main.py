@@ -2129,10 +2129,18 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
     done_batches: list = []
     for b in session.scalars(select(Batch).order_by(Batch.id)):
         key = (b.bin_name or "").strip().lower()
+        side = b.parent_batch_id is not None
         if b.status == "done":
-            last_done[key] = b
+            # A side trip only ever covered the few boxes carried over —
+            # it shows in Recently done (labelled), but it must NOT count
+            # the bin as checked: the rest of that shelf was never touched.
+            if not side:
+                last_done[key] = b
             done_batches.append(b)
-        elif b.status != "abandoned":
+        elif b.status != "abandoned" and not side:
+            # An open side trip isn't "this bin is in progress" either —
+            # offering it as the bin's continue-batch would drop whoever
+            # clicks it into a trip that covers two boxes, not the shelf.
             open_by_bin[key] = b
 
     # Box/tag totals for the recent list.
@@ -2209,6 +2217,7 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
                     b.completed_at.isoformat() if b.completed_at else None
                 ),
                 "by": b.created_by,
+                "side_trip": b.parent_batch_id is not None,
                 "products": totals[b.id].products if b.id in totals else 0,
                 "boxes": int(totals[b.id].boxes or 0) if b.id in totals else 0,
                 "tags": int(totals[b.id].tags or 0) if b.id in totals else 0,
@@ -2377,6 +2386,7 @@ def bin_check(
         ):
             tags_by_sku.setdefault((t.sku or "").upper(), []).append(t)
     noscan = _noscan_skus(session)
+    bin_key = bin_name.strip().lower()
     report = []
     for e in rows:
         if not e.sku:
@@ -2390,6 +2400,13 @@ def bin_check(
             "image_url": e.image_url,
             "expected_qty": e.qty,
             "tags_on_file": len(tags),
+            # Only the tags recorded as living in THIS bin — what a sweep
+            # of this shelf can fairly be expected to hear. Split-shelf
+            # stock elsewhere doesn't count against the sweep.
+            "tags_here": sum(
+                1 for t in tags
+                if (t.bin_location or "").strip().lower() == bin_key
+            ),
             "detected": len(detected),
             "rfid_incompatible": e.sku.strip().upper() in noscan,
         })
@@ -2928,14 +2945,43 @@ def get_batch(batch_id: int, session: Session = Depends(get_session)):
             printed[job.sku] = printed.get(job.sku, 0) + 1
     payload = []
     noscan = _noscan_skus(session)
+    prior = _prior_tag_counts(
+        session, batch_id, [i.sku for i in items if i.sku]
+    )
     for item in items:
         d = item.as_dict()
         d["printed_count"] = printed.get(item.sku or "", 0)
         d["rfid_incompatible"] = (
             (item.sku or "").strip().upper() in noscan
         )
+        # Tags already in the system from BEFORE this batch (a side trip,
+        # an earlier session) — the C72 warns on the first scan of such a
+        # product so stickered boxes aren't labelled twice.
+        d["prior_tags"] = prior.get((item.sku or "").strip().upper(), 0)
         payload.append(d)
     return {"batch": batch.as_dict(), "items": payload}
+
+
+def _prior_tag_counts(
+    session: Session, batch_id: int, skus: list[str]
+) -> dict[str, int]:
+    """Per SKU (upper-cased), how many tags exist that did NOT come from
+    this batch. Case-insensitive: tags applied before a SKU's casing was
+    tidied in Shopify must still count."""
+    wanted = {(s or "").strip().upper() for s in skus if s and s.strip()}
+    if not wanted:
+        return {}
+    counts: dict[str, int] = {}
+    for t in session.scalars(
+        select(RfidAssignment).where(
+            func.upper(RfidAssignment.sku).in_(sorted(wanted))
+        )
+    ):
+        if t.batch_id == batch_id:
+            continue
+        key = (t.sku or "").strip().upper()
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 class BatchScanIn(BaseModel):
@@ -3068,6 +3114,12 @@ def batch_scan(
     item_dict["rfid_incompatible"] = bool(
         item.sku
         and session.get(RfidIncompatible, item.sku.strip()) is not None
+    )
+    item_dict["prior_tags"] = (
+        _prior_tag_counts(session, batch_id, [item.sku]).get(
+            item.sku.strip().upper(), 0
+        )
+        if item.sku else 0
     )
     return {
         "item": item_dict,
@@ -4265,6 +4317,72 @@ def batch_baseline(
     }
 
 
+class TaggedBeforeIn(BaseModel):
+    # Boxes on this shelf that already wear an RFID sticker from an earlier
+    # session (side trip, previous batch). 0 is a real answer: "those tags
+    # belong to stock somewhere else".
+    count: int = Field(ge=0, le=500)
+    updated_by: str | None = Field(default=None, max_length=100)
+
+
+@app.put(
+    "/api/batches/{batch_id}/items/{item_id}/tagged-before",
+    dependencies=[Depends(require_user)],
+)
+def set_tagged_before(
+    batch_id: int,
+    item_id: int,
+    payload: TaggedBeforeIn,
+    session: Session = Depends(get_session),
+):
+    """The per-product answer to "some of these boxes are already tagged":
+    sets the same field a baseline sweep fills, so all the downstream math
+    (units on the shelf, labels to print, pair tracker) is already right.
+    Collect-stage only — once labels are queued the count has been spent."""
+    batch = _get_batch(session, batch_id)
+    if batch.status != "collecting":
+        raise HTTPException(
+            409,
+            f"This batch is already {batch.status} — the already-tagged "
+            f"count only matters before labels are queued.",
+        )
+    item = session.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(404, "No such item in this batch.")
+    if not item.resolved:
+        raise HTTPException(422, "That item never resolved to a product.")
+    old = item.tagged_before
+    item.tagged_before = payload.count
+    if old != payload.count:
+        session.add(BarcodeChange(
+            sku=item.sku,
+            product_title=item.product_title,
+            shopify_variant_id=item.shopify_variant_id,
+            changed_field="tagged-before",
+            old_barcode=str(old),
+            new_barcode=str(payload.count),
+            changed_by=payload.updated_by,
+        ))
+    session.commit()
+    session.refresh(item)
+    d = item.as_dict()
+    d["prior_tags"] = (
+        _prior_tag_counts(session, batch_id, [item.sku]).get(
+            item.sku.strip().upper(), 0
+        )
+        if item.sku else 0
+    )
+    return {
+        "item": d,
+        "message": (
+            f"{payload.count} box(es) counted as already tagged — no "
+            f"labels will print for those."
+            if payload.count else
+            "Already-tagged count cleared — every scanned box gets a label."
+        ),
+    }
+
+
 class PairIn(BaseModel):
     epc: str = Field(max_length=128)
     item_id: int
@@ -5271,6 +5389,7 @@ def product_history(term: str, session: Session = Depends(get_session)):
         "barcode": "barcode-replaced", "sku": "sku-updated",
         "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
         "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
+        "tagged-before": "already-tagged-set",
     }
     for c in session.scalars(
         select(BarcodeChange).where(or_(
@@ -5475,6 +5594,7 @@ def history(
         "barcode": "barcode-replaced", "sku": "sku-updated",
         "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
         "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
+        "tagged-before": "already-tagged-set",
     }
     for c in session.scalars(
         select(BarcodeChange).order_by(BarcodeChange.id.desc()).limit(limit)
@@ -5600,24 +5720,32 @@ def history(
             {"kind": "batch-ties", "batch_id": b.id, "ties": tie_count}
             if tie_count else None
         )
+        # A side trip is a few boxes carried to their real shelf, not a
+        # check of that shelf — its events must never read as if the bin
+        # was batch-verified.
+        side = b.parent_batch_id is not None
+        what = (
+            f"Side trip #{b.id} (from batch #{b.parent_batch_id})"
+            if side else f"Batch #{b.id}"
+        )
         events.append({
             "at": iso(b.created_at),
-            "type": "batch-started",
+            "type": "side-trip-started" if side else "batch-started",
             "worker": b.created_by,
             "sku": None,
             "title": f"Bin {b.bin_name}",
-            "detail": f"Batch #{b.id}"
+            "detail": what
                       + (f" · {tie_count} tag(s) tied" if tie_count else ""),
             "undo": undo,
         })
         if b.verified_at:
             events.append({
                 "at": iso(b.verified_at),
-                "type": "batch-verified",
+                "type": "side-trip-verified" if side else "batch-verified",
                 "worker": b.created_by,
                 "sku": None,
                 "title": f"Bin {b.bin_name}",
-                "detail": f"Batch #{b.id} swept and checked"
+                "detail": f"{what} swept and checked"
                           + (f" · {tie_count} tag(s) tied" if tie_count
                              else ""),
                 "undo": undo,
@@ -5625,12 +5753,16 @@ def history(
         if b.completed_at:
             events.append({
                 "at": iso(b.completed_at),
-                "type": ("batch-abandoned" if b.status == "abandoned"
-                         else "batch-completed"),
+                "type": (
+                    ("side-trip-abandoned" if side else "batch-abandoned")
+                    if b.status == "abandoned"
+                    else ("side-trip-completed" if side
+                          else "batch-completed")
+                ),
                 "worker": b.created_by,
                 "sku": None,
                 "title": f"Bin {b.bin_name}",
-                "detail": f"Batch #{b.id}"
+                "detail": what
                           + (f" · {tie_count} tag(s) still tied"
                              if tie_count else ""),
                 "undo": undo,
