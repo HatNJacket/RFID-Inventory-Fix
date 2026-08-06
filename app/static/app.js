@@ -4770,7 +4770,15 @@ async function runVerifyCheck() {
       const tb = r.tagged_before || 0;
       const boxes = r.qty_scanned + tb;
       const paired = r.paired_count === r.qty_scanned;
-      const detected = na || r.detected === r.paired_count + tb;
+      // Accept EITHER this batch's own pairs alone (the already-tagged
+      // boxes' tags may sit out of range) OR pairs + already-tagged
+      // together. A count in between — one or two answering from across
+      // the store rather than the whole bundle — or above is the only
+      // case worth a flag (Nick, 2026-08-06).
+      const detected =
+        na ||
+        r.detected === r.paired_count ||
+        r.detected === r.paired_count + tb;
       if (r.qty_scanned !== r.paired_count) boxesOk = false;
       if (!paired) pairedOk = false;
       if (!detected) detectedOk = false;

@@ -4833,9 +4833,13 @@ def batch_verify(
         not unknown
         and not foreign
         and all(
-            # A sweep should hear this batch's pairs AND the tags that
-            # were already on the shelf's boxes before it started.
-            r["detected"] >= r["paired_count"] + r["tagged_before"]
+            # A sweep is right when it hears this batch's own pairs
+            # alone (already-tagged boxes may sit out of range) OR pairs
+            # plus the already-tagged boxes together. In between — a
+            # couple answering from across the store rather than the
+            # whole bundle — or above means something needs eyes.
+            r["detected"] == r["paired_count"]
+            or r["detected"] == r["paired_count"] + r["tagged_before"]
             for r in report if not r["rfid_incompatible"]
         )
     )

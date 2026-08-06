@@ -162,26 +162,39 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
           and home_row["in_bin_map"] is True, r["items"])
 
     # ---- verify: already-tagged boxes are an exception, not a miss ------
+    # A second earlier tag, so a PARTIAL detection (between X and X+Y)
+    # exists to test — Nick's rule: accept X or X+Y, flag in between.
+    with S(get_engine()) as s:
+        s.add(RfidAssignment(rfid_id="AAAA000000000000000000A6",
+                             shopify_variant_id="t:3",
+                             product_title="Deep Stray", sku="DEEP-1",
+                             bin_location="G1-1"))
+        s.commit()
     bidv = cl.post("/api/batches",
                    json={"bin":"G1-1","created_by":"Steve"}).json()["id"]
     itv = next(i for i in cl.get(f"/api/batches/{bidv}").json()["items"]
                if i["sku"]=="DEEP-1")
     cl.put(f"/api/batches/{bidv}/items/{itv['id']}/tagged-before",
-           json={"count":1,"updated_by":"Steve"})
+           json={"count":2,"updated_by":"Steve"})
     rep = cl.post(f"/api/batches/{bidv}/verify",
-                  json={"epcs":["AAAA000000000000000000A4"]}).json()
+                  json={"epcs":["AAAA000000000000000000A4",
+                                "AAAA000000000000000000A6"]}).json()
     row = next(i for i in rep["items"] if i["sku"]=="DEEP-1")
-    check("verify row carries tagged_before and counts the tag detected",
-          row["tagged_before"]==1 and row["detected"]==1
+    check("verify row carries tagged_before and counts the tags detected",
+          row["tagged_before"]==2 and row["detected"]==2
           and row["qty_scanned"]==0 and row["paired_count"]==0, row)
     check("verify row says where the detected tags' records point",
-          row.get("detected_bins")==[{"bin":"G1-1","count":1}]
+          row.get("detected_bins")==[{"bin":"G1-1","count":2}]
           and "image_url" in row, row)
-    check("sweep hearing the earlier tags = verify ok",
+    check("hearing pairs + ALL already-tagged (X+Y) = verify ok",
           rep["ok"] is True, rep)
-    rep = cl.post(f"/api/batches/{bidv}/verify", json={"epcs":[]}).json()
-    check("sweep MISSING the earlier tags = verify not ok",
+    rep = cl.post(f"/api/batches/{bidv}/verify",
+                  json={"epcs":["AAAA000000000000000000A4"]}).json()
+    check("hearing only PART of the already-tagged bundle = flagged",
           rep["ok"] is False, rep)
+    rep = cl.post(f"/api/batches/{bidv}/verify", json={"epcs":[]}).json()
+    check("hearing only this batch's own pairs (X, none of the earlier "
+          "tags) = accepted", rep["ok"] is True, rep)
     # Abandoned, not completed: a done batch on G1-1 would break the
     # side-trip assertions below, which need that bin still to-do.
     cl.post(f"/api/batches/{bidv}/abandon", json={"remove_ties": False})
