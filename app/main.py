@@ -108,22 +108,30 @@ def _db_not_configured(request: Request, exc: DatabaseNotConfigured):
 
 
 def require_shopify_write(feature: str = "scan_station") -> None:
-    """Server-side Shopify write gate (config.SHOPIFY_WRITE_MODE). All
-    current write endpoints are the confirmed Scan Station flows; anything
-    new must call this with its own feature name and stays blocked until
-    the mode is promoted to 'production'."""
+    """Server-side Shopify write gate (config.SHOPIFY_WRITE_MODE). Every
+    write endpoint calls this with its own feature name. The mode is
+    either "disabled", "production" (everything confirmed), or a comma
+    list of enabled features — "scan_station_only" enables the Scan
+    Station flows, and specific features can be promoted one at a time
+    ("scan_station_only,verify_onhand") without opening the floodgates."""
     mode = config.SHOPIFY_WRITE_MODE
     if mode == "disabled":
         raise HTTPException(
             403, "Shopify writes are disabled (SHOPIFY_WRITE_MODE=disabled)."
         )
-    if mode != "production" and feature != "scan_station":
-        raise HTTPException(
-            403,
-            f"Shopify write '{feature}' is not enabled yet "
-            f"(SHOPIFY_WRITE_MODE={mode}). It only creates proposals for "
-            f"the Review tab until promoted.",
-        )
+    parts = {p.strip() for p in mode.split(",") if p.strip()}
+    if "production" in parts:
+        return
+    if feature == "scan_station" and "scan_station_only" in parts:
+        return
+    if feature in parts:
+        return
+    raise HTTPException(
+        403,
+        f"Shopify write '{feature}' is not enabled yet "
+        f"(SHOPIFY_WRITE_MODE={mode}). Add '{feature}' to the mode (or "
+        f"promote to 'production') to turn it on.",
+    )
 
 
 # ---------------------------------------------------------------- schemas ---
@@ -1453,6 +1461,147 @@ def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
 
     product["bin_location"] = payload.bin
     return {"product": product, "easyscan_updated": easyscan_updated}
+
+
+class OnHandUpdateIn(BaseModel):
+    """Verify-step count correction: raise Shopify's on-hand to what the
+    shelf walk physically found."""
+
+    sku: str = Field(max_length=100)
+    new_qty: int = Field(ge=1, le=100000)
+    changed_by: str | None = Field(default=None, max_length=100)
+    # The operator answered the confirmation dialog.
+    confirmed: bool = False
+    # When sent, this batch item's expected-count snapshot is updated too,
+    # so the Verify table agrees with the store right after the write.
+    batch_id: int | None = None
+    item_id: int | None = None
+
+    @field_validator("sku")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/onhand-updates",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def update_on_hand(
+    payload: OnHandUpdateIn, session: Session = Depends(get_session)
+):
+    """Set Shopify ON-HAND to the count the shelf walk found. INCREASES
+    ONLY: scanning more boxes than Shopify knew about is physical proof
+    they exist; scanning fewer proves nothing (the rest may sit mis-binned
+    on another shelf — this month's whole problem). Confirmed by the
+    operator, logged, and undoable from History."""
+    require_shopify_write("verify_onhand")
+    if config.check_shopify_env():
+        raise HTTPException(500, "Shopify credentials are not configured.")
+    if not payload.confirmed:
+        raise HTTPException(
+            409, "This writes a stock number to Shopify — confirm it first."
+        )
+    live = shopify.get_on_hand(payload.sku)
+    if live is None:
+        raise HTTPException(404, f"No Shopify product for SKU {payload.sku}.")
+    if payload.new_qty <= live:
+        raise HTTPException(
+            422,
+            f"Shopify already shows {live} on hand for {payload.sku} — "
+            f"this button only RAISES a count to match boxes physically "
+            f"found. Lowering a count stays a Shopify-admin job.",
+        )
+    try:
+        before = shopify.set_on_hand(payload.sku, payload.new_qty)
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify on-hand write failed: {error}")
+    change = BarcodeChange(
+        sku=payload.sku,
+        changed_field="on-hand",
+        old_barcode=str(before),
+        new_barcode=str(payload.new_qty),
+        changed_by=payload.changed_by,
+    )
+    session.add(change)
+    # Keep the open batch's snapshot honest so the Verify table agrees
+    # with the store the moment it re-renders.
+    if payload.batch_id and payload.item_id:
+        item = session.get(BatchItem, payload.item_id)
+        if item is not None and item.batch_id == payload.batch_id:
+            item.expected_qty = payload.new_qty
+    session.commit()
+    session.refresh(change)
+    return {
+        "sku": payload.sku,
+        "before": before,
+        "after": payload.new_qty,
+        "change_id": change.id,
+        "message": (
+            f"Shopify on-hand for {payload.sku}: {before} → "
+            f"{payload.new_qty} ✓ (undo from History)"
+        ),
+    }
+
+
+class OnHandUndoIn(BaseModel):
+    changed_by: str | None = Field(default=None, max_length=100)
+    confirmed: bool = False
+
+
+@app.post(
+    "/api/onhand-updates/{change_id}/undo",
+    dependencies=[Depends(require_user)],
+)
+def undo_on_hand(
+    change_id: int,
+    payload: OnHandUndoIn,
+    session: Session = Depends(get_session),
+):
+    """Put the on-hand number back where it was before an update made
+    here. The unconfirmed call answers 409 with exactly what would happen
+    (including the CURRENT live value, in case something else moved it
+    since) — the client shows that as the confirmation text."""
+    require_shopify_write("verify_onhand")
+    row = session.get(BarcodeChange, change_id)
+    if row is None or row.changed_field != "on-hand" or not row.sku:
+        raise HTTPException(404, "No on-hand update with that id.")
+    old = int(row.old_barcode or 0)
+    if not payload.confirmed:
+        live = shopify.get_on_hand(row.sku)
+        raise HTTPException(
+            409,
+            f"Undo sets Shopify on-hand for {row.sku} back to {old} "
+            f"(currently {live}"
+            + (
+                f" — note: something else changed it since this update "
+                f"wrote {row.new_barcode}"
+                if live is not None and str(live) != (row.new_barcode or "")
+                else ""
+            )
+            + "). Confirm to write it.",
+        )
+    try:
+        before = shopify.set_on_hand(row.sku, old)
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify on-hand write failed: {error}")
+    session.add(BarcodeChange(
+        sku=row.sku,
+        changed_field="on-hand-undo",
+        old_barcode=str(before),
+        new_barcode=str(old),
+        changed_by=payload.changed_by,
+    ))
+    session.commit()
+    return {
+        "sku": row.sku,
+        "before": before,
+        "after": old,
+        "message": f"Undone — {row.sku} on-hand back to {old}.",
+    }
 
 
 class SkuOverwriteIn(BaseModel):
@@ -5083,6 +5232,7 @@ def product_history(term: str, session: Session = Depends(get_session)):
     change_types = {
         "barcode": "barcode-replaced", "sku": "sku-updated",
         "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
+        "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
     }
     for c in session.scalars(
         select(BarcodeChange).where(or_(
@@ -5286,18 +5436,24 @@ def history(
     change_types = {
         "barcode": "barcode-replaced", "sku": "sku-updated",
         "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
+        "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
     }
     for c in session.scalars(
         select(BarcodeChange).order_by(BarcodeChange.id.desc()).limit(limit)
     ):
-        events.append({
+        event = {
             "at": iso(c.changed_at),
             "type": change_types.get(c.changed_field, c.changed_field),
             "worker": c.changed_by,
             "sku": c.sku,
             "title": c.product_title,
             "detail": f"{c.old_barcode or '(none)'} → {c.new_barcode}",
-        })
+        }
+        # On-hand corrections carry their undo: one click sets the number
+        # back to what it was before the update (confirmed first).
+        if c.changed_field == "on-hand":
+            event["undo"] = {"kind": "on-hand", "change_id": c.id}
+        events.append(event)
 
     job_types = {
         "done": "label-printed", "error": "label-failed",

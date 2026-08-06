@@ -4413,6 +4413,41 @@ document.getElementById("bpair-reset").addEventListener("click", async () => {
 
 bEl.toVerify.addEventListener("click", () => showBatchStage("verify"));
 
+// "Set to N" on a verify row: raise Shopify on-hand to the count the
+// shelf walk physically found. One confirmation, server-guarded to
+// increases only, logged with an Undo in History.
+bEl.verifyReport.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".onhand-fix");
+  if (!btn || !batch) return;
+  const sku = btn.dataset.sku;
+  const qty = parseInt(btn.dataset.qty, 10);
+  if (
+    !confirm(
+      `Set Shopify ON-HAND for ${sku} to ${qty}?\n\n` +
+        `Shopify expected ${btn.dataset.exp}; the shelf walk physically ` +
+        `found ${qty}.\n\nThis WRITES the number to Shopify. Undo stays ` +
+        `available in History.`
+    )
+  )
+    return;
+  btn.disabled = true;
+  try {
+    const res = await postJson("/api/onhand-updates", {
+      sku,
+      new_qty: qty,
+      changed_by: operatorEl.value || null,
+      confirmed: true,
+      batch_id: batch.id,
+      item_id: parseInt(btn.dataset.item, 10) || null,
+    });
+    setBatchResult(res.message, "ok");
+    await runVerifyCheck();
+  } catch (err) {
+    btn.disabled = false;
+    setBatchResult(err.message, "err");
+  }
+});
+
 // --- Stage 5: verify --------------------------------------------------------
 bEl.verifyInput.addEventListener("keydown", (event) => {
   if (event.key !== "Enter") return;
@@ -4475,6 +4510,15 @@ async function runVerifyCheck() {
           (diff
             ? ` <span class="bexp--off">(${diff > 0 ? "+" : "−"}${Math.abs(diff)})</span>`
             : "");
+        // Correction offered ONLY upward: finding more boxes than Shopify
+        // knew about is physical proof; finding fewer proves nothing (the
+        // rest may sit mis-binned elsewhere). Confirmed, logged, undoable.
+        if (diff > 0 && r.sku) {
+          expCell += `<div><button class="reset onhand-fix" type="button"
+            data-sku="${escapeHtml(r.sku)}" data-qty="${found}"
+            data-exp="${r.expected_qty}" data-item="${r.item_id}"
+            title="Write the found count to Shopify on-hand — confirmed, logged, undoable from History">Set to ${found}</button></div>`;
+        }
       }
       return `<tr>
         <td>${productLink(r.product_title, r.shopify_product_id)}${
@@ -5440,6 +5484,42 @@ document
 // scanned code simply stops resolving to that product).
 async function undoHistoryEvent(e, btn) {
   if (!e || !e.undo) return;
+  // On-hand corrections: two-phase undo. The unconfirmed call answers
+  // with exactly what will happen — including the CURRENT live value, in
+  // case something else moved the number since — and that text IS the
+  // confirmation prompt.
+  if (e.undo.kind === "on-hand") {
+    btn.disabled = true;
+    try {
+      await postJson(`/api/onhand-updates/${e.undo.change_id}/undo`, {
+        changed_by: operatorEl.value || null,
+      });
+      await loadHistory();
+    } catch (err) {
+      const msg = String(err.message || "");
+      if (!msg.includes("Confirm to write it")) {
+        btn.disabled = false;
+        alert(msg);
+        return;
+      }
+      if (!confirm(msg)) {
+        btn.disabled = false;
+        return;
+      }
+      try {
+        const res = await postJson(
+          `/api/onhand-updates/${e.undo.change_id}/undo`,
+          { changed_by: operatorEl.value || null, confirmed: true }
+        );
+        await loadHistory();
+        alert(res.message);
+      } catch (err2) {
+        btn.disabled = false;
+        alert(err2.message);
+      }
+    }
+    return;
+  }
   // Batch events: release every tag tie that batch created, in one go.
   if (e.undo.kind === "batch-ties") {
     if (

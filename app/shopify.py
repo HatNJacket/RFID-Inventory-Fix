@@ -511,6 +511,80 @@ def get_on_hand_by_skus(skus: list[str]) -> dict[str, int]:
     }
 
 
+_ITEM_LOC_QUERY = """
+query ItemLoc($search: String!) {
+  productVariants(first: 5, query: $search) {
+    nodes {
+      sku
+      inventoryItem {
+        id
+        inventoryLevels(first: 5) {
+          nodes {
+            location { id }
+            quantities(names: ["on_hand"]) { name quantity }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_SET_ON_HAND_MUTATION = """
+mutation SetOnHand($input: InventorySetOnHandQuantitiesInput!) {
+  inventorySetOnHandQuantities(input: $input) {
+    userErrors { field message }
+  }
+}
+"""
+
+
+def set_on_hand(sku: str, qty: int) -> int:
+    """Set a SKU's ON-HAND in Shopify and return the value it replaced.
+
+    Deliberately narrow: exactly one stocked location (this store's
+    reality) — a multi-location SKU is refused rather than guessed at.
+    Requires the write_inventory scope on the app token."""
+    cleaned = sku.replace('"', "")
+    data = query_shopify(_ITEM_LOC_QUERY, {"search": f'sku:"{cleaned}"'})
+    node = next(
+        (v for v in data["productVariants"]["nodes"] if v["sku"] == sku),
+        None,
+    )
+    if node is None:
+        raise RuntimeError(f"SKU {sku} not found in Shopify.")
+    item = node["inventoryItem"]
+    levels = item["inventoryLevels"]["nodes"]
+    if not levels:
+        raise RuntimeError(f"{sku} is not stocked at any location.")
+    if len(levels) > 1:
+        raise RuntimeError(
+            f"{sku} is stocked at {len(levels)} locations — set its "
+            f"count in Shopify admin instead."
+        )
+    before = 0
+    for q in levels[0]["quantities"]:
+        if q["name"] == "on_hand":
+            before = q["quantity"]
+    # changeFromQuantity is the API's compare-and-set (2026-07 requires
+    # it): the write only lands if on-hand still holds the value we just
+    # read — a sale or another correction slipping in between makes this
+    # fail loudly instead of silently clobbering it.
+    result = query_shopify(_SET_ON_HAND_MUTATION, {"input": {
+        "reason": "correction",
+        "setQuantities": [{
+            "inventoryItemId": item["id"],
+            "locationId": levels[0]["location"]["id"],
+            "quantity": int(qty),
+            "changeFromQuantity": before,
+        }],
+    }})
+    errors = result["inventorySetOnHandQuantities"]["userErrors"]
+    if errors:
+        raise RuntimeError("; ".join(e["message"] for e in errors))
+    return before
+
+
 def get_on_hand(sku: str) -> int | None:
     """Live ON-HAND for one SKU (sum across locations); None if the SKU
     isn't found. Used for shelf expectations — never trust the mirror's
