@@ -118,6 +118,53 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
     r = cl.post("/api/bins/F9-9/check", json={"epcs":[]}).json()
     check("a bin with no mapped products stays empty", r["count"]==0, r)
 
+    # ---- bin_check reports requested SKUs the map doesn't put here ------
+    # (the F9198F-OPEN-BOX / F9384A bug: paired in this bin, mapped to
+    # another bin or to none, C72 popup read "seen 0 of 0")
+    with S(get_engine()) as s:
+        s.add(RfidAssignment(rfid_id="AAAA000000000000000000A5",
+                             shopify_variant_id="t:9",
+                             product_title="Open Box Twin",
+                             sku="HOME-1 - OPEN BOX",
+                             bin_location="D2-2"))
+        s.commit()
+    r = cl.post("/api/bins/D2-2/check",
+                json={"epcs":["AAAA000000000000000000A5"],
+                      "skus":["home-1 - open box","HOME-1"]}).json()
+    row = next((i for i in r["items"]
+                if (i["sku"] or "").upper()=="HOME-1 - OPEN BOX"), None)
+    check("unmapped batch SKU gets a real row (CI-matched)",
+          row is not None and row["tags_here"]==1 and row["detected"]==1
+          and row["in_bin_map"] is False
+          and row["product_title"]=="Open Box Twin", row)
+    home_row = next(i for i in r["items"] if i["sku"]=="HOME-1")
+    check("mapped SKUs are not duplicated by the request",
+          sum(1 for i in r["items"]
+              if (i["sku"] or "").upper()=="HOME-1")==1
+          and home_row["in_bin_map"] is True, r["items"])
+
+    # ---- verify: already-tagged boxes are an exception, not a miss ------
+    bidv = cl.post("/api/batches",
+                   json={"bin":"G1-1","created_by":"Steve"}).json()["id"]
+    itv = next(i for i in cl.get(f"/api/batches/{bidv}").json()["items"]
+               if i["sku"]=="DEEP-1")
+    cl.put(f"/api/batches/{bidv}/items/{itv['id']}/tagged-before",
+           json={"count":1,"updated_by":"Steve"})
+    rep = cl.post(f"/api/batches/{bidv}/verify",
+                  json={"epcs":["AAAA000000000000000000A4"]}).json()
+    row = next(i for i in rep["items"] if i["sku"]=="DEEP-1")
+    check("verify row carries tagged_before and counts the tag detected",
+          row["tagged_before"]==1 and row["detected"]==1
+          and row["qty_scanned"]==0 and row["paired_count"]==0, row)
+    check("sweep hearing the earlier tags = verify ok",
+          rep["ok"] is True, rep)
+    rep = cl.post(f"/api/batches/{bidv}/verify", json={"epcs":[]}).json()
+    check("sweep MISSING the earlier tags = verify not ok",
+          rep["ok"] is False, rep)
+    # Abandoned, not completed: a done batch on G1-1 would break the
+    # side-trip assertions below, which need that bin still to-do.
+    cl.post(f"/api/batches/{bidv}/abandon", json={"remove_ties": False})
+
     # ---- side trips are not finished bins --------------------------------
     cl.post(f"/api/batches/{bid2}/scan", json={"code":"111"})
     r = cl.post(f"/api/batches/{bid2}/divert", json={"bin":"G1-1"})

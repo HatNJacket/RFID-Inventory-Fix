@@ -4715,8 +4715,14 @@ async function runVerifyCheck() {
       // "Won't RFID scan" products are expected silent: their detected
       // column reads n/a and never drags the verdict down.
       const na = r.rfid_incompatible;
+      // Boxes already stickered before this batch (side trip, earlier
+      // session): no scans or pairs happened HERE — that's expected —
+      // but they are boxes on the shelf and their tags must answer the
+      // sweep like anyone else's.
+      const tb = r.tagged_before || 0;
+      const boxes = r.qty_scanned + tb;
       const paired = r.paired_count === r.qty_scanned;
-      const detected = na || r.detected === r.paired_count;
+      const detected = na || r.detected === r.paired_count + tb;
       if (r.qty_scanned !== r.paired_count) boxesOk = false;
       if (!paired) pairedOk = false;
       if (!detected) detectedOk = false;
@@ -4747,11 +4753,19 @@ async function runVerifyCheck() {
           na
             ? ' <span class="noscan-chip" title="tag won\'t scan when on box — sweeps don\'t expect it to answer">⊘</span>'
             : ""
+        }${
+          tb
+            ? ` <span class="tagged-chip" title="${tb} box(es) on this shelf were already RFID tagged before this batch (side trip or earlier session) — no scans or pairs expected here, but the sweep must hear their tags">✓${tb} already tagged</span>`
+            : ""
         }</td>
         <td class="mono">${escapeHtml(r.sku || "—")}</td>
-        <td class="num">${r.qty_scanned}</td>
+        <td class="num">${boxes}${
+          tb ? ` <span class="bexp--note" title="${r.qty_scanned} scanned this batch + ${tb} already tagged">(${r.qty_scanned}+${tb})</span>` : ""
+        }</td>
         <td class="num">${expCell}</td>
-        <td class="num${paired ? "" : " bexp--off"}">${r.paired_count}</td>
+        <td class="num${paired ? "" : " bexp--off"}">${r.paired_count}${
+          tb ? ` <span class="bexp--note" title="the ${tb} already-tagged box(es) were paired in an earlier session, not here">+${tb} earlier</span>` : ""
+        }</td>
         <td class="num${detected ? "" : " bexp--off"}">${
           na ? (r.detected > 0 ? `${r.detected} ⊘` : "n/a") : r.detected
         }</td>
@@ -4790,6 +4804,13 @@ async function runVerifyCheck() {
   const naNote = naSilent
     ? `<p class="result">⊘ ${naSilent} product(s) flagged "won't RFID scan" answered nothing, as expected — their tags are paired and counted; the sweep can't hear them on the box.</p>`
     : "";
+  // The already-tagged exception is said out loud too: 0 scanned and 0
+  // paired on those rows is CORRECT, not a miss — the boxes arrived with
+  // stickers from an earlier session and only need to answer the sweep.
+  const tbRows = rep.items.filter((r) => (r.tagged_before || 0) > 0);
+  const tbNote = tbRows.length
+    ? `<p class="result">✓ ${tbRows.length} product(s) had boxes already RFID tagged before this batch (side trip or earlier session) — 0 scans and 0 pairs there is expected; their tags are counted in Detected instead.</p>`
+    : "";
 
   // One button to press every eligible "Set to N" in turn — each write
   // stays its own API call and its own History row with its own Undo.
@@ -4809,7 +4830,7 @@ async function runVerifyCheck() {
       : "";
 
   bEl.verifyReport.innerHTML = `
-    ${verdict}${naNote}
+    ${verdict}${naNote}${tbNote}
     <div class="inventory__scroll"><table class="inventory__table">
       <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num" title="Shopify on-hand for this shelf; brackets show scanned-vs-expected">Expected</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
       <tbody>${rows}</tbody>

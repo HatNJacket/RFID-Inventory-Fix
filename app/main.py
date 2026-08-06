@@ -2358,6 +2358,11 @@ def bin_odd_barcodes(
 
 class BinCheckIn(BaseModel):
     epcs: list[str] = Field(default_factory=list, max_length=5000)
+    # Extra SKUs to report on beyond the bin map — the C72 sends its
+    # batch's SKUs, because a batch legitimately holds products the map
+    # doesn't put in this bin (open-box twins, strays kept here, map
+    # lag) and their tags deserve real counts, not a blank row.
+    skus: list[str] = Field(default_factory=list, max_length=500)
 
 
 @app.post("/api/bins/{bin_name}/check", dependencies=[Depends(require_user)])
@@ -2374,41 +2379,72 @@ def bin_check(
         .where(func.lower(BinMapEntry.bin) == bin_name.strip().lower())
         .order_by(BinMapEntry.product_title)
     ).all()
-    # One query for every tag on file for the bin's products — this used to
-    # be one query PER product, which timed real bins out.
-    skus = sorted({e.sku for e in rows if e.sku})
-    # Grouped case-insensitively: tags applied before a SKU's casing was
-    # tidied in Shopify must still count for the product.
+    # One query for every tag on file for the bin's products PLUS any
+    # caller-requested SKUs — this used to be one query per product,
+    # which timed real bins out. Upper-matched: sqlite compares IN()
+    # case-sensitively, and tag casing has never been guaranteed.
+    wanted = {e.sku.strip().upper() for e in rows if e.sku}
+    extra = {
+        s.strip().upper() for s in payload.skus if s and s.strip()
+    } - wanted
     tags_by_sku: dict[str, list[RfidAssignment]] = {}
-    if skus:
+    if wanted or extra:
         for t in session.scalars(
-            select(RfidAssignment).where(RfidAssignment.sku.in_(skus))
+            select(RfidAssignment).where(
+                func.upper(RfidAssignment.sku).in_(sorted(wanted | extra))
+            )
         ):
             tags_by_sku.setdefault((t.sku or "").upper(), []).append(t)
     noscan = _noscan_skus(session)
     bin_key = bin_name.strip().lower()
     report = []
+
+    def _tag_counts(sku_upper: str) -> tuple[int, int, int]:
+        tags = tags_by_sku.get(sku_upper, [])
+        return (
+            len(tags),
+            # Only the tags recorded as living in THIS bin — what a sweep
+            # of this shelf can fairly be expected to hear. Split-shelf
+            # stock elsewhere doesn't count against the sweep.
+            sum(1 for t in tags
+                if (t.bin_location or "").strip().lower() == bin_key),
+            sum(1 for t in tags if t.rfid_id.upper() in swept),
+        )
+
     for e in rows:
         if not e.sku:
             continue
-        tags = tags_by_sku.get(e.sku.upper(), [])
-        detected = [t for t in tags if t.rfid_id.upper() in swept]
+        on_file, here, det = _tag_counts(e.sku.upper())
         report.append({
             "sku": e.sku,
             "product_title": e.product_title,
             "variant_title": e.variant_title,
             "image_url": e.image_url,
             "expected_qty": e.qty,
-            "tags_on_file": len(tags),
-            # Only the tags recorded as living in THIS bin — what a sweep
-            # of this shelf can fairly be expected to hear. Split-shelf
-            # stock elsewhere doesn't count against the sweep.
-            "tags_here": sum(
-                1 for t in tags
-                if (t.bin_location or "").strip().lower() == bin_key
-            ),
-            "detected": len(detected),
+            "tags_on_file": on_file,
+            "tags_here": here,
+            "detected": det,
             "rfid_incompatible": e.sku.strip().upper() in noscan,
+            "in_bin_map": True,
+        })
+    # Requested SKUs the bin map doesn't put here (open-box twins, kept
+    # strays, map lag): same counts, named from their newest tag, no
+    # expected quantity to claim.
+    for key in sorted(extra):
+        tags = tags_by_sku.get(key, [])
+        on_file, here, det = _tag_counts(key)
+        newest = max(tags, key=lambda t: t.id) if tags else None
+        report.append({
+            "sku": newest.sku if newest else key,
+            "product_title": newest.product_title if newest else None,
+            "variant_title": newest.variant_title if newest else None,
+            "image_url": None,
+            "expected_qty": None,
+            "tags_on_file": on_file,
+            "tags_here": here,
+            "detected": det,
+            "rfid_incompatible": key in noscan,
+            "in_bin_map": False,
         })
     return {
         "bin": bin_name.strip(),
@@ -4685,17 +4721,27 @@ def batch_verify(
         ).all()
         assignments = {r.rfid_id.upper(): r for r in rows}
 
-    # SKU half of the key is case-insensitive — tags paired before a SKU's
-    # casing was tidied must still count as ours.
-    batch_keys = {((i.sku or "").upper(), i.barcode) for i in items}
-    detected = {}  # (SKU, barcode) -> count
+    # Tags are OURS by case-insensitive SKU alone. The old key was
+    # (SKU, barcode), which called a product's own tags "foreign" the
+    # moment its barcode had been replaced since tagging (or the tag was
+    # made by a flow that never recorded one). Barcode only breaks the
+    # tie for tags with no SKU at all.
+    batch_skus = {(i.sku or "").upper() for i in items if i.sku}
+    skuless_barcodes = {i.barcode for i in items if not i.sku and i.barcode}
+    detected = {}  # upper-SKU (or ("", barcode)) -> count
     foreign, unknown = [], []
     for epc in sorted(epcs):
         row = assignments.get(epc)
         if row is None:
             unknown.append(epc)
-        elif ((row.sku or "").upper(), row.barcode) in batch_keys:
-            key = ((row.sku or "").upper(), row.barcode)
+            continue
+        rsku = (row.sku or "").upper()
+        key = None
+        if rsku and rsku in batch_skus:
+            key = rsku
+        elif not rsku and row.barcode in skuless_barcodes:
+            key = ("", row.barcode)
+        if key is not None:
             detected[key] = detected.get(key, 0) + 1
         else:
             foreign.append(
@@ -4714,8 +4760,14 @@ def batch_verify(
             "sku": i.sku,
             "product_title": i.label_name or i.product_title,
             "qty_scanned": i.qty_scanned,
+            # Boxes that already wore a sticker from an earlier session:
+            # they were never scanned or paired HERE, but their tags are
+            # on this shelf and the sweep is expected to hear them.
+            "tagged_before": i.tagged_before,
             "paired_count": i.paired_count,
-            "detected": detected.get(((i.sku or "").upper(), i.barcode), 0),
+            "detected": detected.get(
+                (i.sku or "").upper() if i.sku else ("", i.barcode), 0
+            ),
             # Expected silent: the tag never answers once it's on the box.
             "rfid_incompatible": (i.sku or "").strip().upper() in noscan,
             # What Shopify expected on this shelf (snapshot from scan
@@ -4732,7 +4784,9 @@ def batch_verify(
         not unknown
         and not foreign
         and all(
-            r["detected"] >= r["paired_count"]
+            # A sweep should hear this batch's pairs AND the tags that
+            # were already on the shelf's boxes before it started.
+            r["detected"] >= r["paired_count"] + r["tagged_before"]
             for r in report if not r["rfid_incompatible"]
         )
     )

@@ -2362,10 +2362,19 @@ public class MainActivity extends Activity {
                 api("POST", "/api/epc-captures", body);
                 // Then the same sweep against the bin, for the on-device
                 // table: every product the bin knows about, with tags on
-                // file / in this bin / actually heard.
+                // file / in this bin / actually heard. The batch's own
+                // SKUs ride along — open-box twins and kept strays live
+                // in this batch without being in the bin map, and their
+                // tags deserve real counts, not "seen 0 of 0".
+                JSONArray batchSkus = new JSONArray();
+                for (BItem b : bItems) {
+                    if (b.resolved && b.sku != null) batchSkus.put(b.sku);
+                }
                 JSONObject check = api("POST", "/api/bins/"
                         + URLEncoder.encode(batchBin, "UTF-8") + "/check",
-                        new JSONObject().put("epcs", new JSONArray(epcs)));
+                        new JSONObject()
+                                .put("epcs", new JSONArray(epcs))
+                                .put("skus", batchSkus));
                 final JSONArray checkItems = check.optJSONArray("items");
                 final int sweptCount = epcs.size();
                 ui.post(() -> {
@@ -2391,6 +2400,9 @@ public class MainActivity extends Activity {
         String sku, title, variant, imageUrl;
         Integer expected;
         int printed, paired, detected, tagsHere, tagsOnFile;
+        // Boxes stickered before this batch — 0 printed / 0 paired on
+        // this row is correct, the sweep just has to hear their tags.
+        int taggedBefore;
         boolean noScan, inBatch;
 
         String name() {
@@ -2461,6 +2473,7 @@ public class MainActivity extends Activity {
             r.inBatch = true;
             r.printed = b.labelsTotal;
             r.paired = b.paired;
+            r.taggedBefore = b.taggedBefore;
             r.noScan = r.noScan || b.noScan;
             if (r.imageUrl == null) r.imageUrl = b.imageUrl;
         }
@@ -2470,7 +2483,7 @@ public class MainActivity extends Activity {
         while (itr.hasNext()) {
             VRow r = itr.next();
             if (r.printed == 0 && r.paired == 0 && r.tagsHere == 0
-                    && r.detected == 0) {
+                    && r.detected == 0 && r.taggedBefore == 0) {
                 itr.remove();
             }
         }
@@ -2530,6 +2543,9 @@ public class MainActivity extends Activity {
             counts.setText("SKU " + r.sku + "  \u00b7  "
                     + (r.inBatch
                        ? "printed " + r.printed + "  \u00b7  tagged " + r.paired
+                         + (r.taggedBefore > 0
+                            ? "  \u00b7  \u2713" + r.taggedBefore + " already tagged"
+                            : "")
                        : "not in this batch")
                     + "  \u00b7  "
                     + (r.noScan ? "won't scan on box \u2014 seen n/a"
@@ -2593,6 +2609,12 @@ public class MainActivity extends Activity {
         if (r.inBatch) {
             sb.append("\nThis batch: printed ").append(r.printed)
               .append(", tagged ").append(r.paired);
+            if (r.taggedBefore > 0) {
+                sb.append("\n✓ ").append(r.taggedBefore)
+                  .append(" box(es) were already tagged before this "
+                          + "batch — 0 printed/0 tagged here is "
+                          + "expected; the sweep just has to hear them.");
+            }
         } else {
             sb.append("\nNot part of this batch \u2014 tagged in an earlier "
                     + "session.");

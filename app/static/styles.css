@@ -1356,6 +1356,26 @@ a { color: var(--accent); }
   vertical-align: 2px;
   cursor: help;
 }
+/* Boxes stickered before this batch: green family — a fact, not a
+   problem. The chip explains why scanned/paired sit at 0 on that row. */
+.tagged-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ok-ink, #0c5132);
+  background: var(--ok-bg, #e6f3ec);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  vertical-align: 2px;
+  cursor: help;
+}
+.bexp--note {
+  font-size: 11px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  cursor: help;
+}
 
 /* fix-label-&-reprint dialog: stacked line editors + fit warning */
 #breprint-overlay .step__label { display: block; margin: 10px 0 4px; }

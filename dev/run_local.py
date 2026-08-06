@@ -59,7 +59,15 @@ with Session(get_engine()) as s:
                          shopify_variant_id="t:4", qty_scanned=3,
                          paired_count=3, bin_location="T1-1",
                          expected_qty=1)
-    s.add_all([normal, flagged, surplus, surplus2])
+    # Already-tagged exception: boxes stickered on an earlier side trip —
+    # 0 scanned / 0 paired here is CORRECT; the sweep hears their tags.
+    pretag = BatchItem(batch_id=b.id, scanned_code="555", resolved=True,
+                       sku="PRETAG-1", barcode="555",
+                       product_title="Askar FMA180 (already-tagged test)",
+                       shopify_variant_id="t:5", qty_scanned=0,
+                       paired_count=0, tagged_before=2,
+                       bin_location="T1-1", expected_qty=2)
+    s.add_all([normal, flagged, surplus, surplus2, pretag])
     # Recommended checks with different mismatch sizes, for the sort.
     s.add_all([
         ReviewTask(category="inventory-check", sku="SMALL-1",
@@ -80,6 +88,13 @@ with Session(get_engine()) as s:
         "NORMAL-1": ["AAAA0000000000000000000A", "AAAA0000000000000000000B"],
         "OPTO-LPRO": ["BBBB0000000000000000000A", "BBBB0000000000000000000B"],
     }
+    # PRETAG-1's tags predate the batch (no batch_id, no barcode on the
+    # tag rows — the SKU-only match must claim them, not call them
+    # foreign) and the sweep heard both.
+    for epc in ("CCCC0000000000000000000A", "CCCC0000000000000000000B"):
+        s.add(RfidAssignment(rfid_id=epc, shopify_variant_id="t:5",
+                             product_title="Askar FMA180",
+                             sku="pretag-1", bin_location="T1-1"))
     for sku, pair in epcs.items():
         title = ("Baader UHC Filter 2in" if sku == "NORMAL-1"
                  else "Optolong L-Pro 2in (won't-scan test)")
@@ -93,10 +108,13 @@ with Session(get_engine()) as s:
                                  barcode="111" if sku == "NORMAL-1"
                                  else "222", bin_location="T1-1",
                                  batch_id=b.id))
-    # The C72 sweep heard ONLY the normal product.
+    # The C72 sweep heard the normal product AND the pre-tagged boxes.
+    swept = epcs["NORMAL-1"] + [
+        "CCCC0000000000000000000A", "CCCC0000000000000000000B",
+    ]
     s.add(EpcCapture(device="C72-test", note="Bin T1-1 verify sweep",
-                     batch_id=b.id, epc_count=2,
-                     epcs="\n".join(epcs["NORMAL-1"])))
+                     batch_id=b.id, epc_count=len(swept),
+                     epcs="\n".join(swept)))
     # Audit-board data: Steve's worked example (score 6), a score-4 bin,
     # an untagged bin, and the T1-1 products (received-not-found: NORMAL
     # shows 5 on hand, only 2 tagged).
