@@ -197,16 +197,29 @@ def update_variant_sku(
 _QTY_QUERY = """
 query Quantities($search: String!) {
   productVariants(first: 50, query: $search) {
-    nodes { sku inventoryQuantity }
+    nodes {
+      sku
+      inventoryQuantity
+      inventoryItem {
+        inventoryLevels(first: 10) {
+          nodes { quantities(names: ["on_hand"]) { name quantity } }
+        }
+      }
+    }
   }
 }
 """
 
 
 def get_quantities_by_skus(skus: list[str]) -> dict[str, int]:
-    """Live inventory quantities for a set of SKUs, batched ~25 per query.
-    The TELCAN mirror's quantities lag its sync schedule; this is the
-    real-time truth for the inventory view."""
+    """Live ON-HAND per SKU, batched ~25 per query — what's physically on
+    the shelf, which is the only number worth comparing tag counts to.
+
+    This used to return `inventoryQuantity`, i.e. AVAILABLE, which is
+    on-hand minus committed: it sinks whenever orders are placed and goes
+    negative on oversells, so the Inventory tab showed 0 (or -1) for
+    products sitting right there on the shelf. Everything else in the app
+    was migrated to on_hand back in July; this call was missed."""
     quantities: dict[str, int] = {}
     cleaned = [s.replace('"', "") for s in skus if s]
     for i in range(0, len(cleaned), 25):
@@ -214,8 +227,13 @@ def get_quantities_by_skus(skus: list[str]) -> dict[str, int]:
         search = " OR ".join(f'sku:"{s}"' for s in chunk)
         data = query_shopify(_QTY_QUERY, {"search": search})
         for node in data["productVariants"]["nodes"]:
-            if node["sku"]:
-                quantities[node["sku"]] = node["inventoryQuantity"]
+            if not node["sku"]:
+                continue
+            on_hand = _sum_on_hand(node)
+            # Fallback only when the store exposes no levels at all.
+            quantities[node["sku"]] = (
+                on_hand if on_hand is not None else node["inventoryQuantity"]
+            )
     return quantities
 
 
