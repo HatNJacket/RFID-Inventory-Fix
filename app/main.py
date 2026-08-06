@@ -2399,40 +2399,45 @@ def bin_check(
     bin_key = bin_name.strip().lower()
     report = []
 
-    def _tag_counts(sku_upper: str) -> tuple[int, int, int]:
+    def _units(tags) -> int:
+        # A sealed-case tag stands for its case_units — the audit compares
+        # against Shopify, which counts units, not boxes.
+        return sum((t.case_units or 1) for t in tags)
+
+    def _tag_counts(sku_upper: str) -> dict:
         tags = tags_by_sku.get(sku_upper, [])
-        return (
-            len(tags),
-            # Only the tags recorded as living in THIS bin — what a sweep
-            # of this shelf can fairly be expected to hear. Split-shelf
-            # stock elsewhere doesn't count against the sweep.
-            sum(1 for t in tags
-                if (t.bin_location or "").strip().lower() == bin_key),
-            sum(1 for t in tags if t.rfid_id.upper() in swept),
-        )
+        # Only the tags recorded as living in THIS bin — what a sweep
+        # of this shelf can fairly be expected to hear. Split-shelf
+        # stock elsewhere doesn't count against the sweep.
+        here = [t for t in tags
+                if (t.bin_location or "").strip().lower() == bin_key]
+        det = [t for t in tags if t.rfid_id.upper() in swept]
+        return {
+            "tags_on_file": len(tags),
+            "tags_here": len(here),
+            "detected": len(det),
+            "units_here": _units(here),
+            "detected_units": _units(det),
+        }
 
     for e in rows:
         if not e.sku:
             continue
-        on_file, here, det = _tag_counts(e.sku.upper())
         report.append({
             "sku": e.sku,
             "product_title": e.product_title,
             "variant_title": e.variant_title,
             "image_url": e.image_url,
             "expected_qty": e.qty,
-            "tags_on_file": on_file,
-            "tags_here": here,
-            "detected": det,
             "rfid_incompatible": e.sku.strip().upper() in noscan,
             "in_bin_map": True,
+            **_tag_counts(e.sku.upper()),
         })
     # Requested SKUs the bin map doesn't put here (open-box twins, kept
     # strays, map lag): same counts, named from their newest tag, no
     # expected quantity to claim.
     for key in sorted(extra):
         tags = tags_by_sku.get(key, [])
-        on_file, here, det = _tag_counts(key)
         newest = max(tags, key=lambda t: t.id) if tags else None
         report.append({
             "sku": newest.sku if newest else key,
@@ -2440,17 +2445,43 @@ def bin_check(
             "variant_title": newest.variant_title if newest else None,
             "image_url": None,
             "expected_qty": None,
-            "tags_on_file": on_file,
-            "tags_here": here,
-            "detected": det,
             "rfid_incompatible": key in noscan,
             "in_bin_map": False,
+            **_tag_counts(key),
         })
+    # The rest of the sweep's story — tags of OTHER products heard on
+    # this shelf, and EPCs nobody owns. This is what turns a bin check
+    # into a bin AUDIT: the strays are usually the answer to "why is the
+    # count wrong".
+    foreign, unknown = [], []
+    if swept:
+        covered = wanted | extra
+        owners = {
+            a.rfid_id.upper(): a
+            for a in session.scalars(
+                select(RfidAssignment).where(
+                    func.upper(RfidAssignment.rfid_id).in_(sorted(swept))
+                )
+            )
+        }
+        for epc in sorted(swept):
+            a = owners.get(epc)
+            if a is None:
+                unknown.append(epc)
+            elif (a.sku or "").strip().upper() not in covered:
+                foreign.append({
+                    "epc": a.rfid_id,
+                    "sku": a.sku,
+                    "product_title": a.product_title,
+                    "bin_location": a.bin_location,
+                })
     return {
         "bin": bin_name.strip(),
         "swept": len(swept),
         "count": len(report),
         "items": report,
+        "foreign": foreign,
+        "unknown_epcs": unknown,
     }
 
 

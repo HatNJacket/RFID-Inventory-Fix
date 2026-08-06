@@ -136,6 +136,22 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
     r = cl.post("/api/bins/F9-9/check", json={"epcs":[]}).json()
     check("a bin with no mapped products stays empty", r["count"]==0, r)
 
+    # ---- bin AUDIT: foreign + unknown tags in the sweep -----------------
+    r = cl.post("/api/bins/G1-1/check",
+                json={"epcs":["AAAA000000000000000000A4",
+                              "AAAA000000000000000000A1",
+                              "FFFF00000000000000000000"]}).json()
+    row = next(i for i in r["items"] if i["sku"]=="DEEP-1")
+    check("bin audit counts units for the bin's own product",
+          row["detected"]==1 and row["detected_units"]==1
+          and row["units_here"]==1, row)
+    check("another product's tag heard on the shelf lands in foreign",
+          len(r["foreign"])==1 and r["foreign"][0]["sku"]=="HOME-1",
+          r["foreign"])
+    check("an EPC nobody owns lands in unknown",
+          r["unknown_epcs"]==["FFFF00000000000000000000"],
+          r["unknown_epcs"])
+
     # ---- bin_check reports requested SKUs the map doesn't put here ------
     # (the F9198F-OPEN-BOX / F9384A bug: paired in this bin, mapped to
     # another bin or to none, C72 popup read "seen 0 of 0")

@@ -5407,6 +5407,131 @@ function renderAuditBins() {
   });
 }
 
+// === Bin audit: newest C72 sweep vs any bin =================================
+// The Check-step story without a batch: per product, what Shopify expects,
+// what's tagged here, what the sweep actually heard — plus strays and
+// unknown tags. Display only.
+document.getElementById("binaudit-run").addEventListener("click", async () => {
+  const binEl = document.getElementById("binaudit-bin");
+  const out = document.getElementById("binaudit-report");
+  const bin = binEl.value.trim();
+  if (!bin) {
+    out.innerHTML = `<p class="result result--err">Which bin? Type it first (e.g. D2-2).</p>`;
+    binEl.focus();
+    return;
+  }
+  out.innerHTML = `<p class="result">Pulling the latest sweep…</p>`;
+  try {
+    const cap = await apiJson("/api/epc-captures/latest");
+    const rep = await postJson(
+      `/api/bins/${encodeURIComponent(bin)}/check`,
+      { epcs: cap.epcs }
+    );
+    renderBinAudit(out, rep, cap);
+  } catch (err) {
+    out.innerHTML = `<p class="result result--err">${escapeHtml(err.message)}</p>`;
+  }
+});
+
+function renderBinAudit(out, rep, cap) {
+  const rows = rep.items
+    .map((r) => {
+      const exp = r.expected_qty;
+      const flags = [];
+      if (r.rfid_incompatible) {
+        flags.push(["⊘ won't scan on box", "chip--na"]);
+      } else if (r.detected < r.tags_here) {
+        flags.push([
+          `${r.tags_here - r.detected} tagged box(es) silent`,
+          "chip--warn",
+        ]);
+      }
+      if (exp != null && r.units_here < exp) {
+        flags.push([`−${exp - r.units_here} vs Shopify`, "chip--bad"]);
+      } else if (exp != null && exp >= 0 && r.units_here > exp) {
+        flags.push([`+${r.units_here - exp} vs Shopify`, "chip--warn"]);
+      }
+      return { r, flags };
+    })
+    // Nothing expected, nothing tagged, nothing heard: not part of this
+    // bin's story.
+    .filter(
+      ({ r }) =>
+        (r.expected_qty || 0) > 0 || r.tags_here > 0 || r.detected > 0
+    )
+    .sort(
+      (a, b) =>
+        b.flags.length - a.flags.length ||
+        String(a.r.product_title).localeCompare(String(b.r.product_title))
+    );
+
+  const cells = rows
+    .map(({ r, flags }) => {
+      const tagsNote = (units, tags) =>
+        units !== tags ? ` <span class="bexp--note">(${tags} tag${tags === 1 ? "" : "s"})</span>` : "";
+      return `<tr>
+        <td>${
+          r.image_url
+            ? `<img class="bvx__img" style="width:40px;height:40px" src="${escapeHtml(r.image_url)}" alt="">`
+            : ""
+        }</td>
+        <td>${escapeHtml(r.product_title || "(unknown)")}${
+          r.variant_title ? ` (${escapeHtml(r.variant_title)})` : ""
+        }</td>
+        <td class="mono"><span class="skulink" data-sku="${escapeHtml(r.sku || "")}" title="Open this product — label editor, RFID flag, full history">${escapeHtml(r.sku || "—")}</span></td>
+        <td class="num">${r.expected_qty ?? "—"}</td>
+        <td class="num">${r.units_here}${tagsNote(r.units_here, r.tags_here)}</td>
+        <td class="num">${r.detected_units}${tagsNote(r.detected_units, r.detected)}</td>
+        <td>${
+          flags.length
+            ? flags
+                .map(
+                  ([t, c]) =>
+                    `<span class="binaudit-chip ${c}">${escapeHtml(t)}</span>`
+                )
+                .join(" ")
+            : "✓"
+        }</td>
+      </tr>`;
+    })
+    .join("");
+
+  const strays = rep.foreign
+    .map(
+      (f) =>
+        `<li>${escapeHtml(f.product_title || "?")} <span class="mono">${escapeHtml(f.sku || "")}</span>${
+          f.bin_location ? " · recorded at " + escapeHtml(f.bin_location) : ""
+        } <span class="mono">${escapeHtml(f.epc)}</span></li>`
+    )
+    .join("");
+  const unknowns = rep.unknown_epcs
+    .map((e) => `<li>Unknown tag <span class="mono">${escapeHtml(e)}</span></li>`)
+    .join("");
+
+  out.innerHTML = `
+    <p class="result result--ok">Sweep #${cap.id} from ${escapeHtml(
+      cap.device || "the C72"
+    )} — ${cap.epc_count} tag(s), ${escapeHtml(fmtWhen(cap.created_at))} —
+    checked against ${escapeHtml(rep.bin)}.</p>
+    <div class="inventory__scroll"><table class="inventory__table">
+      <thead><tr><th></th><th>Product</th><th>SKU</th>
+        <th class="num" title="Shopify on-hand for this bin">Expected</th>
+        <th class="num" title="Units whose tag records say this bin">Tagged here</th>
+        <th class="num" title="Units whose tags answered this sweep">Seen</th>
+        <th></th></tr></thead>
+      <tbody>${cells || `<tr><td colspan="7">Nothing expected or tagged in ${escapeHtml(rep.bin)}.</td></tr>`}</tbody>
+    </table></div>
+    ${
+      strays || unknowns
+        ? `<div class="recent__head" style="margin-top:14px"><h2>Also heard on this shelf (${rep.foreign.length + rep.unknown_epcs.length})</h2></div>
+           <ul class="recent__list">${strays}${unknowns}</ul>`
+        : `<p class="result">No stray or unknown tags in the sweep.</p>`
+    }`;
+  out.querySelectorAll(".skulink").forEach((s) =>
+    s.addEventListener("click", () => openProductHistory(s.dataset.sku))
+  );
+}
+
 async function loadAuditBins() {
   const list = document.getElementById("audit-bins");
   list.innerHTML = '<li class="recent__empty">Comparing…</li>';

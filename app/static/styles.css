@@ -1404,6 +1404,23 @@ tr.bvx-detail td { background: var(--card-2); padding: 12px 14px; }
 }
 .bvx__sum { font-size: 12.5px; font-weight: 600; padding-bottom: 8px; }
 .bvx-save { padding-bottom: 6px; }
+/* Bin-audit verdict chips: what a sweep says about a shelf, in the
+   Check step's language. */
+.binaudit-chip {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  margin: 1px 0;
+}
+.binaudit-chip.chip--bad { color: var(--bad-ink); background: var(--bad-bg); }
+.binaudit-chip.chip--warn {
+  color: var(--warn-ink, #8a6116);
+  background: var(--warn-bg, #fff8e1);
+}
+.binaudit-chip.chip--na { color: var(--ink-dim); background: var(--card-2); }
 
 /* fix-label-&-reprint dialog: stacked line editors + fit warning */
 #breprint-overlay .step__label { display: block; margin: 10px 0 4px; }

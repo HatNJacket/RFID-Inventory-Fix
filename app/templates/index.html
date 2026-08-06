@@ -746,9 +746,26 @@
       <ul class="recent__list" id="review-list"></ul>
     </section>
 
-    <!-- Audits tab (WIP placeholder) -->
+    <!-- Audits tab -->
     <section class="inventory" id="tab-audits" hidden>
+      <!-- Bin audit: sweep a shelf with the C72's SWEEP tab, SEND, then
+           check it here — the Check-step story for any bin, no batch. -->
       <div class="recent__head">
+        <h2>Audit a bin with a C72 sweep</h2>
+      </div>
+      <p class="linkbox__text" style="max-width:78ch">
+        Sweep the shelf on the C72 (SWEEP tab → SEND), then pull it here
+        against a bin: every product the bin should hold, what answered, and
+        any strays or unknown tags. Display only — nothing writes anywhere.
+      </p>
+      <div class="linkbox__actions" style="margin-bottom:10px">
+        <input id="binaudit-bin" class="recent__search" style="max-width:140px"
+               type="text" placeholder="Bin, e.g. D2-2" autocomplete="off" />
+        <button class="reset" id="binaudit-run" type="button"
+                title="Reads the newest sweep sent from the C72 and checks it against this bin">Pull latest C72 sweep &amp; check</button>
+      </div>
+      <div id="binaudit-report"></div>
+      <div class="recent__head" style="margin-top:24px">
         <h2>Shopify vs RFID, by bin <span class="recent__note" id="audit-meta"></span></h2>
         <input id="audit-filter" class="recent__search" type="search" placeholder="Filter by bin or SKU…" autocomplete="off" />
       </div>
