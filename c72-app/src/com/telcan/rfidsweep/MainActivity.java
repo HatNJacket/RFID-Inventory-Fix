@@ -708,15 +708,210 @@ public class MainActivity extends Activity {
         stationHint.setTextSize(14);
         stationHint.setPadding(dp(4), dp(10), dp(4), 0);
         stationHint.setText("Scan a product barcode, then pull the TRIGGER "
-                + "on the RFID sticker to link it.\n\nEach trigger pull "
-                + "links one more tag to the shown product.");
+                + "on the RFID sticker to link it.\n\nNo product loaded? "
+                + "Pull the trigger (or tap IDENTIFY) to read a sticker "
+                + "and be told what it is.");
         v.addView(stationHint, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
+        LinearLayout srow = new LinearLayout(this);
+        srow.setGravity(Gravity.CENTER);
+        Button identify = smallBtn("🔍 WHAT'S THIS TAG?");
+        identify.setOnClickListener(x -> identifyTagRead());
+        srow.addView(identify, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         Button unlink = smallBtn("UNLINK LAST TAG");
         unlink.setOnClickListener(x -> stationUnlink());
-        v.addView(unlink);
+        srow.addView(unlink, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        v.addView(srow);
         return v;
+    }
+
+    // ---- "What is this sticker?" (Steve's TODO #8): read ONE tag and
+    // show everything known about it, with unlink as the main action. The
+    // orphan case is the point — a tag paired under a SKU the store has
+    // since renamed reads as a product that no longer exists. ----
+    private void identifyTagRead() {
+        if (!readerReady) {
+            beep(SOUND_ERR);
+            status.setText("RFID reader not ready.");
+            return;
+        }
+        if (tagReadBusy) return;
+        tagReadBusy = true;
+        status.setText("Reading ONE tag — hold the antenna against the "
+                + "sticker…");
+        new Thread(() -> {
+            final TagRead read = readStrongestTag(700);
+            final String epc = read == null ? null : read.epc;
+            if (epc == null || epc.isEmpty()) {
+                ui.post(() -> {
+                    tagReadBusy = false;
+                    beep(SOUND_ERR);
+                    status.setText("No tag read — get closer and try "
+                            + "again.");
+                });
+                return;
+            }
+            try {
+                JSONObject info = api("GET", "/api/tag-info/"
+                        + URLEncoder.encode(epc, "UTF-8"), null);
+                ui.post(() -> {
+                    tagReadBusy = false;
+                    beep(SOUND_OK);
+                    status.setText("Tag read ✓");
+                    showTagInfo(epc, info);
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    tagReadBusy = false;
+                    beep(SOUND_ERR);
+                    status.setText("Lookup failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    private void showTagInfo(String epc, JSONObject info) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(8), dp(16), dp(4));
+
+        boolean found = info.optBoolean("found", false);
+        JSONObject a = info.optJSONObject("assignment");
+
+        if (found && a != null) {
+            ImageView img = new ImageView(this);
+            img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            img.setBackgroundColor(C_BG);
+            LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(120));
+            il.bottomMargin = dp(8);
+            box.addView(img, il);
+            loadImage(info.isNull("image_url") ? null
+                    : info.optString("image_url"), img);
+
+            TextView name = new TextView(this);
+            name.setTextSize(15);
+            name.setTypeface(null, Typeface.BOLD);
+            name.setTextColor(C_TEXT);
+            name.setText(a.optString("product_title", "(unknown)"));
+            box.addView(name);
+        }
+
+        TextView meta = new TextView(this);
+        meta.setTextSize(13);
+        meta.setTextColor(C_TEXT);
+        meta.setPadding(0, dp(6), 0, 0);
+        StringBuilder sb = new StringBuilder();
+        sb.append("Tag: ").append(epc);
+        if (found && a != null) {
+            sb.append("\nSKU: ").append(a.isNull("sku") ? "—"
+                    : a.optString("sku"));
+            if (!a.isNull("barcode")) {
+                sb.append("\nBarcode: ").append(a.optString("barcode"));
+            }
+            sb.append("\nBin on this tag: ").append(
+                    a.isNull("bin_location") ? "—"
+                            : a.optString("bin_location"));
+            org.json.JSONArray lb = info.optJSONArray("live_bins");
+            if (lb != null && lb.length() > 0) {
+                StringBuilder bins = new StringBuilder();
+                for (int i = 0; i < lb.length(); i++) {
+                    if (i > 0) bins.append(", ");
+                    bins.append(lb.optString(i));
+                }
+                sb.append("\nShopify says: ").append(bins);
+            }
+            sb.append("\nTags for this product: ")
+              .append(info.optInt("tags_total", 0))
+              .append("  (").append(info.optInt("tags_here", 0))
+              .append(" in this bin)");
+            if (!info.isNull("expected_qty")) {
+                sb.append("\nShopify on-hand: ")
+                  .append(info.optInt("expected_qty"));
+            }
+            JSONObject b = info.optJSONObject("batch");
+            if (b != null) {
+                sb.append("\nTagged in batch #").append(b.optInt("id"))
+                  .append(" (").append(b.optString("bin_name"))
+                  .append(", ").append(b.optString("status")).append(")");
+            }
+            sb.append("\nBy ").append(a.isNull("assigned_by") ? "—"
+                    : a.optString("assigned_by"));
+        }
+        meta.setText(sb.toString());
+        box.addView(meta);
+
+        org.json.JSONArray notes = info.optJSONArray("notes");
+        for (int i = 0; notes != null && i < notes.length(); i++) {
+            TextView n = new TextView(this);
+            n.setTextSize(12);
+            n.setTextColor(C_OVER);
+            n.setBackground(rr(C_OVER_BG, 0, 8));
+            n.setPadding(dp(8), dp(6), dp(8), dp(6));
+            LinearLayout.LayoutParams nl = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            nl.topMargin = dp(8);
+            n.setText("⚠ " + notes.optString(i));
+            box.addView(n, nl);
+        }
+
+        ScrollView sc = new ScrollView(this);
+        sc.addView(box);
+        AlertDialog.Builder bld = new AlertDialog.Builder(this)
+                .setTitle(found ? "This sticker" : "Unknown sticker")
+                .setView(sc)
+                .setNegativeButton("CLOSE", null);
+        if (found) {
+            bld.setPositiveButton("UNLINK THIS TAG…", (d, w) ->
+                    confirmUnlinkTag(epc, a));
+            // Straight into the hunt for the rest of that product's boxes.
+            if (a != null && !a.isNull("sku")) {
+                final String sku = a.optString("sku");
+                bld.setNeutralButton("LOCATE PRODUCT", (d, w) -> {
+                    selectTab(TAB_LOCATE);
+                    locateLookup(sku);
+                });
+            }
+        }
+        bld.show();
+    }
+
+    private void confirmUnlinkTag(String epc, JSONObject a) {
+        String what = a == null ? epc
+                : a.optString("product_title", epc);
+        new AlertDialog.Builder(this)
+                .setTitle("Unlink this tag?")
+                .setMessage(what + "\n\nThe tag stops counting as that "
+                        + "product's box. The sticker stays on the box — "
+                        + "peel it off, or re-pair it to the right product "
+                        + "in a batch.\n\nNothing in Shopify changes. "
+                        + "History records the unlink.")
+                .setPositiveButton("UNLINK", (d, w) -> new Thread(() -> {
+                    try {
+                        api("DELETE", "/api/rfid-assignments/"
+                                + URLEncoder.encode(epc, "UTF-8")
+                                + "?by=" + URLEncoder.encode(
+                                        prefs.getString("device", "C72"),
+                                        "UTF-8"), null);
+                        ui.post(() -> {
+                            beep(SOUND_OK);
+                            status.setText("Tag unlinked ✓ — "
+                                    + "peel the sticker off, or re-pair it.");
+                        });
+                    } catch (Exception e) {
+                        ui.post(() -> {
+                            beep(SOUND_ERR);
+                            status.setText("Unlink failed: "
+                                    + e.getMessage());
+                        });
+                    }
+                }).start())
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private View buildSweepView() {
@@ -5478,7 +5673,13 @@ public class MainActivity extends Activity {
                     + "shows with its tag count.\n"
                     + "• Pull the trigger near ONE sticker to link it. "
                     + "The strongest tag wins, and UNDO unlinks the last."
-                    + "\n• Scan a BIN barcode (like D1-3) while a product "
+                    + "\n• With NO product loaded, the trigger (or "
+                    + "WHAT'S THIS TAG?) reads a sticker and tells you "
+                    + "what it is: product, SKU, how many tags that "
+                    + "product has, which bin, which batch tagged it, and "
+                    + "whether Shopify still knows the SKU. From there "
+                    + "you can UNLINK it or LOCATE the product.\n"
+                    + "• Scan a BIN barcode (like D1-3) while a product "
                     + "is up to move the product there — RFID records and "
                     + "Shopify both.\n"
                     + "• ⊘ means the product is flagged \"won't RFID "
@@ -6147,8 +6348,9 @@ public class MainActivity extends Activity {
 
     private void stationReadTag() {
         if (stationProduct == null) {
-            beep(SOUND_ERR);
-            status.setText("Scan a product barcode first.");
+            // No product up: the trigger means "what IS this sticker?"
+            // rather than an error nobody can act on.
+            identifyTagRead();
             return;
         }
         if (!readerReady) {

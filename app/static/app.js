@@ -206,6 +206,7 @@ function requireOperator() {
 // browser) — editing one repaints every chip on the page instantly.
 const EVENT_META = {
   "tag-assigned": ["Assigned Tag", "#29845a"],
+  "tag-unlinked": ["Unlinked Tag", "#d72c0d"],
   "barcode-linked": ["Linked Barcode", "#6f42c1"],
   "barcode-replaced": ["Replaced Barcode", "#b98900"],
   "sku-updated": ["Updated SKU", "#b98900"],

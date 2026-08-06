@@ -917,17 +917,139 @@ def get_assignment(rfid_id: str, session: Session = Depends(get_session)):
     return row.as_dict()
 
 
+@app.get(
+    "/api/tag-info/{rfid_id}", dependencies=[Depends(require_user)]
+)
+def tag_info(rfid_id: str, session: Session = Depends(get_session)):
+    """Everything worth knowing about ONE tag, for "what is this sticker?"
+    on the gun: its product, how many tags that product has and how many
+    sit in this bin, whether the live catalog still knows the SKU, and
+    whether the recorded bin still agrees with Shopify.
+
+    A tag nobody owns is answered, not 404'd — an unpaired printed label
+    is a real thing to find on a box, and saying so beats "not found"."""
+    epc = (rfid_id or "").strip()
+    if not epc:
+        raise HTTPException(422, "Which tag?")
+    row = session.scalar(
+        select(RfidAssignment).where(
+            func.upper(RfidAssignment.rfid_id) == epc.upper()
+        )
+    )
+    notes: list[str] = []
+    if row is None:
+        # Printed but never paired: the label exists, the tie doesn't.
+        job = session.scalar(
+            select(PrintJob).where(func.upper(PrintJob.epc) == epc.upper())
+        )
+        if job is not None:
+            notes.append(
+                f"Printed for {job.sku or job.product_title or '?'} "
+                f"(job #{job.id}, {job.status}) but never paired — stick it "
+                f"on that box and pair it, or void the label."
+            )
+            return {
+                "found": False, "printed_only": True, "epc": epc,
+                "print_job": job.as_dict(), "notes": notes,
+            }
+        notes.append(
+            "This tag isn't in the system at all — a blank sticker, or one "
+            "from another store. Pairing it in a batch will claim it."
+        )
+        return {"found": False, "printed_only": False, "epc": epc,
+                "print_job": None, "notes": notes}
+
+    sku_key = (row.sku or "").strip().upper()
+    bin_key = (row.bin_location or "").strip().lower()
+    siblings = session.scalars(
+        select(RfidAssignment).where(
+            func.upper(RfidAssignment.sku) == sku_key
+        )
+    ).all() if sku_key else [row]
+    tags_here = sum(
+        1 for t in siblings
+        if (t.bin_location or "").strip().lower() == bin_key
+    ) if bin_key else 0
+
+    # Does the LIVE catalog still know this SKU? The dead mirror let a
+    # renamed product get tagged under its old SKU (DB24010501 for what
+    # Shopify now calls F9394B), and those tags are orphans.
+    live = session.scalars(
+        select(BinMapEntry).where(func.upper(BinMapEntry.sku) == sku_key)
+    ).all() if sku_key else []
+    live_bins = sorted({(e.bin or "").strip() for e in live if e.bin})
+    if sku_key and not live:
+        notes.append(
+            f"Shopify has no product with SKU {row.sku} any more — this "
+            f"tag is an orphan (usually an old SKU that was renamed). "
+            f"Unlinking it is normally the right move."
+        )
+    elif live_bins and bin_key and not any(
+        b.lower() == bin_key for b in live_bins
+    ):
+        notes.append(
+            f"This tag says bin {row.bin_location}, but Shopify now puts "
+            f"{row.sku} in {', '.join(live_bins)}."
+        )
+    if row.suspect:
+        notes.append("Flagged as a SUSPECT read when it was paired — the "
+                     "EPC doesn't look like a normal tag.")
+    if (row.case_units or 0) > 1:
+        notes.append(f"Sealed case: this ONE tag counts as "
+                     f"{row.case_units} units.")
+    if sku_key and sku_key in _noscan_skus(session):
+        notes.append("Product is flagged \"won't RFID scan on box\" — "
+                     "sweeps don't expect it to answer.")
+
+    batch = session.get(Batch, row.batch_id) if row.batch_id else None
+    entry = live[0] if live else None
+    return {
+        "found": True,
+        "printed_only": False,
+        "epc": row.rfid_id,
+        "assignment": row.as_dict(),
+        "tags_total": len(siblings),
+        "tags_here": tags_here,
+        "live_sku_exists": bool(live),
+        "live_bins": live_bins,
+        "image_url": entry.image_url if entry else None,
+        "expected_qty": entry.qty if entry else None,
+        "batch": (
+            {"id": batch.id, "bin_name": batch.bin_name,
+             "status": batch.status}
+            if batch else None
+        ),
+        "notes": notes,
+    }
+
+
 @app.delete(
     "/api/rfid-assignments/{rfid_id}",
     status_code=204,
     dependencies=[Depends(require_user)],
 )
-def unassign(rfid_id: str, session: Session = Depends(get_session)):
+def unassign(
+    rfid_id: str,
+    by: str | None = None,
+    session: Session = Depends(get_session),
+):
     row = session.scalar(
         select(RfidAssignment).where(RfidAssignment.rfid_id == rfid_id.strip())
     )
     if row is None:
         raise HTTPException(404, "No assignment for that RFID tag.")
+    # The tie IS the record — deleting it used to erase the fact that it
+    # ever existed, so an unlink left no trace anywhere. History keeps the
+    # receipt: which tag, which product, who pulled it.
+    session.add(BarcodeChange(
+        sku=row.sku,
+        product_title=row.product_title,
+        shopify_variant_id=row.shopify_variant_id,
+        changed_field="tag-unlinked",
+        old_barcode=(row.rfid_id or "")[:64] or None,
+        new_barcode=(row.bin_location or "")[:64] or None,
+        changed_by=(by or "").strip()[:100] or None,
+    ))
     session.delete(row)
     session.commit()
 
@@ -5829,6 +5951,7 @@ def product_history(term: str, session: Session = Depends(get_session)):
         "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
         "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
         "tagged-before": "already-tagged-set",
+        "tag-unlinked": "tag-unlinked",
     }
     for c in session.scalars(
         select(BarcodeChange).where(or_(
@@ -6034,6 +6157,7 @@ def history(
         "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
         "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
         "tagged-before": "already-tagged-set",
+        "tag-unlinked": "tag-unlinked",
     }
     for c in session.scalars(
         select(BarcodeChange).order_by(BarcodeChange.id.desc()).limit(limit)
