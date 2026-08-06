@@ -1395,7 +1395,13 @@ function showProduct(p) {
   closeBinEditor();
   el.pBin.textContent = p.bin_location || "—";
   el.pSource.textContent =
-    (p.source === "telcan" ? "TELCAN" : p.source === "shopify" ? "Shopify" : "—") +
+    (p.source === "binmap"
+      ? "Live catalog"
+      : p.source === "telcan"
+        ? "TELCAN (stale mirror)"
+        : p.source === "shopify"
+          ? "Shopify"
+          : "—") +
     (p.serial_brand ? ` · ${p.serial_brand} serial` : "");
   el.productCard.hidden = false;
   el.printPanel.hidden = !printingEnabled;

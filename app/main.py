@@ -208,6 +208,100 @@ def _lookup_api(barcode: str) -> dict | None:
         product["source"] = "shopify"
     return product
 
+
+def _binmap_product(row: BinMapEntry) -> dict:
+    """A bin-map row in the flat shape every lookup source returns. Its ids
+    are real Shopify gids (the walk built them), not the mirror's
+    `telcan:` surrogates."""
+    return {
+        "image_url": row.image_url,
+        "shopify_variant_id": row.shopify_variant_id,
+        "shopify_product_id": row.shopify_product_id,
+        "product_title": row.product_title or "(unknown)",
+        "variant_title": row.variant_title,
+        "sku": row.sku,
+        "barcode": row.barcode,
+        "bin_location": (row.bin or "").strip() or "No bin assigned",
+        "other_bins": row.other_bins,
+        "vendor": row.vendor,
+        "source": "binmap",
+    }
+
+
+def _lookup_bin_map(term: str) -> dict | None:
+    """Live-sourced catalog lookup, tried BEFORE the TELCAN mirror.
+
+    The mirror's sync died in Dec 2025, so it still answers with SKUs the
+    store renamed months ago — F9394B printed as its six-month-old
+    DB24010501, and it disagrees with the live catalog on dozens of SKUs.
+    The bin map is rebuilt from the Shopify API every few hours, so when it
+    knows a barcode its SKU, title and ids are current. Only products
+    Shopify has never binned fall through to the mirror.
+
+    Barcode wins over SKU (same precedence the mirror query uses), and when
+    several listings share a barcode the primary one is preferred, so an
+    OPEN BOX twin never shadows the main listing."""
+    rows = _lookup_bin_map_all(term)
+    return rows[0] if rows else None
+
+
+def _lookup_bin_map_all(term: str) -> list[dict]:
+    """Every live listing for a barcode/SKU, primary first — one indexed
+    query, so the Check step can use it in its per-item loop."""
+    from app.database import get_engine
+
+    wanted = (term or "").strip()
+    if not wanted:
+        return []
+    with Session(get_engine()) as session:
+        rows = session.scalars(
+            select(BinMapEntry)
+            .where(BinMapEntry.barcode == wanted)
+            .order_by(BinMapEntry.id)
+        ).all()
+        if not rows:
+            rows = session.scalars(
+                select(BinMapEntry)
+                .where(func.upper(BinMapEntry.sku) == wanted.upper())
+                .order_by(BinMapEntry.id)
+            ).all()
+        if not rows:
+            return []
+        # One row per bin for split-shelf products: collapse to one
+        # candidate per SKU before ranking.
+        seen: dict[str, BinMapEntry] = {}
+        for r in rows:
+            seen.setdefault((r.sku or "").strip().upper(), r)
+        return sorted(
+            (_binmap_product(r) for r in seen.values()), key=_candidate_rank
+        )
+
+
+def _prefer_live_sku(product: dict) -> dict:
+    """Swap a stale mirror hit for the live row that shares its barcode.
+
+    Covers what a bin-map-first lookup can't: someone typing or scanning
+    the OLD sku, which the bin map doesn't know at all. If the barcode the
+    mirror returned belongs to a different SKU live, the mirror's answer is
+    provably out of date."""
+    barcode = (product.get("barcode") or "").strip()
+    if not barcode:
+        return product
+    try:
+        live = _lookup_bin_map(barcode)
+    except Exception as error:
+        logger.warning("live SKU check unavailable: %s", error)
+        return product
+    if live and (live.get("sku") or "").strip().upper() != (
+        product.get("sku") or ""
+    ).strip().upper():
+        logger.info(
+            "stale mirror SKU %s -> live %s (barcode %s)",
+            product.get("sku"), live.get("sku"), barcode,
+        )
+        return live
+    return product
+
 MISSING_BIN_VALUES = (None, "", "No bin assigned")
 
 
@@ -233,7 +327,8 @@ def _enrich_bin_from_shopify(
         ):
             product["bin_location"] = api_product["bin_location"]
 
-    except RuntimeError as error:
+    except Exception as error:
+        # Enrichment is a nicety — never let it fail the lookup it decorates.
         logger.warning(
             "Shopify bin enrichment failed for %s: %s",
             lookup_term,
@@ -465,7 +560,8 @@ def _drop_stale_mirror_matches(
 def product_by_barcode(barcode: str):
     """Barcode-or-SKU -> product (bad/missing barcodes happen, so the same
     field accepts a typed SKU). Source order is config.BARCODE_LOOKUP:
-    auto = TELCAN first, Shopify API fallback; or force 'db' / 'api'."""
+    auto = live bin map, then the TELCAN mirror, then the Shopify API;
+    or force 'db' (local sources only) / 'api'."""
     barcode = barcode.strip()
     mode = config.BARCODE_LOOKUP
     db_ok = database_configured()
@@ -473,6 +569,15 @@ def product_by_barcode(barcode: str):
     errors: list[str] = []
 
     if mode in ("auto", "db") and db_ok:
+        # Live-sourced bin map first: the mirror's sync died in Dec 2025
+        # and still answers with SKUs the store renamed months ago.
+        try:
+            product = _lookup_bin_map(barcode)
+            if product is not None:
+                return product
+        except Exception as error:
+            logger.warning("bin-map lookup failed: %s", error)
+
         try:
             product = _lookup_db(barcode)
 
@@ -487,7 +592,7 @@ def product_by_barcode(barcode: str):
                 product = kept[0] if kept else None
             if product is not None:
                 return _enrich_bin_from_shopify(
-                    product=product,
+                    product=_prefer_live_sku(product),
                     lookup_term=barcode,
                     api_ok=api_ok,
                 )
@@ -504,7 +609,11 @@ def product_by_barcode(barcode: str):
             product = _lookup_api(barcode)
             if product is not None:
                 return product
-        except RuntimeError as error:
+        # Broad on purpose: requests raises HTTPError (not RuntimeError)
+        # when the token call itself fails, which escaped as a 500 and
+        # took the product window down with it. A Shopify outage is a
+        # bad-gateway, not a crash.
+        except Exception as error:
             errors.append(f"Shopify lookup failed: {error}")
             raise HTTPException(502, errors[-1])
 
@@ -595,12 +704,21 @@ def _resolve(term: str, mode: str, db_ok: bool, api_ok: bool) -> dict | None:
         return None
 
     if mode in ("auto", "db") and db_ok:
+        # Live-sourced bin map first — the mirror is the fallback now, not
+        # the primary. See _lookup_bin_map for why.
+        try:
+            product = _lookup_bin_map(term)
+            if product is not None:
+                return product
+        except Exception as error:
+            logger.warning("bin-map lookup failed: %s", error)
+
         try:
             product = _lookup_db(term)
 
             if product is not None:
                 return _enrich_bin_from_shopify(
-                    product=product,
+                    product=_prefer_live_sku(product),
                     lookup_term=term,
                     api_ok=api_ok,
                 )
@@ -611,7 +729,10 @@ def _resolve(term: str, mode: str, db_ok: bool, api_ok: bool) -> dict | None:
     if mode in ("auto", "api") and api_ok:
         try:
             return _lookup_api(term)
-        except RuntimeError as error:
+        # Broad for the same reason as product_by_barcode: a failing token
+        # call raises HTTPError, and an unresolvable term must come back
+        # as None, never as a crash.
+        except Exception as error:
             logger.warning("Shopify lookup failed: %s", error)
 
     return None
@@ -640,6 +761,13 @@ def products_by_barcode_all(
     api_ok = not config.check_shopify_env()
     candidates: list[dict] = []
     if mode in ("auto", "db") and db_ok:
+        # Live bin map first here too, so the Check step's candidate
+        # listings carry current SKUs rather than the dead mirror's.
+        try:
+            candidates = _lookup_bin_map_all(code)
+        except Exception as error:
+            logger.warning("bin-map multi-lookup failed: %s", error)
+    if not candidates and mode in ("auto", "db") and db_ok:
         try:
             from app.database import get_engine
 

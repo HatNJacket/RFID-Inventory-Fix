@@ -97,11 +97,12 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
     check("first trip starts", r.status_code==201, r.text[:200])
     child = r.json()["batch"]
     check("child points at its parent", child["parent_batch_id"]==bid, child)
-    # Inside the child, a stray for yet another bin (scan one there). The
-    # mocked live lookup still calls EFW-MASK's home F2-2, so that's what
-    # the scanned row records — divert to what the row says.
+    # Inside the child, a stray for yet another bin (scan one there).
+    # EFW-MASK's bin was moved to F9-9 above, and lookups now answer from
+    # the LIVE bin map rather than the dead mirror — so the scanned row
+    # records F9-9, not the mock's stale F2-2. Divert to what it says.
     cl.post(f"/api/batches/{child['id']}/scan", json={"code":"222"})
-    r = cl.post(f"/api/batches/{child['id']}/divert", json={"bin":"F2-2"})
+    r = cl.post(f"/api/batches/{child['id']}/divert", json={"bin":"F9-9"})
     check("trip from inside a trip is allowed", r.status_code==201, r.text[:200])
     grand = r.json()["batch"]
     check("grandchild chains to the child",

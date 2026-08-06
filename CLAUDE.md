@@ -24,9 +24,13 @@ change log; commit messages here are written to be read later.
   app settings (the restart collides with the zip deploy).
 - **The GitHub Actions red X on pushes is intentional** (publish-profile
   workflow disabled). Never "fix" or delete it.
-- **TELCAN mirror sync is dead since Dec 2025**: quantities come from the
-  live Shopify API only; the mirror is a barcode/title lookup fallback.
-  The bin map table (`rfid_bin_map`) is the SKU-casing/barcode authority.
+- **TELCAN mirror sync is dead since Dec 2025** and disagrees with the
+  live catalog on dozens of SKUs (it printed F9394B as its six-month-old
+  `DB24010501`). Lookup order is **live `rfid_bin_map` → mirror → Shopify
+  API**; the mirror only answers for products Shopify has never binned,
+  and a mirror hit whose barcode the bin map knows is swapped for the live
+  row (`_prefer_live_sku`). Quantities come from the live API only. The
+  bin map is the SKU/barcode authority — never re-promote the mirror.
   Compare SKUs case-insensitively everywhere (`.upper()`), always.
 - **Never batch-edit UTF-8 templates with PowerShell** (`-replace` +
   `Set-Content` produced mojibake). Use the Edit tool. Git commits: write
