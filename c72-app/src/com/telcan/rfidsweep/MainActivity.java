@@ -608,7 +608,7 @@ public class MainActivity extends Activity {
         // the far left, the one advancing action on the far right.
         batchBtnRow = new LinearLayout(this);
         Button exit = smallBtn("EXIT");
-        exit.setOnClickListener(x -> exitBatch(false));
+        exit.setOnClickListener(x -> confirmExitBatch());
         batchBtnRow.addView(exit, weight());
         // Trailing arrow, like NEXT — on a five-button row both labels wrap,
         // and a leading arrow put BACK's above the word while NEXT's sat
@@ -1744,8 +1744,17 @@ public class MainActivity extends Activity {
     private void onScanInput(String code) {
         if (activeTab == TAB_BATCH) {
             if (!inBatch()) {
-                beep(SOUND_ERR);
-                status.setText("Pick a batch first.");
+                // A bin barcode with no batch open = "start one here" —
+                // the same shortcut the Scan Station's bin scan gives.
+                if (looksLikeBin(code)) {
+                    askStartBatch(code.trim()
+                            .toUpperCase(java.util.Locale.ROOT));
+                } else {
+                    beep(SOUND_ERR);
+                    status.setText("Scan a BIN barcode (like D1-3) to "
+                            + "start a batch there, or BATCH… to resume "
+                            + "an open one.");
+                }
                 return;
             }
             if (step == STEP_PAIR) pairSelect(code);
@@ -2996,6 +3005,135 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** Bin barcode scanned with no batch open: start one right here on
+     *  the gun (batches used to start on the PC/iPad only). */
+    private void askStartBatch(String bin) {
+        beep(SOUND_OTHER);
+        new AlertDialog.Builder(this)
+                .setTitle("Start a batch on " + bin + "?")
+                .setMessage("Batch-tag bin " + bin + ": its expected "
+                        + "products load and you collect every box on the "
+                        + "shelf.\n\nIf a batch is already open on " + bin
+                        + " it resumes instead of doubling up.")
+                .setPositiveButton("START", (d, w) -> startBatchOnBin(bin))
+                .setNegativeButton("Cancel", (d, w) ->
+                        btInput.requestFocus())
+                .show();
+    }
+
+    private void startBatchOnBin(String bin) {
+        status.setText("Setting up " + bin + "…");
+        showLoading("Loading bin " + bin + "…");
+        new Thread(() -> {
+            try {
+                // Resume before create: an open batch on this bin is the
+                // same physical job, not a reason for a duplicate.
+                JSONObject open = api("GET", "/api/batches?status=open",
+                        null);
+                JSONArray arr = open.optJSONArray("batches");
+                int resumeId = -1;
+                for (int i = 0; arr != null && i < arr.length(); i++) {
+                    JSONObject b = arr.optJSONObject(i);
+                    if (b == null) continue;
+                    if (bin.equalsIgnoreCase(b.optString("bin_name"))
+                            && b.isNull("parent_batch_id")) {
+                        resumeId = b.optInt("id");
+                        break;
+                    }
+                }
+                if (resumeId > 0) {
+                    final int rid = resumeId;
+                    ui.post(() -> {
+                        hideLoading();
+                        Toast.makeText(this, "Resuming the open batch on "
+                                + bin, Toast.LENGTH_SHORT).show();
+                        enterBatch(rid);
+                    });
+                    return;
+                }
+                JSONObject body = new JSONObject().put("bin", bin)
+                        .put("created_by", prefs.getString("device", "C72"));
+                JSONObject resp = api("POST", "/api/batches", body);
+                final int id = resp.optInt("id");
+                ui.post(() -> {
+                    hideLoading();
+                    enterBatch(id);
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    hideLoading();
+                    beep(SOUND_ERR);
+                    status.setText("Couldn't start " + bin + ": "
+                            + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** EXIT asks what kind of leaving this is: parked-to-resume (the old
+     *  behaviour) or abandoned outright — which used to need the web
+     *  terminal. Side trips keep their own finish flow. */
+    private void confirmExitBatch() {
+        if (parentBatchId != 0) {
+            exitBatch(false);
+            return;
+        }
+        int paired = 0;
+        for (BItem b : bItems) paired += b.paired;
+        final int n = paired;
+        new AlertDialog.Builder(this)
+                .setTitle("Leave bin " + batchBin + "?")
+                .setMessage("LEAVE OPEN parks the batch to resume later — "
+                        + "on this gun or the web terminal.\n\nABANDON "
+                        + "closes it for good"
+                        + (n > 0 ? " and releases its " + n
+                           + " tag tie(s)" : "")
+                        + ". Nothing in Shopify changes either way.")
+                .setPositiveButton("LEAVE OPEN", (d, w) -> exitBatch(false))
+                .setNeutralButton("ABANDON…", (d, w) ->
+                        confirmAbandonBatch(n))
+                .setNegativeButton("Stay", null)
+                .show();
+    }
+
+    private void confirmAbandonBatch(int ties) {
+        new AlertDialog.Builder(this)
+                .setTitle("Abandon " + batchBin + "?")
+                .setMessage("The batch closes without completing"
+                        + (ties > 0 ? ", its " + ties + " tag tie(s) are "
+                           + "released (printed labels become unlinked "
+                           + "stickers)" : "")
+                        + ", and the bin goes back on the to-do list. "
+                        + "History records the abandon.\n\n"
+                        + "This can't be un-done from the gun.")
+                .setPositiveButton("ABANDON BATCH", (d, w) ->
+                        abandonBatch())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void abandonBatch() {
+        status.setText("Abandoning…");
+        new Thread(() -> {
+            try {
+                api("POST", "/api/batches/" + batchId + "/abandon",
+                        new JSONObject());
+                final String bin = batchBin;
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    exitBatch(true);
+                    status.setText("Batch on " + bin + " abandoned — the "
+                            + "bin is back on the to-do list.");
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Abandon failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
     private void openBatchPicker() {
         status.setText("Loading open batches…");
         new Thread(() -> {
@@ -3014,8 +3152,9 @@ public class MainActivity extends Activity {
                 }
                 ui.post(() -> {
                     if (labels.isEmpty()) {
-                        status.setText("No open batches. Start one in Batch "
-                                + "tagging on the PC or iPad first.");
+                        status.setText("No open batches — scan a BIN "
+                                + "barcode (like D1-3) to start one right "
+                                + "here.");
                         return;
                     }
                     new AlertDialog.Builder(this)
@@ -3287,11 +3426,14 @@ public class MainActivity extends Activity {
         TextView msg = new TextView(this);
         msg.setTextSize(13);
         msg.setTextColor(C_TEXT);
+        String home = it.binLocation == null || it.binLocation.isEmpty()
+                ? "no bin on record" : it.binLocation;
         msg.setText(it.name() + " was RFID-tagged before this batch (side "
                 + "trip or earlier session) — " + n + " tag(s) in the "
-                + "system. Stickered boxes must not get a second label.\n\n"
-                + "Count the boxes on this shelf that already wear a "
-                + "sticker:");
+                + "system.\nRecorded shelf: " + home + " — go look, or "
+                + "SWEEP to count its tags in range.\n\n"
+                + "Stickered boxes must not get a second label. Count the "
+                + "boxes on this shelf that already wear a sticker:");
         box.addView(msg);
 
         LinearLayout steprow = new LinearLayout(this);
@@ -3318,6 +3460,23 @@ public class MainActivity extends Activity {
         consequence.setGravity(Gravity.CENTER);
         consequence.setPadding(dp(8), dp(4), dp(8), dp(8));
         box.addView(consequence);
+
+        // Hands-free answer: a short sweep, and the server says how many
+        // of the tags in range belong to THIS product (bin_check with a
+        // skus filter). Sets the stepper; the operator can still adjust.
+        final Button sweepBtn =
+                smallBtn("⚡ SWEEP — COUNT THIS PRODUCT'S TAGS");
+        LinearLayout.LayoutParams swl = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        swl.bottomMargin = dp(4);
+        box.addView(sweepBtn, swl);
+        final TextView sweepOut = new TextView(this);
+        sweepOut.setTextSize(11);
+        sweepOut.setTextColor(C_MUTED);
+        sweepOut.setGravity(Gravity.CENTER);
+        sweepOut.setPadding(dp(4), 0, dp(4), dp(8));
+        box.addView(sweepOut);
 
         final android.widget.CheckBox held =
                 new android.widget.CheckBox(this);
@@ -3348,6 +3507,78 @@ public class MainActivity extends Activity {
             refresh.run();
         });
         refresh.run();
+
+        sweepBtn.setOnClickListener(v2 -> {
+            if (it.sku == null) {
+                sweepOut.setText("No SKU to match tags against.");
+                return;
+            }
+            if (reader == null) {
+                sweepOut.setText("RFID reader isn't ready.");
+                return;
+            }
+            sweepBtn.setEnabled(false);
+            sweepBtn.setText("Sweeping…");
+            new Thread(() -> {
+                final List<String> heard = new ArrayList<>();
+                try {
+                    synchronized (tags) { tags.clear(); }
+                    reader.startInventoryTag();
+                    Thread.sleep(2500);
+                } catch (Exception ignored) {
+                } finally {
+                    try {
+                        reader.stopInventory();
+                    } catch (Exception ignored2) {
+                    }
+                }
+                synchronized (tags) {
+                    heard.addAll(tags.keySet());
+                    tags.clear();
+                }
+                try {
+                    JSONObject check = api("POST", "/api/bins/"
+                            + URLEncoder.encode(batchBin, "UTF-8")
+                            + "/check",
+                            new JSONObject()
+                                    .put("epcs", new JSONArray(heard))
+                                    .put("skus", new org.json.JSONArray()
+                                            .put(it.sku)));
+                    int det = 0, onFile = 0;
+                    JSONArray rows2 = check.optJSONArray("items");
+                    for (int i = 0; rows2 != null && i < rows2.length();
+                            i++) {
+                        JSONObject o = rows2.optJSONObject(i);
+                        if (o != null && it.sku.equalsIgnoreCase(
+                                o.optString("sku"))) {
+                            det = o.optInt("detected", 0);
+                            onFile = o.optInt("tags_on_file", 0);
+                            break;
+                        }
+                    }
+                    final int fdet = det, fon = onFile;
+                    final int ftotal = heard.size();
+                    ui.post(() -> {
+                        count[0] = Math.min(500, fdet);
+                        refresh.run();
+                        sweepOut.setText("Heard " + fdet + " tag(s) of "
+                                + "this product · " + ftotal + " tag(s) "
+                                + "in range · " + fon + " on file — "
+                                + "count set to " + fdet + ".");
+                        sweepBtn.setEnabled(true);
+                        sweepBtn.setText("⚡ SWEEP AGAIN");
+                    });
+                } catch (Exception e) {
+                    ui.post(() -> {
+                        sweepOut.setText("Sweep check failed: "
+                                + e.getMessage());
+                        sweepBtn.setEnabled(true);
+                        sweepBtn.setText(
+                                "⚡ SWEEP — COUNT THIS PRODUCT'S TAGS");
+                    });
+                }
+            }).start();
+        });
 
         ScrollView sc = new ScrollView(this);
         sc.addView(box);
