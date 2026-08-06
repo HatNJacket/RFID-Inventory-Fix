@@ -851,19 +851,480 @@ public class MainActivity extends Activity {
         btInput.requestFocus();
     }
 
+    // ---- LOCATE tab (design settled with Nick 2026-08-06): pick a
+    // product by barcode/SKU, then hunt its tags by signal strength.
+    // FAR/NEAR/TOUCH power presets, geiger audio, tap-to-narrow to one
+    // tag, and a power-1 touch-read that CONFIRMS a find and drops that
+    // tag out of the hunt so the next box can be chased. ----
+    private ImageView locImg;
+    private TextView locName, locSku, locPct, locInfo, locHint;
+    private android.widget.ProgressBar locMeter;
+    private Button locFar, locNear, locTouch, locSoundBtn, locTargetBtn,
+            locFoundBtn;
+    private JSONObject locProduct = null;
+    private final java.util.LinkedHashMap<String, Double> locTags =
+            new java.util.LinkedHashMap<>();   // EPC -> last rssi heard
+    private final java.util.HashSet<String> locFound =
+            new java.util.HashSet<>();
+    private String locNarrow = null;           // one EPC, or null = all
+    private volatile boolean locating = false;
+    private boolean locSound = true;
+    private int locPower = 30;
+    private volatile double locBestRssi = -999; // best since last tick
+    private volatile long locLastHeard = 0;
+    private volatile int locHeardCount = 0;     // distinct targets heard
+    private double locEma = 0;                  // smoothed 0..100
+
     private View buildLocateView() {
         LinearLayout v = new LinearLayout(this);
         v.setOrientation(LinearLayout.VERTICAL);
-        v.setGravity(Gravity.CENTER);
-        TextView t = new TextView(this);
-        t.setGravity(Gravity.CENTER);
-        t.setTextColor(C_MUTED);
-        t.setTextSize(16);
-        t.setText("LOCATE — coming soon.\n\nScan or pick a product, crank "
-                + "power to 30, and the C72 will geiger-beep hotter as you "
-                + "close in on its tag.");
-        v.addView(t);
+        v.setPadding(dp(12), dp(10), dp(12), dp(10));
+
+        FrameLayout card = new FrameLayout(this);
+        card.setBackground(rr(Color.WHITE, C_LINE, 10));
+        card.setPadding(dp(10), dp(10), dp(10), dp(10));
+        LinearLayout row = new LinearLayout(this);
+        locImg = new ImageView(this);
+        locImg.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        locImg.setBackgroundColor(C_BG);
+        LinearLayout.LayoutParams il =
+                new LinearLayout.LayoutParams(dp(56), dp(56));
+        il.rightMargin = dp(10);
+        row.addView(locImg, il);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        locName = new TextView(this);
+        locName.setTextSize(15);
+        locName.setTypeface(null, Typeface.BOLD);
+        locName.setTextColor(C_TEXT);
+        locName.setMaxLines(2);
+        locName.setText("Scan or type a barcode / SKU");
+        col.addView(locName);
+        locSku = new TextView(this);
+        locSku.setTextSize(12);
+        locSku.setTextColor(C_MUTED);
+        col.addView(locSku);
+        row.addView(col, weight());
+        card.addView(row);
+        v.addView(card);
+
+        locMeter = new android.widget.ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        locMeter.setMax(100);
+        LinearLayout.LayoutParams ml = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(26));
+        ml.topMargin = dp(12);
+        v.addView(locMeter, ml);
+
+        locPct = new TextView(this);
+        locPct.setTextSize(34);
+        locPct.setTypeface(null, Typeface.BOLD);
+        locPct.setTextColor(C_BLUE);
+        locPct.setGravity(Gravity.CENTER);
+        locPct.setText("—");
+        v.addView(locPct);
+
+        locInfo = new TextView(this);
+        locInfo.setTextSize(12);
+        locInfo.setTextColor(C_MUTED);
+        locInfo.setGravity(Gravity.CENTER);
+        v.addView(locInfo);
+
+        LinearLayout pow = new LinearLayout(this);
+        pow.setGravity(Gravity.CENTER);
+        pow.setPadding(0, dp(10), 0, 0);
+        locFar = smallBtn("FAR");
+        locNear = smallBtn("NEAR");
+        locTouch = smallBtn("TOUCH");
+        locFar.setOnClickListener(x -> setLocPower(30, locFar));
+        locNear.setOnClickListener(x -> setLocPower(12, locNear));
+        locTouch.setOnClickListener(x -> setLocPower(5, locTouch));
+        LinearLayout.LayoutParams pb = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        pow.addView(locFar, pb);
+        pow.addView(locNear, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        pow.addView(locTouch, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        v.addView(pow);
+
+        LinearLayout act = new LinearLayout(this);
+        act.setGravity(Gravity.CENTER);
+        act.setPadding(0, dp(6), 0, 0);
+        locSoundBtn = smallBtn("🔊 ON");
+        locSoundBtn.setOnClickListener(x -> {
+            locSound = !locSound;
+            locSoundBtn.setText(locSound ? "🔊 ON" : "🔇 OFF");
+        });
+        locTargetBtn = smallBtn("TARGET…");
+        locTargetBtn.setOnClickListener(x -> locateTargetDialog());
+        locFoundBtn = smallBtn("FOUND IT?");
+        locFoundBtn.setOnClickListener(x -> confirmFoundScan());
+        act.addView(locSoundBtn, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        act.addView(locTargetBtn, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        act.addView(locFoundBtn, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        v.addView(act);
+
+        locHint = new TextView(this);
+        locHint.setTextSize(11);
+        locHint.setTextColor(C_MUTED);
+        locHint.setGravity(Gravity.CENTER);
+        locHint.setPadding(0, dp(8), 0, 0);
+        locHint.setText("Trigger toggles the hunt. Signal pegged? Drop to "
+                + "NEAR, then TOUCH. FOUND IT? reads at power 1 with the "
+                + "antenna touching the sticker, and drops that tag out "
+                + "of the hunt.");
+        v.addView(locHint);
         return v;
+    }
+
+    private void setLocPower(int power, Button active) {
+        locPower = power;
+        for (Button b : new Button[]{locFar, locNear, locTouch}) {
+            b.setTextColor(b == active ? C_BLUE : C_TEXT);
+        }
+        if (locating && reader != null) {
+            try {
+                reader.setPower(power);
+            } catch (Exception ignored) {
+            }
+        }
+        status.setText("Locate power " + power
+                + (power <= 5 ? " — only answers within arm's reach."
+                   : power <= 12 ? " — a shelf bay or two."
+                   : " — the whole aisle answers."));
+    }
+
+    /** Resolve a scan/typed code into the product + its tags on file. */
+    private void locateLookup(String code) {
+        status.setText("Looking up " + code + "…");
+        new Thread(() -> {
+            try {
+                JSONObject product = null;
+                try {
+                    product = api("GET", "/api/products/by-barcode/"
+                            + URLEncoder.encode(code, "UTF-8"), null);
+                } catch (Exception ignored) {
+                    // Not in the catalog under that code — the tags call
+                    // below still matches raw SKU/barcode on tags.
+                }
+                String sku = product != null && !product.isNull("sku")
+                        ? product.optString("sku") : code;
+                String bc = product != null && !product.isNull("barcode")
+                        ? product.optString("barcode") : code;
+                JSONObject tagsResp = api("GET", "/api/products/tags?sku="
+                        + URLEncoder.encode(sku, "UTF-8") + "&barcode="
+                        + URLEncoder.encode(bc, "UTF-8"), null);
+                final JSONObject fp = product;
+                final org.json.JSONArray rows =
+                        tagsResp.optJSONArray("assignments");
+                ui.post(() -> {
+                    stopLocate(false);
+                    locTags.clear();
+                    locFound.clear();
+                    locNarrow = null;
+                    locEma = 0;
+                    locProduct = null;
+                    if (rows == null || rows.length() == 0) {
+                        beep(SOUND_ERR);
+                        locName.setText(fp != null
+                                ? fp.optString("product_title", code) : code);
+                        locSku.setText("No RFID tags on file — nothing to "
+                                + "hunt.");
+                        locImg.setImageBitmap(null);
+                        updateLocateUi();
+                        return;
+                    }
+                    JSONObject first = rows.optJSONObject(0);
+                    locProduct = fp != null ? fp : first;
+                    for (int i = 0; i < rows.length(); i++) {
+                        JSONObject a = rows.optJSONObject(i);
+                        String epc = a == null ? null : a.optString("rfid_id");
+                        if (epc != null && !epc.isEmpty()) {
+                            locTags.put(epc.toUpperCase(
+                                    java.util.Locale.ROOT), -999.0);
+                        }
+                    }
+                    beep(SOUND_OK);
+                    locName.setText(locProduct.optString("product_title",
+                            code));
+                    String bin = first == null || first.isNull("bin_location")
+                            ? null : first.optString("bin_location");
+                    locSku.setText("SKU: " + sku
+                            + (bin != null ? "  ·  Bin: " + bin : "")
+                            + "  ·  " + locTags.size() + " tag(s) on file");
+                    loadImage(locProduct.isNull("image_url") ? null
+                            : locProduct.optString("image_url"), locImg);
+                    updateLocateUi();
+                    status.setText("Pull the trigger to hunt "
+                            + locTags.size() + " tag(s).");
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Lookup failed: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    /** The EPCs the meter currently listens for. */
+    private java.util.Set<String> locTargets() {
+        java.util.HashSet<String> t = new java.util.HashSet<>();
+        if (locNarrow != null) {
+            t.add(locNarrow);
+        } else {
+            t.addAll(locTags.keySet());
+            t.removeAll(locFound);
+        }
+        return t;
+    }
+
+    private void toggleLocate() {
+        if (locProduct == null || locTags.isEmpty()) {
+            beep(SOUND_ERR);
+            status.setText("Scan or type a product barcode/SKU first.");
+            return;
+        }
+        if (locating) {
+            stopLocate(true);
+            return;
+        }
+        if (locTargets().isEmpty()) {
+            beep(SOUND_ERR);
+            status.setText("Every tag is marked found — RESET via "
+                    + "TARGET… to hunt them again.");
+            return;
+        }
+        try {
+            reader.setPower(locPower);
+            reader.startInventoryTag();
+            locating = true;
+            locEma = 0;
+            locBestRssi = -999;
+            scheduleLocateBeep();
+            status.setText("Hunting… trigger again to stop.");
+        } catch (Exception e) {
+            status.setText("Reader failed: " + e.getMessage());
+        }
+    }
+
+    private void stopLocate(boolean announce) {
+        if (locating) {
+            locating = false;
+            try {
+                reader.stopInventory();
+            } catch (Exception ignored) {
+            }
+            try {
+                // Hand the radio back the way other modes expect it.
+                reader.setPower(prefs.getInt("power", 20));
+            } catch (Exception ignored) {
+            }
+            if (announce) status.setText("Hunt paused.");
+        }
+    }
+
+    /** Called from the SDK callback thread for every read while locating. */
+    private void onLocateRead(String epc, double rssi) {
+        String key = epc.toUpperCase(java.util.Locale.ROOT);
+        if (!locTags.containsKey(key)) return;
+        locTags.put(key, rssi);
+        if (!locTargets().contains(key)) return;
+        long now = System.currentTimeMillis();
+        if (rssi > locBestRssi || now - locLastHeard > 700) {
+            locBestRssi = rssi;
+        }
+        locLastHeard = now;
+    }
+
+    private static double locPctOf(double rssi) {
+        if (rssi <= -998) return 0;
+        double pct = (rssi + 75) / 45 * 100;
+        return Math.max(0, Math.min(100, pct));
+    }
+
+    /** 400 ms UI pulse driven from refreshTick. */
+    private void locateTick() {
+        if (activeTab != TAB_LOCATE || locProduct == null) return;
+        long now = System.currentTimeMillis();
+        boolean fresh = locating && now - locLastHeard < 1200;
+        if (fresh) {
+            locEma = 0.5 * locEma + 0.5 * locPctOf(locBestRssi);
+        } else {
+            locEma *= 0.7;   // fade rather than snap when the tag goes quiet
+        }
+        int pct = (int) Math.round(locEma);
+        locMeter.setProgress(pct);
+        locPct.setText(locating
+                ? pct + "%" + (fresh ? "" : " · quiet") : "—");
+        int heard = 0;
+        for (java.util.Map.Entry<String, Double> e : locTags.entrySet()) {
+            if (e.getValue() > -998) heard++;
+        }
+        locHeardCount = heard;
+        locBestRssi = -999;   // best-of-window resets each tick
+        updateLocateUi();
+    }
+
+    private void updateLocateUi() {
+        if (locInfo == null) return;
+        if (locProduct == null || locTags.isEmpty()) {
+            locInfo.setText("");
+            return;
+        }
+        locInfo.setText((locNarrow != null
+                ? "targeting ONE tag …" + locNarrow.substring(
+                        Math.max(0, locNarrow.length() - 6))
+                : "targeting " + locTargets().size() + " tag(s)")
+                + " · heard " + locHeardCount + " of " + locTags.size()
+                + " ever · " + locFound.size() + " found ✓"
+                + " · power " + locPower);
+    }
+
+    /** Geiger cadence: silence when quiet, ~1 Hz far away, ~10 Hz on top
+     *  of it. Self-reschedules while the hunt runs. */
+    private void scheduleLocateBeep() {
+        if (!locating) return;
+        long delay = 300;
+        boolean fresh = System.currentTimeMillis() - locLastHeard < 1200;
+        if (fresh && locEma > 3) {
+            delay = (long) Math.max(90, 1000 - locEma * 9);
+            if (locSound && tones != null) {
+                try {
+                    tones.startTone(ToneGenerator.TONE_PROP_BEEP, 40);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        ui.postDelayed(this::scheduleLocateBeep, delay);
+    }
+
+    /** Which tag(s) to chase: all remaining, one specific, or un-find a
+     *  found one to hunt it again. */
+    private void locateTargetDialog() {
+        if (locTags.isEmpty()) return;
+        final List<String> labels = new ArrayList<>();
+        final List<String> epcs = new ArrayList<>();
+        labels.add("ALL remaining tags (" + Math.max(0,
+                locTags.size() - locFound.size()) + ")");
+        epcs.add(null);
+        for (String epc : locTags.keySet()) {
+            String tail = "…" + epc.substring(Math.max(0, epc.length() - 6));
+            labels.add(tail + (locFound.contains(epc)
+                    ? "  — found ✓ (tap to hunt again)"
+                    : locNarrow != null && locNarrow.equals(epc)
+                      ? "  — current target" : ""));
+            epcs.add(epc);
+        }
+        labels.add("RESET all found marks");
+        epcs.add("RESET");
+        new AlertDialog.Builder(this)
+                .setTitle("Target which tag?")
+                .setItems(labels.toArray(new String[0]), (d, which) -> {
+                    String pick = epcs.get(which);
+                    if ("RESET".equals(pick)) {
+                        locFound.clear();
+                        locNarrow = null;
+                        status.setText("Found marks cleared — hunting "
+                                + "every tag again.");
+                    } else if (pick == null) {
+                        locNarrow = null;
+                    } else {
+                        locFound.remove(pick);
+                        locNarrow = pick;
+                    }
+                    updateLocateUi();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Nick's confirm-a-find: pause the hunt, read at power 1 with the
+     *  antenna against the sticker, and if it's one of the product's tags
+     *  mark it FOUND and drop it from the hunt — then chase the next box. */
+    private void confirmFoundScan() {
+        if (locProduct == null || locTags.isEmpty()) {
+            status.setText("Nothing being hunted.");
+            return;
+        }
+        final boolean wasLocating = locating;
+        stopLocate(false);
+        status.setText("Touch the antenna to the sticker…");
+        locFoundBtn.setEnabled(false);
+        new Thread(() -> {
+            String hit = null;
+            double hitRssi = -999;
+            boolean strange = false;
+            try {
+                try {
+                    reader.setPower(1);
+                } catch (Exception ignored) {
+                    reader.setPower(2);
+                }
+                long until = System.currentTimeMillis() + 2000;
+                while (System.currentTimeMillis() < until) {
+                    UHFTAGInfo info = null;
+                    try {
+                        info = reader.inventorySingleTag();
+                    } catch (Exception ignored) {
+                    }
+                    if (info == null) continue;
+                    String epc = info.getEPC();
+                    if (epc == null || epc.isEmpty()) continue;
+                    String key = epc.toUpperCase(java.util.Locale.ROOT);
+                    if (locTags.containsKey(key)) {
+                        double r = -999;
+                        try {
+                            r = Double.parseDouble(info.getRssi());
+                        } catch (Exception ignored) {
+                        }
+                        if (hit == null || r > hitRssi) {
+                            hit = key;
+                            hitRssi = r;
+                        }
+                    } else {
+                        strange = true;
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                try {
+                    reader.setPower(locPower);
+                } catch (Exception ignored) {
+                }
+            }
+            final String fhit = hit;
+            final boolean fstrange = strange;
+            ui.post(() -> {
+                locFoundBtn.setEnabled(true);
+                if (fhit != null) {
+                    boolean already = locFound.contains(fhit);
+                    locFound.add(fhit);
+                    if (fhit.equals(locNarrow)) locNarrow = null;
+                    beep(SOUND_OK);
+                    status.setText((already ? "Same tag again (…"
+                            : "Found ✓ …")
+                            + fhit.substring(Math.max(0, fhit.length() - 6))
+                            + " — " + locFound.size() + " of "
+                            + locTags.size() + " found; out of the hunt.");
+                    if (wasLocating && !locTargets().isEmpty()) {
+                        toggleLocate();
+                    }
+                } else {
+                    beep(SOUND_ERR);
+                    status.setText(fstrange
+                            ? "Read a tag, but not one of this product's."
+                            : "Nothing read — hold the antenna against "
+                              + "the sticker and try again.");
+                    if (wasLocating) toggleLocate();
+                }
+                updateLocateUi();
+            });
+        }).start();
     }
 
     // Preview card: [image | name + SKU] with the tracker pinned top-right.
@@ -1761,8 +2222,10 @@ public class MainActivity extends Activity {
         for (int i = 0; i < TAB_COUNT; i++) {
             tabViews[i].setVisibility(i == tab ? View.VISIBLE : View.GONE);
         }
+        // Leaving locate always parks the radio (no-op when idle).
+        if (tab != TAB_LOCATE) stopLocate(false);
         boolean needsInput = tab == TAB_BATCH || tab == TAB_STATION
-                || tab == TAB_FIND;
+                || tab == TAB_FIND || tab == TAB_LOCATE;
         btInput.setVisibility(needsInput ? View.VISIBLE : View.GONE);
         tabTitle.setVisibility(needsInput ? View.GONE : View.VISIBLE);
         tabTitle.setText(TAB_NAMES[tab]);
@@ -1777,7 +2240,10 @@ public class MainActivity extends Activity {
             refreshSweepList();
             status.setText("Trigger or START to sweep tags; SEND when done.");
         } else {
-            status.setText("Locate is not built yet.");
+            status.setText(locProduct == null
+                    ? "LOCATE: scan or type a product barcode/SKU."
+                    : "LOCATE: trigger to hunt, FOUND IT? to confirm a "
+                      + "find.");
         }
     }
 
@@ -1812,6 +2278,8 @@ public class MainActivity extends Activity {
                 status.setText("CHECK step — tap flagged items to review, "
                         + "or BACK to keep scanning.");
             } else batchScan(code);
+        } else if (activeTab == TAB_LOCATE) {
+            locateLookup(code);
         } else if (activeTab == TAB_STATION) {
             // The bins wear barcodes of their own that scan as the bin
             // name ("D1-3"). With a product already up, that scan almost
@@ -1881,8 +2349,10 @@ public class MainActivity extends Activity {
             stationReadTag();
         } else if (activeTab == TAB_SWEEP) {
             toggleScan();
+        } else if (activeTab == TAB_LOCATE) {
+            toggleLocate();
         } else {
-            status.setText("Locate is not built yet.");
+            status.setText("Nothing to trigger on this tab.");
         }
     }
 
@@ -1938,6 +2408,15 @@ public class MainActivity extends Activity {
                 reader.setInventoryCallback(info -> {
                     String epc = info == null ? null : info.getEPC();
                     if (epc == null || epc.isEmpty()) return;
+                    if (locating) {
+                        double rssi = -999;
+                        try {
+                            rssi = Double.parseDouble(info.getRssi());
+                        } catch (Exception ignored2) {
+                        }
+                        onLocateRead(epc, rssi);
+                        return;
+                    }
                     synchronized (tags) {
                         Integer n = tags.get(epc);
                         tags.put(epc, n == null ? 1 : n + 1);
@@ -4989,9 +5468,18 @@ public class MainActivity extends Activity {
                     + "for putting strays back where they belong.");
         } else {
             helpDialog("Locate",
-                    "Not built yet — planned: pick a product and the "
-                    + "reader turns into a geiger counter that beeps "
-                    + "faster as you get closer to its tag.");
+                    "Hunt a product's RFID tags by signal strength:\n\n"
+                    + "• Scan or type a barcode/SKU — its tags on file "
+                    + "load, with the recorded bin as a starting point.\n"
+                    + "• TRIGGER starts/stops the hunt. The meter and the "
+                    + "beeps rise as you close in (strongest tag wins).\n"
+                    + "• Signal pegged? Drop the power: FAR hears the "
+                    + "aisle, NEAR a bay or two, TOUCH only arm's reach.\n"
+                    + "• FOUND IT? reads at power 1 with the antenna "
+                    + "touching the sticker — a confirmed find drops that "
+                    + "tag from the hunt so you can chase the next box.\n"
+                    + "• TARGET… narrows to one tag, un-finds one, or "
+                    + "resets the found marks.");
         }
     }
 
@@ -5825,6 +6313,7 @@ public class MainActivity extends Activity {
                         + "Trigger again to stop, then CHECK BIN.");
             }
         }
+        locateTick();
         ui.postDelayed(this::refreshTick, 400);
     }
 
