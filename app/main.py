@@ -1585,6 +1585,32 @@ def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
             )
         ):
             tag.bin_location = payload.bin
+        # Open batches carry a per-item bin SNAPSHOT taken at scan time,
+        # and the Check step raises "wrong-bin" by comparing it to the bin
+        # being walked. Leaving it stale is what made "Move product to this
+        # bin" look like it did nothing: Shopify, the map and the tags all
+        # moved, but the flag came straight back, so the operator pressed
+        # again — W9159A collected four no-op J1-4 -> J1-4 changes that way.
+        # CLOSED batches keep their snapshot: it's the honest record of
+        # what was true when that shelf was walked.
+        open_batches = {
+            b.id for b in session.scalars(
+                select(Batch).where(
+                    Batch.status.notin_(("done", "abandoned"))
+                )
+            )
+        }
+        if open_batches:
+            for item in session.scalars(
+                select(BatchItem).where(
+                    func.upper(BatchItem.sku) == sku.upper(),
+                    BatchItem.batch_id.in_(open_batches),
+                )
+            ):
+                item.bin_location = payload.bin
+                # The Shopify write replaced the whole bin value, so the
+                # product is no longer split across shelves.
+                item.other_bins = None
     session.commit()
 
     product["bin_location"] = payload.bin

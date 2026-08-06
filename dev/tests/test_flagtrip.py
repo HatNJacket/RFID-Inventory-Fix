@@ -88,6 +88,7 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
           tags and all(t.bin_location=="F9-9" for t in tags),
           [(t.bin_location) for t in tags])
 
+
     # ---- side trip from inside a side trip ------------------------------
     bid = cl.post("/api/batches", json={"bin":"D2-2","created_by":"Steve"}).json()["id"]
     cl.post(f"/api/batches/{bid}/scan", json={"code":"111"})
@@ -116,6 +117,34 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
     back = r.json()["parent"]
     check("closing the child returns the original batch",
           back["id"]==bid and back["parent_batch_id"] is None, back)
+
+    # ---- "Move product to this bin" must CLEAR the wrong-bin flag -------
+    # The open batch's per-item bin is a scan-time snapshot; leaving it
+    # stale made the Check step re-flag the product forever, so the
+    # operator pressed the button again and again (W9159A collected four
+    # no-op J1-4 -> J1-4 changes that way, 2026-08-06). Last in the file:
+    # it moves DEEP-1's home bin, which the side trips above rely on.
+    bfix = cl.post("/api/batches",
+                   json={"bin":"D2-2","created_by":"Steve"}).json()["id"]
+    cl.post(f"/api/batches/{bfix}/scan", json={"code":"333"})   # home G1-1
+    rev = cl.get(f"/api/batches/{bfix}/review").json()
+    entry = next((e for e in rev["items"]
+                  if e["item"]["sku"]=="DEEP-1"), None)
+    check("a product from another shelf flags wrong-bin",
+          entry is not None and "wrong-bin" in entry["flags"], entry)
+    r = cl.post("/api/bin-updates",
+                json={"target":"DEEP-1","bin":"D2-2","changed_by":"Steve"})
+    check("moving it to the batch's bin is accepted",
+          r.status_code==201, r.text[:160])
+    rev = cl.get(f"/api/batches/{bfix}/review").json()
+    entry = next((e for e in rev["items"]
+                  if e["item"]["sku"]=="DEEP-1"), None)
+    check("the wrong-bin flag CLEARS after the move (no endless re-press)",
+          entry is None or "wrong-bin" not in entry["flags"], entry)
+    item = next(i for i in cl.get(f"/api/batches/{bfix}").json()["items"]
+                if i["sku"]=="DEEP-1")
+    check("the open batch item's bin snapshot moved too",
+          item["bin_location"]=="D2-2" and not item["other_bins"], item)
 
 print()
 print("FAILED: "+", ".join(fails) if fails else "ALL CHECKS PASSED")
