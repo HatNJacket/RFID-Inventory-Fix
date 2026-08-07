@@ -25,6 +25,15 @@ Nick is running the bins and feeding fixes back same-day. Since v3.21:
   identify is a trigger-armed toggle (v3.27). Tap the scanner input to
   type (v3.25).
 - Inventory tab shows ON-HAND (was "available" — negative on oversells).
+- **Bin-fix offers (2026-08-07):** a walked batch counts as a deep manual
+  check of its shelf, so products it physically handled whose Shopify bin
+  disagrees (or is missing) get a "bin ⇢ <bin>" button on their Verify
+  row, and Inventory rows whose tag placement disagrees with Shopify's
+  bin get "⇢ Shopify" — both are the existing audited /api/bin-updates
+  write (History + bin map + tags follow). Untouched pre-seed rows never
+  offer (the batch proves nothing about them); split-shelf listings that
+  include the bin count as agreement. Inventory bin chip no longer wraps
+  mid-code ("K4-" / "1").
 - Unbuilt ideas on the table: Review resolve-actions per category
   (analysis done, nothing built), point-reads clamping their own power
   (metal-shelf misreads at power 30), docs/inventory-verification-app.md

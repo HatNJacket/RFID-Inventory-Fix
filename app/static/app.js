@@ -2041,7 +2041,23 @@ function renderInventory() {
         }</td>
         <td>${p.bin_location && p.bin_location !== "No bin assigned"
           ? `<span class="inventory__bin">${escapeHtml(p.bin_location)}</span>`
-          : "—"}</td>
+          : "—"}${
+          p.bin_differs && p.sku
+            ? ` <button class="binfix inv-setbin" type="button" data-sku="${escapeHtml(
+                p.sku
+              )}" data-bin="${escapeHtml(
+                p.bin_location
+              )}" data-was="${escapeHtml(
+                p.shopify_bin || "nothing"
+              )}" title="Shopify's bin says ${escapeHtml(
+                p.shopify_bin || "nothing"
+              )}, but this product's tags were placed at ${escapeHtml(
+                p.bin_location
+              )}. Click to write ${escapeHtml(
+                p.bin_location
+              )} to Shopify (audited, undoable via History).">⇢ Shopify</button>`
+            : ""
+        }</td>
         <td class="num">${
           p.unit_breakdown
             ? `${p.unit_count}<div class="inv__cases" title="${escapeHtml(
@@ -2058,7 +2074,36 @@ function renderInventory() {
 
 // Inventory rows open the same product panel History uses — label editor,
 // preview, RFID flag and paper trail in one place.
-document.getElementById("inv-body").addEventListener("click", (e) => {
+document.getElementById("inv-body").addEventListener("click", async (e) => {
+  // Tag placement is a physical fact; when Shopify's bin disagrees, this
+  // writes the tags' bin to Shopify via the normal audited update.
+  const fix = e.target.closest(".inv-setbin");
+  if (fix) {
+    const { sku, bin, was } = fix.dataset;
+    if (
+      !confirm(
+        `Set the Shopify bin for ${sku} to ${bin}?\n\n` +
+          `Shopify currently says: ${was}. This is the normal audited ` +
+          `bin write — Shopify, the bin map and this product's tags all ` +
+          `follow, with a History entry.`
+      )
+    )
+      return;
+    fix.disabled = true;
+    try {
+      await postJson("/api/bin-updates", {
+        target: sku,
+        bin,
+        changed_by: operatorEl.value || null,
+      });
+      fix.textContent = "✓ written";
+      await loadInventory();
+    } catch (err) {
+      alert(`Bin update failed: ${err.message}`);
+      fix.disabled = false;
+    }
+    return;
+  }
   const s = e.target.closest(".skulink");
   if (s && s.dataset.sku) openProductHistory(s.dataset.sku);
 });
@@ -4898,6 +4943,40 @@ bEl.verifyReport.addEventListener("click", async (e) => {
     }
     return;
   }
+  // "This batch physically handled the box(es) here" — a walked bin is a
+  // deep manual check, so a disagreeing Shopify bin gets a one-tap fix
+  // (the same audited bin write as everywhere else).
+  const setBin = e.target.closest(".bvx-setbin");
+  if (setBin && batch) {
+    const sku = setBin.dataset.sku;
+    const was = setBin.dataset.was || "nothing";
+    if (
+      !confirm(
+        `Set the Shopify bin for ${sku} to ${batch.bin_name}?\n\n` +
+          `Shopify currently says: ${was}. This is the normal audited ` +
+          `bin write — Shopify, the bin map and this product's tags all ` +
+          `follow, with a History entry.`
+      )
+    )
+      return;
+    setBin.disabled = true;
+    try {
+      await postJson("/api/bin-updates", {
+        target: sku,
+        bin: batch.bin_name,
+        changed_by: operatorEl.value || null,
+      });
+      setBatchResult(
+        `Shopify bin for ${sku} set to ${batch.bin_name} ✓`,
+        "ok"
+      );
+      await runVerifyCheck();
+    } catch (err) {
+      setBatchResult(err.message, "err");
+      setBin.disabled = false;
+    }
+    return;
+  }
   // Flagged rows expand into their explanation, like the Review inbox.
   const flagRow = e.target.closest("tr.bvx-flag");
   if (flagRow && !e.target.closest("a, button, input, label")) {
@@ -5124,6 +5203,22 @@ async function runVerifyCheck() {
         }${
           tb
             ? ` <span class="tagged-chip" title="${tb} box(es) on this shelf were already RFID tagged before this batch (side trip or earlier session) — no scans or pairs expected here, but the sweep must hear their tags">✓${tb} already tagged</span>`
+            : ""
+        }${
+          r.bin_differs && r.sku
+            ? ` <button class="binfix bvx-setbin" type="button" data-sku="${escapeHtml(
+                r.sku
+              )}" data-was="${escapeHtml(
+                r.bin_location || "nothing"
+              )}" title="Shopify's bin for this product says ${escapeHtml(
+                r.bin_location || "nothing"
+              )}, but this batch physically handled it on ${escapeHtml(
+                batch.bin_name
+              )}. Click to write ${escapeHtml(
+                batch.bin_name
+              )} to Shopify (audited, undoable via History).">bin ⇢ ${escapeHtml(
+                batch.bin_name
+              )}</button>`
             : ""
         }</td>
         <td class="mono">${escapeHtml(r.sku || "—")}</td>

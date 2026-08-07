@@ -1896,23 +1896,45 @@ def inventory_summary(session: Session = Depends(get_session)):
             logger.warning("live quantity fetch failed: %s", error)
 
     # Product GID for "open in Shopify admin" links — the live bin map is
-    # the reliable source (assignments can carry TELCAN's "handle:…" ids,
-    # which no admin URL can be built from).
+    # the reliable source (historical assignments carried surrogate ids no
+    # admin URL can be built from). Its bin also rides along so each row
+    # can compare Shopify's shelf against where the tags actually are.
     gid_by_sku: dict = {}
+    shopify_bin_by_sku: dict = {}
     try:
-        for sku, pid in session.execute(
-            select(BinMapEntry.sku, BinMapEntry.shopify_product_id)
-            .where(BinMapEntry.shopify_product_id.isnot(None))
+        for sku, pid, bin_, other in session.execute(
+            select(
+                BinMapEntry.sku,
+                BinMapEntry.shopify_product_id,
+                BinMapEntry.bin,
+                BinMapEntry.other_bins,
+            )
         ):
-            if sku and str(pid).startswith("gid://"):
-                gid_by_sku.setdefault(sku.strip().upper(), pid)
+            key = (sku or "").strip().upper()
+            if not key:
+                continue
+            if pid and str(pid).startswith("gid://"):
+                gid_by_sku.setdefault(key, pid)
+            full = ", ".join(x for x in ((bin_ or "").strip(), other) if x)
+            if full:
+                shopify_bin_by_sku.setdefault(key, full)
     except Exception as error:
         logger.warning("gid lookup failed: %s", error)
 
     for p in products:
+        key = (p["sku"] or "").strip().upper()
         p["vendor"] = vendor_by_sku.get(p["sku"])
-        p["shopify_product_id"] = gid_by_sku.get(
-            (p["sku"] or "").strip().upper()
+        p["shopify_product_id"] = gid_by_sku.get(key)
+        p["shopify_bin"] = shopify_bin_by_sku.get(key)
+        # The tags were placed by hand at a real shelf — when Shopify's
+        # bin disagrees (or is missing), the row offers to write the
+        # tags' bin to Shopify via the existing audited update.
+        rfid_bin = (p["bin_location"] or "").strip()
+        p["bin_differs"] = bool(
+            rfid_bin
+            and rfid_bin not in MISSING_BIN_VALUES
+            and p["sku"]
+            and not bin_contains(p["shopify_bin"] or "", rfid_bin)
         )
 
     return {
@@ -5281,6 +5303,19 @@ def batch_verify(
             "image_url": i.image_url,
             # Expected silent: the tag never answers once it's on the box.
             "rfid_incompatible": (i.sku or "").strip().upper() in noscan,
+            # A walked batch is a deep manual check of the shelf: boxes
+            # were physically handled here, so a Shopify bin that says
+            # otherwise (or says nothing) earns a one-tap fix offer.
+            "bin_location": i.bin_location,
+            "bin_differs": bool(
+                (i.qty_scanned or i.paired_count or i.tagged_before)
+                and (
+                    not (i.bin_location or "").strip()
+                    or (i.bin_location or "").strip().lower()
+                       == "no bin assigned"
+                    or not bin_contains(i.bin_location, batch.bin_name)
+                )
+            ),
             # What Shopify expected on this shelf (snapshot from scan
             # time) and the units actually found — display only, nothing
             # here writes a count anywhere.

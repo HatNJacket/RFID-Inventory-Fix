@@ -157,7 +157,16 @@ with Session(get_engine()) as s:
         m("PROD-C", "Product C", "BIN-T", 4),
         m("PROD-F", "Product F", "BIN-D", 6),
         m("PROD-U", "Product U (untagged bin)", "BIN-U", 2),
+        # Tags say K4-1, Shopify says J2-2: the Inventory tab's
+        # "⇢ Shopify" offer (and the K4-1 chip's no-wrap fix).
+        m("MISMATCH-1", "Mismatch Demo (tags K4-1, Shopify J2-2)",
+          "J2-2", 1, barcode="999"),
     ])
+    s.add(RfidAssignment(rfid_id="MMMM0000000000000000000M",
+                         shopify_variant_id="t:MM", sku="MISMATCH-1",
+                         product_title="Mismatch Demo (tags K4-1, "
+                                       "Shopify J2-2)",
+                         bin_location="K4-1"))
     # BIN-T was batch-tagged to completion; BIN-D only has stray tags.
     from datetime import datetime, timezone
     done_at = datetime.now(timezone.utc)
@@ -204,9 +213,22 @@ _sh.get_on_hand = _fake_get
 _sh.set_on_hand = _fake_set
 # No-op the API lookup paths too: the live bin map answers product
 # identity locally, and a dead API must degrade to that instead of
-# surfacing token errors (mirrors the dev/tests mocking).
-_sh.lookup_barcode = lambda code: None
-_sh.lookup_barcode_all = lambda code: []
+# surfacing token errors (mirrors the dev/tests mocking). One product
+# answers so the "write bin to Shopify" buttons run end to end.
+_MM = {"shopify_variant_id": "t:MM",
+       "shopify_product_id": "gid://shopify/Product/424242",
+       "product_title": "Mismatch Demo (tags K4-1, Shopify J2-2)",
+       "variant_title": None, "sku": "MISMATCH-1", "barcode": "999",
+       "bin_location": "J2-2", "image_url": None}
+_sh.lookup_barcode = lambda code: (
+    dict(_MM) if code in ("999", "MISMATCH-1") else None)
+_sh.lookup_barcode_all = lambda code: (
+    [dict(_MM)] if code in ("999", "MISMATCH-1") else [])
+_sh.set_variant_bin = (
+    lambda vid, b: print(f"[fake shopify] variant bin {vid} -> {b}"))
+_sh.product_bin_info = lambda pid: {"variant_count": 1, "easy_bin": None}
+_sh.set_product_bin = (
+    lambda pid, b: print(f"[fake shopify] easyscan bin {pid} -> {b}"))
 _sh.fetch_all_variant_bins = lambda: []
 _sh.get_stock_info_by_skus = lambda skus: {}
 _sh.get_quantities_by_skus = lambda skus: {}
