@@ -3,10 +3,32 @@
 Source of truth for project status. Updated by Claude each working session.
 Last updated: 2026-08-06.
 
-## 🔶 Current field-test round (C72 v3.21, installed from the terminal)
+## 🔶 Current field-test round (C72 v3.27, installed from the terminal)
 
 Everything below shipped 2026-08-03 → 08-06 and works in tests/browser;
-warehouse confirmation pending (Nick is running the bins):
+Nick is running the bins and feeding fixes back same-day. Since v3.21:
+- Batches start (scan a bin barcode) and abandon on the gun; already-
+  tagged dialog gained recorded-shelf + sweep-to-count (v3.22).
+- Web verify: flagged rows expand into a resolution panel (new vs
+  already-tagged counts summed against expected); detected accepted at
+  X or X+Y, flagged only in between/overflow; double-count guard at
+  Check with one-tap fix (v3.23).
+- **Lookups answer from the LIVE bin map, mirror demoted to fallback**
+  (the F9394B-printed-as-DB24010501 fix — see CLAUDE.md hard rule).
+- "Move product to this bin" now clears its flag (open-batch bin
+  snapshots move with the update).
+- Bin audit: sweep any shelf vs Shopify (verify-style diffs, on-hand
+  button, untagged toggle, record-as-batch-tagged rescue, "already
+  recorded" notice naming abandoned attempts).
+- Scan a tag → full identity + warnings (orphan SKU, wrong bin, case,
+  suspect) + UNLINK with History receipt (TODO #8 done, v3.26);
+  identify is a trigger-armed toggle (v3.27). Tap the scanner input to
+  type (v3.25).
+- Inventory tab shows ON-HAND (was "available" — negative on oversells).
+- Unbuilt ideas on the table: Review resolve-actions per category
+  (analysis done, nothing built), point-reads clamping their own power
+  (metal-shelf misreads at power 30), docs/inventory-verification-app.md
+  for the 1-left-check tie-in.
 - Already-tagged flow: first scan of a product with prior tags asks how
   many boxes are stickered (one-screen stepper + held-box checkbox,
   v3.20); verify counts those boxes everywhere (web + C72 + server).
