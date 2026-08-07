@@ -708,17 +708,25 @@ public class MainActivity extends Activity {
         stationHint.setTextSize(14);
         stationHint.setPadding(dp(4), dp(10), dp(4), 0);
         stationHint.setText("Scan a product barcode, then pull the TRIGGER "
-                + "on the RFID sticker to link it.\n\nNo product loaded? "
-                + "Pull the trigger (or tap IDENTIFY) to read a sticker "
-                + "and be told what it is.");
+                + "on the RFID sticker to link it.\n\nWHAT'S THIS TAG? "
+                + "arms identify mode: the trigger then tells you what a "
+                + "sticker is instead of linking it. Tap it again to go "
+                + "back. With no product loaded the trigger identifies "
+                + "anyway.");
         v.addView(stationHint, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         LinearLayout srow = new LinearLayout(this);
         srow.setGravity(Gravity.CENTER);
-        Button identify = smallBtn("🔍 WHAT'S THIS TAG?");
-        identify.setOnClickListener(x -> identifyTagRead());
-        srow.addView(identify, new LinearLayout.LayoutParams(
+        // A TOGGLE, not an action: tapping the screen while holding the
+        // antenna against a sticker is awkward, so this arms the mode and
+        // the physical TRIGGER does the read. Armed, it also beats the
+        // pairing path, so a tag can be identified without clearing the
+        // product that's loaded.
+        identifyBtn = smallBtn("🔍 WHAT'S THIS TAG?");
+        identifyBtn.setOnClickListener(x ->
+                setIdentifyArmed(!identifyArmed));
+        srow.addView(identifyBtn, new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         Button unlink = smallBtn("UNLINK LAST TAG");
         unlink.setOnClickListener(x -> stationUnlink());
@@ -732,6 +740,31 @@ public class MainActivity extends Activity {
     // show everything known about it, with unlink as the main action. The
     // orphan case is the point — a tag paired under a SKU the store has
     // since renamed reads as a product that no longer exists. ----
+    private Button identifyBtn;
+    private boolean identifyArmed = false;
+
+    /** Armed identify mode: the trigger reads a sticker to IDENTIFY it
+     *  instead of linking it. Stays on until switched off or the tab
+     *  changes, so several tags can be checked in a row. */
+    private void setIdentifyArmed(boolean on) {
+        identifyArmed = on;
+        if (identifyBtn != null) {
+            identifyBtn.setText(on ? "🔍 IDENTIFY: ON" : "🔍 WHAT'S THIS TAG?");
+            identifyBtn.setTextColor(on ? C_BLUE : C_TEXT);
+            identifyBtn.setBackground(rr(on ? C_OK_BG : Color.WHITE,
+                    on ? C_BLUE : C_LINE, 8));
+        }
+        if (on) {
+            beep(SOUND_OTHER);
+            status.setText("IDENTIFY armed — pull the TRIGGER on a sticker "
+                    + "to see what it is. Tap again to go back to linking.");
+        } else {
+            status.setText(stationProduct == null
+                    ? "Scan a product barcode."
+                    : "Trigger links tags to the shown product again.");
+        }
+    }
+
     private void identifyTagRead() {
         if (!readerReady) {
             beep(SOUND_ERR);
@@ -760,7 +793,13 @@ public class MainActivity extends Activity {
                 ui.post(() -> {
                     tagReadBusy = false;
                     beep(SOUND_OK);
-                    status.setText("Tag read ✓");
+                    // Say the mode is still on — the dialog hides the
+                    // button, and a forgotten mode is a surprised operator.
+                    status.setText(identifyArmed
+                            ? "Tag read ✓ — IDENTIFY still armed; trigger "
+                              + "the next sticker, or tap IDENTIFY: ON to "
+                              + "go back to linking."
+                            : "Tag read ✓");
                     showTagInfo(epc, info);
                 });
             } catch (Exception e) {
@@ -2436,6 +2475,9 @@ public class MainActivity extends Activity {
         }
         // Leaving locate always parks the radio (no-op when idle).
         if (tab != TAB_LOCATE) stopLocate(false);
+        // Identify is a station mode; don't let it follow you to another
+        // tab and surprise the next trigger pull.
+        if (tab != TAB_STATION && identifyArmed) setIdentifyArmed(false);
         boolean needsInput = tab == TAB_BATCH || tab == TAB_STATION
                 || tab == TAB_FIND || tab == TAB_LOCATE;
         btInput.setVisibility(needsInput ? View.VISIBLE : View.GONE);
@@ -2570,7 +2612,10 @@ public class MainActivity extends Activity {
                 status.setText("Pick a batch first.");
             }
         } else if (activeTab == TAB_STATION) {
-            stationReadTag();
+            // Armed identify wins over linking, so a sticker can be
+            // checked without clearing the product that's loaded.
+            if (identifyArmed) identifyTagRead();
+            else stationReadTag();
         } else if (activeTab == TAB_SWEEP) {
             toggleScan();
         } else if (activeTab == TAB_LOCATE) {
@@ -5673,9 +5718,13 @@ public class MainActivity extends Activity {
                     + "shows with its tag count.\n"
                     + "• Pull the trigger near ONE sticker to link it. "
                     + "The strongest tag wins, and UNDO unlinks the last."
-                    + "\n• With NO product loaded, the trigger (or "
-                    + "WHAT'S THIS TAG?) reads a sticker and tells you "
-                    + "what it is: product, SKU, how many tags that "
+                    + "\n• WHAT'S THIS TAG? is a TOGGLE: tap it and the "
+                    + "trigger identifies stickers instead of linking "
+                    + "them (it stays on for several in a row; tap again "
+                    + "to go back, and it switches itself off if you "
+                    + "leave this tab). With no product loaded the "
+                    + "trigger identifies anyway. You get: product, SKU, "
+                    + "how many tags that "
                     + "product has, which bin, which batch tagged it, and "
                     + "whether Shopify still knows the SKU. From there "
                     + "you can UNLINK it or LOCATE the product.\n"
