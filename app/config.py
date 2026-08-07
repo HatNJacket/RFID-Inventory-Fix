@@ -24,7 +24,7 @@ SHOPIFY_CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Where barcode lookups go first:
-#   "auto" (default) — TELCAN catalog tables first, Shopify API fallback
+#   "auto" (default) — live bin map first, Shopify API fallback
 #   "db"             — TELCAN only
 #   "api"            — Shopify API only (the original behavior)
 BARCODE_LOOKUP = os.getenv("BARCODE_LOOKUP", "auto").strip().lower()

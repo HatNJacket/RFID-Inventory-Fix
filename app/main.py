@@ -21,12 +21,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import AliasChoices, BaseModel, Field, field_validator
-from sqlalchemy import bindparam, delete, func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
-from app import catalog, config, shopify
+from app import config, shopify
 from app.auth import require_user
 from app.database import (
     DatabaseNotConfigured,
@@ -195,14 +195,6 @@ def health():
 
 
 # -------------------------------------------------------------- lookup API ---
-def _lookup_db(barcode: str) -> dict | None:
-    """TELCAN catalog lookup. Returns None on miss; raises on real errors."""
-    from app.database import get_engine
-
-    with Session(get_engine()) as session:
-        return catalog.lookup_barcode(session, barcode)
-
-
 def _lookup_api(barcode: str) -> dict | None:
     product = shopify.lookup_barcode(barcode)
     if product is not None:
@@ -230,18 +222,17 @@ def _binmap_product(row: BinMapEntry) -> dict:
 
 
 def _lookup_bin_map(term: str) -> dict | None:
-    """Live-sourced catalog lookup, tried BEFORE the TELCAN mirror.
+    """Live-sourced catalog lookup, the first stop for every barcode/SKU.
 
-    The mirror's sync died in Dec 2025, so it still answers with SKUs the
-    store renamed months ago — F9394B printed as its six-month-old
-    DB24010501, and it disagrees with the live catalog on dozens of SKUs.
     The bin map is rebuilt from the Shopify API every few hours, so when it
-    knows a barcode its SKU, title and ids are current. Only products
-    Shopify has never binned fall through to the mirror.
+    knows a barcode its SKU, title and ids are current. Anything it doesn't
+    know goes straight to the live API — the TELCAN mirror that used to sit
+    between them was REMOVED 2026-08-07 (sync dead since Dec 2025; it
+    stamped renamed SKUs and cross-wired handles onto tags).
 
-    Barcode wins over SKU (same precedence the mirror query uses), and when
-    several listings share a barcode the primary one is preferred, so an
-    OPEN BOX twin never shadows the main listing."""
+    Barcode wins over SKU, and when several listings share a barcode the
+    primary one is preferred, so an OPEN BOX twin never shadows the main
+    listing."""
     rows = _lookup_bin_map_all(term)
     return rows[0] if rows else None
 
@@ -278,65 +269,7 @@ def _lookup_bin_map_all(term: str) -> list[dict]:
         )
 
 
-def _prefer_live_sku(product: dict) -> dict:
-    """Swap a stale mirror hit for the live row that shares its barcode.
-
-    Covers what a bin-map-first lookup can't: someone typing or scanning
-    the OLD sku, which the bin map doesn't know at all. If the barcode the
-    mirror returned belongs to a different SKU live, the mirror's answer is
-    provably out of date."""
-    barcode = (product.get("barcode") or "").strip()
-    if not barcode:
-        return product
-    try:
-        live = _lookup_bin_map(barcode)
-    except Exception as error:
-        logger.warning("live SKU check unavailable: %s", error)
-        return product
-    if live and (live.get("sku") or "").strip().upper() != (
-        product.get("sku") or ""
-    ).strip().upper():
-        logger.info(
-            "stale mirror SKU %s -> live %s (barcode %s)",
-            product.get("sku"), live.get("sku"), barcode,
-        )
-        return live
-    return product
-
 MISSING_BIN_VALUES = (None, "", "No bin assigned")
-
-
-def _enrich_bin_from_shopify(
-    product: dict,
-    lookup_term: str,
-    api_ok: bool,
-) -> dict:
-    """Fill a missing TELCAN bin using the matching Shopify variant."""
-
-    if not api_ok:
-        return product
-
-    if product.get("bin_location") not in MISSING_BIN_VALUES:
-        return product
-
-    try:
-        api_product = shopify.lookup_barcode(lookup_term)
-
-        if (
-            api_product
-            and api_product.get("bin_location") not in MISSING_BIN_VALUES
-        ):
-            product["bin_location"] = api_product["bin_location"]
-
-    except Exception as error:
-        # Enrichment is a nicety — never let it fail the lookup it decorates.
-        logger.warning(
-            "Shopify bin enrichment failed for %s: %s",
-            lookup_term,
-            error,
-        )
-
-    return product
 
 
 def _case_payload(session: Session, code: str) -> dict | None:
@@ -482,78 +415,6 @@ def _live_barcode_map(session: Session) -> dict[str, str]:
     return live
 
 
-def _drop_stale_mirror_matches(
-    code: str,
-    products: list[dict],
-    allow_empty: bool = False,
-    live: dict[str, str] | None = None,
-) -> list[dict]:
-    """Discard TELCAN matches whose barcode the live catalog contradicts.
-
-    The mirror's sync has been dead for months, so it can still hold a
-    barcode that has since moved to another product — 93406 carrying
-    93405's barcode made scanning the Sony adapter resolve to the Canon,
-    and made the pair look like one item. The bin map IS rebuilt from live
-    Shopify, so when it knows that SKU's barcode and that barcode is not
-    what was just scanned, the mirror's claim is provably out of date.
-
-    Only applies to matches made BY barcode: a lookup by SKU legitimately
-    returns a product whose barcode differs from the search term."""
-    if not products or not code:
-        return products
-    wanted = code.strip()
-    by_barcode = [
-        p for p in products
-        if (p.get("barcode") or "").strip() == wanted
-    ]
-    if not by_barcode:
-        return products          # matched by SKU/alias — nothing to check
-    if live is None:
-        try:
-            from app.database import get_engine
-
-            with Session(get_engine()) as session:
-                live = _live_barcode_map(session)
-        except Exception as error:
-            logger.warning("stale-mirror check unavailable: %s", error)
-            return products
-
-    # Case-insensitive view of the live map. The dead mirror's SKUs drift
-    # in CASE too ('ZWO Anti-dew' vs the live 'ZWO Anti-Dew'), and an exact
-    # lookup treated the pair as two different products.
-    ci = {
-        k.strip().upper(): (k.strip(), v)
-        for k, v in live.items() if k
-    }
-    kept = []
-    for p in products:
-        sku = (p.get("sku") or "").strip()
-        matched_by_barcode = (p.get("barcode") or "").strip() == wanted
-        live_sku, known = ci.get(sku.upper(), (None, None))
-        if matched_by_barcode and known and known != wanted:
-            logger.info(
-                "dropping stale mirror match: %s claims barcode %s but the "
-                "live catalog has %s", sku, wanted, known
-            )
-            continue
-        if matched_by_barcode and live_sku and live_sku != sku:
-            # The live catalog owns the spelling: rewrite the mirror's
-            # drifted casing here, at the source, so every batch row and
-            # tag downstream carries ONE spelling of the product.
-            logger.info("normalizing mirror SKU casing: %r -> %r",
-                        sku, live_sku)
-            p = {**p, "sku": live_sku}
-        kept.append(p)
-    # Single-lookup callers WANT an empty result: it drops them through to
-    # the live Shopify lookup, which has the right answer. The candidate
-    # list is different — if the live catalog disagreed with every option,
-    # showing the mirror's guesses plus the ambiguity flag beats showing
-    # nothing at all.
-    if not kept and not allow_empty:
-        return products
-    return kept
-
-
 @app.get(
     "/api/products/by-barcode/{barcode}",
     dependencies=[Depends(require_user)],
@@ -561,8 +422,11 @@ def _drop_stale_mirror_matches(
 def product_by_barcode(barcode: str):
     """Barcode-or-SKU -> product (bad/missing barcodes happen, so the same
     field accepts a typed SKU). Source order is config.BARCODE_LOOKUP:
-    auto = live bin map, then the TELCAN mirror, then the Shopify API;
-    or force 'db' (local sources only) / 'api'."""
+    auto = live bin map, then the Shopify API; or force 'db' (bin map
+    only) / 'api'. The TELCAN mirror was REMOVED 2026-08-07 — its dead
+    sync stamped renamed SKUs and cross-wired handles onto tags (G3M662C
+    for the live G3M662C-L; ATR585M linked to the ATR294M page). The
+    repair that cleaned those records: dev/repair_mirror_records.py."""
     barcode = barcode.strip()
     mode = config.BARCODE_LOOKUP
     db_ok = database_configured()
@@ -570,40 +434,14 @@ def product_by_barcode(barcode: str):
     errors: list[str] = []
 
     if mode in ("auto", "db") and db_ok:
-        # Live-sourced bin map first: the mirror's sync died in Dec 2025
-        # and still answers with SKUs the store renamed months ago.
         try:
             product = _lookup_bin_map(barcode)
             if product is not None:
                 return product
         except Exception as error:
             logger.warning("bin-map lookup failed: %s", error)
-
-        try:
-            product = _lookup_db(barcode)
-
-            # The mirror can hand back a product whose barcode has since
-            # moved elsewhere; the live-sourced bin map catches that. Keep
-            # the RETURNED copy — it also carries the SKU casing fixed to
-            # the live catalog's spelling.
-            if product is not None:
-                kept = _drop_stale_mirror_matches(
-                    barcode, [product], allow_empty=True
-                )
-                product = kept[0] if kept else None
-            if product is not None:
-                return _enrich_bin_from_shopify(
-                    product=_prefer_live_sku(product),
-                    lookup_term=barcode,
-                    api_ok=api_ok,
-                )
-
-        except Exception as error:
-            logger.warning("TELCAN lookup failed: %s", error)
-            errors.append(f"TELCAN lookup failed: {error}")
-
             if mode == "db":
-                raise HTTPException(502, errors[-1])
+                raise HTTPException(502, f"bin-map lookup failed: {error}")
 
     if mode in ("auto", "api") and api_ok:
         try:
@@ -705,27 +543,12 @@ def _resolve(term: str, mode: str, db_ok: bool, api_ok: bool) -> dict | None:
         return None
 
     if mode in ("auto", "db") and db_ok:
-        # Live-sourced bin map first — the mirror is the fallback now, not
-        # the primary. See _lookup_bin_map for why.
         try:
             product = _lookup_bin_map(term)
             if product is not None:
                 return product
         except Exception as error:
             logger.warning("bin-map lookup failed: %s", error)
-
-        try:
-            product = _lookup_db(term)
-
-            if product is not None:
-                return _enrich_bin_from_shopify(
-                    product=_prefer_live_sku(product),
-                    lookup_term=term,
-                    api_ok=api_ok,
-                )
-
-        except Exception as error:
-            logger.warning("TELCAN lookup failed: %s", error)
 
     if mode in ("auto", "api") and api_ok:
         try:
@@ -762,25 +585,10 @@ def products_by_barcode_all(
     api_ok = not config.check_shopify_env()
     candidates: list[dict] = []
     if mode in ("auto", "db") and db_ok:
-        # Live bin map first here too, so the Check step's candidate
-        # listings carry current SKUs rather than the dead mirror's.
         try:
             candidates = _lookup_bin_map_all(code)
         except Exception as error:
             logger.warning("bin-map multi-lookup failed: %s", error)
-    if not candidates and mode in ("auto", "db") and db_ok:
-        try:
-            from app.database import get_engine
-
-            with Session(get_engine()) as session:
-                candidates = catalog.lookup_barcode_all(session, code)
-            # A stale mirror barcode makes two unrelated products look like
-            # one listing with two variants; the live bin map settles it.
-            candidates = _drop_stale_mirror_matches(
-                code, candidates, live=live_barcodes
-            )
-        except Exception as error:
-            logger.warning("TELCAN multi-lookup failed: %s", error)
     if not candidates and mode in ("auto", "api") and api_ok:
         try:
             candidates = shopify.lookup_barcode_all(code)
@@ -1545,8 +1353,8 @@ def overwrite_barcode(
     payload: OverwriteIn, session: Session = Depends(get_session)
 ):
     """Replace a product's barcode in Shopify with the scanned one, and log
-    who did it and when. TELCAN's mirror catches up on its next sync; until
-    then the Shopify-API lookup fallback resolves the new barcode."""
+    who did it and when. The bin map picks the change up on its next
+    rebuild; until then the Shopify-API lookup resolves the new barcode."""
     if not payload.confirmed:
         raise HTTPException(
             422, "Confirmation checkbox is required for barcode replacement."
@@ -1563,8 +1371,7 @@ def overwrite_barcode(
             "replace another product's barcode.",
         )
 
-    # Must resolve via the Shopify API: the mutation needs real Shopify ids,
-    # which the TELCAN mirror doesn't store.
+    # Must resolve via the Shopify API: the mutation needs real Shopify ids.
     try:
         product = _lookup_api(payload.target)
     except RuntimeError as error:
@@ -1994,8 +1801,8 @@ def _live_quantities(skus: list[str]) -> dict[str, int]:
 @app.get("/api/inventory/summary", dependencies=[Depends(require_user)])
 def inventory_summary(session: Session = Depends(get_session)):
     """One row per product in the RFID system: identity, bin, tag count,
-    newest tag date — plus current Shopify quantity from the TELCAN mirror
-    when available, so tag counts can be eyeballed against stock levels."""
+    newest tag date — plus current LIVE Shopify on-hand, so tag counts can
+    be eyeballed against stock levels."""
     rows = session.execute(
         select(
             RfidAssignment.sku,
@@ -2058,8 +1865,9 @@ def inventory_summary(session: Session = Depends(get_session)):
     products.sort(key=lambda p: p["last_assigned_at"] or "", reverse=True)
 
     # Vendor (the brand) for filtering and sorting. The bin map holds it
-    # live from Shopify; the TELCAN mirror covers anything not binned.
-    # Some products genuinely have no vendor set — those stay blank.
+    # live from Shopify. Some products genuinely have no vendor set —
+    # those stay blank. (The TELCAN mirror used to fall back here for
+    # unbinned products — removed 2026-08-07 with the rest of the mirror.)
     vendor_by_sku: dict = {}
     try:
         for sku, vendor in session.execute(
@@ -2071,45 +1879,10 @@ def inventory_summary(session: Session = Depends(get_session)):
     except Exception as error:
         logger.warning("vendor lookup (bin map) failed: %s", error)
 
-    # Enrich with live stock counts from the TELCAN catalog mirror.
     skus = [p["sku"] for p in products if p["sku"]]
-    if skus and session.get_bind().dialect.name == "mssql":
-        # Mirror fallback for vendors the bin map didn't cover.
-        missing = [s for s in skus if s not in vendor_by_sku]
-        if missing:
-            try:
-                for r in session.execute(
-                    text(
-                        "SELECT v.Variant_SKU AS sku, MAX(p.Vendor) AS vendor "
-                        "FROM dbo.Shopify_Variants v "
-                        "JOIN dbo.Shopify_Products p "
-                        "  ON p.Handle_ID = v.Handle_ID "
-                        "WHERE v.Variant_SKU IN :skus "
-                        "GROUP BY v.Variant_SKU"
-                    ).bindparams(bindparam("skus", expanding=True)),
-                    {"skus": missing},
-                ):
-                    if r.vendor:
-                        vendor_by_sku.setdefault(r.sku, r.vendor)
-            except Exception as error:
-                logger.warning("vendor lookup (mirror) failed: %s", error)
-        try:
-            qty_rows = session.execute(
-                text(
-                    "SELECT Variant_SKU, MAX(Variant_Inventory_Qty) AS qty "
-                    "FROM dbo.Shopify_Variants "
-                    "WHERE Variant_SKU IN :skus GROUP BY Variant_SKU"
-                ).bindparams(bindparam("skus", expanding=True)),
-                {"skus": skus},
-            ).all()
-            qty_by_sku = {r.Variant_SKU: r.qty for r in qty_rows}
-            for p in products:
-                p["shopify_qty"] = qty_by_sku.get(p["sku"])
-        except Exception as error:
-            logger.warning("inventory qty enrichment failed: %s", error)
 
-    # Overlay live Shopify quantities (the mirror lags its sync schedule);
-    # mirror values remain as the fallback when the API is unreachable.
+    # Live Shopify quantities; a product the API can't answer for shows
+    # no number rather than a stale one.
     if skus and not config.check_shopify_env():
         try:
             live = _live_quantities(skus)
@@ -3056,10 +2829,11 @@ def _batch_items(session: Session, batch_id: int) -> list[BatchItem]:
     ).all()
 
 
-def _mirror_qty(session: Session, sku: str | None) -> int | None:
-    """Expected shelf count for one SKU: LIVE Shopify on-hand first (the
-    mirror's quantities proved stale by months), mirror as the fallback
-    when the API is unreachable."""
+def _expected_qty(session: Session, sku: str | None) -> int | None:
+    """Expected shelf count for one SKU: LIVE Shopify on-hand first, the
+    bin map's live-sourced snapshot (rebuilt every few hours) when the API
+    is unreachable. The TELCAN mirror used to be the fallback here —
+    removed 2026-08-07, its quantities were stale by months."""
     if not sku:
         return None
     if not config.check_shopify_env():
@@ -3069,26 +2843,14 @@ def _mirror_qty(session: Session, sku: str | None) -> int | None:
                 return live
         except Exception as error:
             logger.warning("live on-hand failed for %s: %s", sku, error)
-    if session.get_bind().dialect.name != "mssql":
-        return None
     try:
-        row = session.execute(
-            text(
-                "SELECT MAX(i.On_Hand_Current) AS oh, "
-                "       MAX(v.Variant_Inventory_Qty) AS avail "
-                "FROM dbo.Shopify_Variants v "
-                "LEFT JOIN dbo.Shopify_Inventory i "
-                "  ON i.Handle_ID = v.Handle_ID "
-                " AND i.Variant_SKU = v.Variant_SKU "
-                "WHERE v.Variant_SKU = :sku"
-            ),
-            {"sku": sku},
-        ).first()
-        if row is None:
-            return None
-        return row.oh if row.oh is not None else row.avail
+        total = session.execute(
+            select(func.sum(BinMapEntry.qty))
+            .where(func.upper(BinMapEntry.sku) == sku.strip().upper())
+        ).scalar()
+        return int(total) if total is not None else None
     except Exception as error:
-        logger.warning("mirror qty lookup failed for %s: %s", sku, error)
+        logger.warning("bin-map qty lookup failed for %s: %s", sku, error)
         return None
 
 
@@ -3226,7 +2988,7 @@ def _apply_product_to_item(
     item.kind, _ = resolve_product_kind(
         session, item.product_title, item.sku, saved
     )
-    qty = _mirror_qty(session, item.sku)
+    qty = _expected_qty(session, item.sku)
     if qty is not None:
         item.expected_qty = qty
 
@@ -3626,8 +3388,8 @@ def batch_scan(
     batch_id: int, payload: BatchScanIn, session: Session = Depends(get_session)
 ):
     """One box scanned at the shelf. Resolves through the full Scan Station
-    chain (TELCAN -> Shopify -> alias -> serial prefix); repeated scans of
-    the same product bump its count. Unknown barcodes are kept as unresolved
+    chain (bin map -> Shopify API -> alias -> serial prefix); repeated
+    scans of the same product bump its count. Unknown barcodes are kept as unresolved
     rows so the physical count survives — they never block the batch."""
     batch = _get_batch(session, batch_id)
     if batch.status in ("done", "abandoned"):
@@ -4045,7 +3807,7 @@ def batch_item_reassign(
     item.barcode = match.get("barcode")
     item.bin_location = match.get("bin_location")
     item.image_url = (match.get("image_url") or "")[:500] or None
-    item.expected_qty = _mirror_qty(session, item.sku)
+    item.expected_qty = _expected_qty(session, item.sku)
     session.commit()
     session.refresh(item)
     return {"item": item.as_dict(), "merged": False}
@@ -4401,7 +4163,7 @@ def batch_item_split(
             bin_location=match.get("bin_location"),
             image_url=(match.get("image_url") or "")[:500] or None,
             qty_scanned=p.qty,
-            expected_qty=_mirror_qty(session, match.get("sku")),
+            expected_qty=_expected_qty(session, match.get("sku")),
         )
         session.add(row)
         rows.append(row)
@@ -6488,7 +6250,7 @@ def product_history(term: str, session: Session = Depends(get_session)):
         "barcode": barcode,
         "image_url": image_url,
         "tag_count": tag_count,
-        "on_hand": _mirror_qty(session, sku),
+        "on_hand": _expected_qty(session, sku),
         "serial_prefix": sp.prefix if sp else None,
         "serial_label": (
             (sp.label_name or _default_serial_label(sp.item_name))

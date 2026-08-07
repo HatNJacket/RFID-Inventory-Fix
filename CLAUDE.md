@@ -24,14 +24,16 @@ change log; commit messages here are written to be read later.
   app settings (the restart collides with the zip deploy).
 - **The GitHub Actions red X on pushes is intentional** (publish-profile
   workflow disabled). Never "fix" or delete it.
-- **TELCAN mirror sync is dead since Dec 2025** and disagrees with the
-  live catalog on dozens of SKUs (it printed F9394B as its six-month-old
-  `DB24010501`). Lookup order is **live `rfid_bin_map` → mirror → Shopify
-  API**; the mirror only answers for products Shopify has never binned,
-  and a mirror hit whose barcode the bin map knows is swapped for the live
-  row (`_prefer_live_sku`). Quantities come from the live API only. The
-  bin map is the SKU/barcode authority — never re-promote the mirror.
-  Compare SKUs case-insensitively everywhere (`.upper()`), always.
+- **The TELCAN mirror is REMOVED (2026-08-07) — never reintroduce it.**
+  Its sync died Dec 2025 and it kept poisoning records through every path
+  it was left in (F9394B as `DB24010501`; batch 126's ToupTek shelf got
+  renamed SKUs and handles cross-wired to the WRONG products). Lookup
+  order is **live `rfid_bin_map` → live Shopify API**, nothing else; the
+  `dbo.Shopify_*` tables still exist in the database but no app code may
+  read them. The one-off record repair lives at
+  `dev/repair_mirror_records.py`. Quantities come from the live API (bin
+  map snapshot as offline fallback). Compare SKUs case-insensitively
+  everywhere (`.upper()`), always.
 - **Never batch-edit UTF-8 templates with PowerShell** (`-replace` +
   `Set-Content` produced mojibake). Use the Edit tool. Git commits: write
   the message to a file and `git commit -F <file>` — inline here-strings

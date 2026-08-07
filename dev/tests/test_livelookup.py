@@ -1,7 +1,11 @@
-"""Lookups answer from the LIVE bin map, not the dead TELCAN mirror.
+"""Lookups answer from the LIVE bin map, then the LIVE Shopify API — the
+TELCAN mirror is GONE (removed 2026-08-07).
 
-The mirror's sync died Dec 2025 and still returns SKUs the store renamed
-months ago — F9394B printed as its six-month-old DB24010501 (2026-08-06).
+History: the mirror's sync died Dec 2025 but it kept answering for
+products the bin map didn't know, stamping renamed SKUs (F9394B as its
+six-month-old DB24010501; batch 126's ToupTek G3M662C for the live
+G3M662C-L) and cross-wired handles onto tags. dev/repair_mirror_records.py
+cleaned the poisoned records; this suite pins the mirror-free order.
 """
 import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(
@@ -20,31 +24,30 @@ def check(l,c,x=""):
     print(("PASS  " if c else "FAIL  ")+l+("" if c else f"  <- {x}"))
     if not c: fails.append(l)
 
-BARCODE = "50764126849243"
-# What the DEAD mirror still believes: the SKU from six months ago.
-STALE = {"shopify_variant_id":"telcan:4482",
-         "shopify_product_id":"handle:svbony-...-copy",
-         "product_title":"Svbony SA206 Night Vision Goggles",
-         "variant_title":None, "sku":"DB24010501", "barcode":BARCODE,
-         "bin_location":"No bin assigned", "source":"telcan",
-         "image_url":None}
-# Unbinned product: the mirror is the ONLY source, and must still answer.
-ORPHAN = dict(STALE, sku="ORPHAN-1", barcode="999000111",
-              product_title="Unbinned Widget")
+# The mirror module itself must be gone — not just unused.
+check("app/catalog.py (the mirror) no longer exists",
+      not os.path.exists(os.path.join(os.path.dirname(os.path.dirname(
+          os.path.dirname(os.path.abspath(__file__)))), "app", "catalog.py")))
 
-def fake_mirror(session, term):
+BARCODE = "50764126849243"
+# An UNBINNED product: not in the bin map — must now come from the live
+# API (this was the hole the mirror used to answer through, wrongly).
+UNBINNED = {"shopify_variant_id":"gid://shopify/ProductVariant/467",
+            "shopify_product_id":"gid://shopify/Product/887",
+            "product_title":"ToupTek G3M662C Camera - G3M662C",
+            "variant_title":None, "sku":"ToupTek G3M662C-L",
+            "barcode":"79030393969755",
+            "bin_location":"No bin assigned", "image_url":None}
+
+def fake_api(term):
     t = (term or "").strip()
-    if t in (BARCODE, "DB24010501"):
-        return dict(STALE)
-    if t in ("999000111", "ORPHAN-1"):
-        return dict(ORPHAN)
+    if t in ("79030393969755", "ToupTek G3M662C-L"):
+        return dict(UNBINNED)
     return None
 
-with patch("app.catalog.lookup_barcode", side_effect=fake_mirror), \
-     patch("app.catalog.lookup_barcode_all",
-           side_effect=lambda s,t: ([dict(STALE)] if fake_mirror(s,t) else [])), \
-     patch("app.shopify.lookup_barcode", return_value=None), \
-     patch("app.shopify.lookup_barcode_all", return_value=[]), \
+with patch("app.shopify.lookup_barcode", side_effect=fake_api), \
+     patch("app.shopify.lookup_barcode_all",
+           side_effect=lambda t: ([fake_api(t)] if fake_api(t) else [])), \
      patch("app.shopify.fetch_all_variant_bins", return_value=[]), \
      patch("app.shopify.get_on_hand", return_value=None), \
      patch("app.shopify.get_stock_info_by_skus", return_value={}), \
@@ -54,7 +57,7 @@ with patch("app.catalog.lookup_barcode", side_effect=fake_mirror), \
     from app.database import get_engine
     from app.models import BinMapEntry
     with S(get_engine()) as s:
-        # The LIVE catalog: same barcode, the CURRENT sku.
+        # The LIVE catalog: this barcode's CURRENT sku.
         s.add(BinMapEntry(
             sku="F9394B", barcode=BARCODE, bin="I1-5", qty=3,
             product_title="Svbony SA206 Night Vision Goggles",
@@ -80,16 +83,11 @@ with patch("app.catalog.lookup_barcode", side_effect=fake_mirror), \
         return cl.get(f"/api/products/by-barcode/{term}").json()
 
     p = look(BARCODE)
-    check("scanning the barcode answers with the LIVE sku, not the mirror's",
+    check("a binned barcode answers from the live bin map",
           p["sku"]=="F9394B" and p["source"]=="binmap", p)
-    check("the live answer carries real Shopify gids, not telcan: ids",
+    check("the answer carries real Shopify gids",
           str(p["shopify_variant_id"]).startswith("gid://"), p)
-    check("and the live bin, which the mirror didn't have",
-          p["bin_location"]=="I1-5", p)
-
-    p = look("DB24010501")
-    check("typing the OLD sku still finds it, corrected to the live sku",
-          p["sku"]=="F9394B" and p["source"]=="binmap", p)
+    check("and the live bin", p["bin_location"]=="I1-5", p)
 
     p = look("F9394B")
     check("the live sku resolves directly", p["sku"]=="F9394B", p)
@@ -102,10 +100,20 @@ with patch("app.catalog.lookup_barcode", side_effect=fake_mirror), \
     check("a split-shelf product resolves once, naming its other shelf",
           p["sku"]=="SPLIT-1" and p["other_bins"] in ("B1-1","B2-2"), p)
 
-    # The mirror is still the fallback — never removed, just demoted.
-    p = look("999000111")
-    check("a product the live map has never binned still answers (mirror)",
-          p["sku"]=="ORPHAN-1" and p["source"]=="telcan", p)
+    # The mirror's old job, done right: unbinned products come from the
+    # LIVE API with current SKUs and real gids.
+    p = look("79030393969755")
+    check("an unbinned product answers from the LIVE API",
+          p["sku"]=="ToupTek G3M662C-L" and p["source"]=="shopify", p)
+    check("...with gid ids, never telcan:/handle: surrogates",
+          str(p["shopify_variant_id"]).startswith("gid://")
+          and not str(p["shopify_product_id"]).startswith("handle:"), p)
+
+    # A SKU the store renamed away resolves NOWHERE — records were
+    # repaired to the live SKUs; the dead ones must not resurrect.
+    r = cl.get("/api/products/by-barcode/DB24010501")
+    check("a dead mirror-era SKU is a clean 404", r.status_code == 404,
+          r.status_code)
 
     r = cl.get("/api/products/by-barcode/NOTHING-ANYWHERE")
     check("a genuine miss is still a 404", r.status_code==404, r.status_code)
@@ -114,9 +122,7 @@ with patch("app.catalog.lookup_barcode", side_effect=fake_mirror), \
 # RuntimeError), which used to escape as a 500 and took the product window
 # down with it.
 import requests
-with patch("app.catalog.lookup_barcode", return_value=None), \
-     patch("app.catalog.lookup_barcode_all", return_value=[]), \
-     patch("app.shopify.lookup_barcode",
+with patch("app.shopify.lookup_barcode",
            side_effect=requests.exceptions.HTTPError("404 token endpoint")), \
      patch("app.shopify.lookup_barcode_all", return_value=[]), \
      patch("app.shopify.fetch_all_variant_bins", return_value=[]), \

@@ -382,14 +382,19 @@ starting early" actively harmful.
   write-back is a separate, explicit, operator-confirmed step and stays
   OFF (SHOPIFY_WRITE_MODE) until testing is done. Correcting a display
   problem means fixing where data is READ from, never overwriting stock.
+- **The TELCAN mirror is REMOVED from the app (2026-08-07, Nick's
+  call).** Its dead sync (stalled 2025-12-08) poisoned records through
+  every path it was left in — last straw: batch 126's ToupTek shelf got
+  renamed SKUs (G3M662C for the live G3M662C-L) and handles cross-wired
+  to the wrong products, breaking Shopify links and Review photos.
+  509 records repaired via dev/repair_mirror_records.py (374 tags, 135
+  batch items, 2 review tasks; 18 SKU transitions, History receipts by
+  "mirror-repair"). Lookup order is now live bin map → live Shopify API,
+  nothing else. The dbo.Shopify_* tables still sit in the database
+  unused; dropping them is Steve's call.
 - Expected/shelf counts display Shopify ON-HAND, pulled LIVE from the
-  Shopify API (inventoryLevels quantities) — never from the TELCAN
-  mirror, whose inventory sync went stale (last update 2025-12-08) and
-  once served 8-month-old numbers. Mirror = fallback only when the API
-  is down.
-- ⚠ The TELCAN mirror sync appears DEAD since Dec 2025 (Steve to check
-  the sync job someday): barcode/title lookups still work (API fallback
-  covers post-Dec products), but mirror quantities are untrustworthy.
+  Shopify API (inventoryLevels quantities); the bin map's live-sourced
+  snapshot (≤6h old) is the only offline fallback.
 
 - Bins live in Shopify metafields (stock.bin → my_fields.bin_location);
   the TELCAN mirror's Bin_Name is empty store-wide

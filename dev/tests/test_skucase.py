@@ -1,8 +1,9 @@
-"""SKU-case drift (the ZWO Anti-Dew twins): the dead mirror hands back
+"""SKU-case drift (the ZWO Anti-Dew twins): historical records hold
 'ZWO Anti-dew' while the live catalog says 'ZWO Anti-Dew'. Same-SKU-
 different-case is the SAME product: the live casing wins at resolution,
 scans land on the existing row instead of splitting it, and candidate
-lists never show the pair as two products."""
+lists never show the pair as two products. (The TELCAN mirror that
+introduced the drift was removed 2026-08-07.)"""
 import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
@@ -25,12 +26,6 @@ LIVE_SKU = "ZWO Anti-Dew"
 STALE_SKU = "ZWO Anti-dew"
 TITLE = "ZWO Cooled Camera Anti-Dew Heater Strip"
 
-def mirror_product():
-    # What the dead TELCAN mirror claims: stale casing, no bin.
-    return {"shopify_variant_id":"handle:zwo-anti-dew","shopify_product_id":None,
-            "product_title":TITLE,"variant_title":None,"sku":STALE_SKU,
-            "barcode":BC,"bin_location":"No bin assigned","source":"telcan"}
-
 def live_product():
     return {"shopify_variant_id":"gid:1","shopify_product_id":"gid:p1",
             "product_title":TITLE,"variant_title":None,"sku":LIVE_SKU,
@@ -40,11 +35,7 @@ ROWS=[{"shopify_variant_id":"gid:1","shopify_product_id":"gid:p1",
        "product_title":TITLE,"variant_title":None,"sku":LIVE_SKU,
        "barcode":BC,"bin":"F2-2","qty":3,"image_url":None,"vendor":"ZWO"}]
 
-with patch("app.catalog.lookup_barcode",
-           side_effect=lambda s, t: mirror_product() if t == BC else None), \
-     patch("app.catalog.lookup_barcode_all",
-           side_effect=lambda s, t: [mirror_product()] if t == BC else []), \
-     patch("app.shopify.lookup_barcode",
+with patch("app.shopify.lookup_barcode",
            side_effect=lambda t: live_product() if t == BC else None), \
      patch("app.shopify.lookup_barcode_all",
            side_effect=lambda t: [live_product()] if t == BC else []), \

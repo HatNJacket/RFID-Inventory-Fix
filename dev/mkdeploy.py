@@ -29,7 +29,6 @@ FILES = [
     "ROADMAP.md",
     "app/__init__.py",
     "app/auth.py",
-    "app/catalog.py",
     "app/config.py",
     "app/database.py",
     "app/main.py",

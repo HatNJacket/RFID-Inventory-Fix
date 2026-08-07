@@ -1407,11 +1407,9 @@ function showProduct(p) {
   el.pSource.textContent =
     (p.source === "binmap"
       ? "Live catalog"
-      : p.source === "telcan"
-        ? "TELCAN (stale mirror)"
-        : p.source === "shopify"
-          ? "Shopify"
-          : "—") +
+      : p.source === "shopify"
+        ? "Shopify"
+        : "—") +
     (p.serial_brand ? ` · ${p.serial_brand} serial` : "");
   el.productCard.hidden = false;
   el.printPanel.hidden = !printingEnabled;
