@@ -1,7 +1,7 @@
 # RFID Inventory System — Roadmap
 
 Source of truth for project status. Updated by Claude each working session.
-Last updated: 2026-08-06.
+Last updated: 2026-08-07.
 
 ## 🔶 Current field-test round (C72 v3.27, installed from the terminal)
 
@@ -183,6 +183,61 @@ next bin.
   - glow: green border when scanned == expected, red when over
   - completion screen with per-product stock deltas ("+1 (5 → 6)") to
     confirm before filing inventory changes
+
+## 📦 Receiving (designed 2026-08-07 with Nick — ready to build, not started)
+
+Two features cover every receiving workflow (desk, pallet, or a mix).
+Planner (TC-Inventory-Planner) integration deliberately SKIPPED for v1:
+invoices are often wrong, shipments arrive partial, boxes sometimes have
+no distributor barcode — so receiving is open-ended manual capture, not
+PO reconciliation. (The planner repo is now fully pulled at
+`Desktop\Stuff\Inventory Planner`; it already has stock orders,
+`/receive`, and an increase-only Shopify apply flow — that tie-in is
+Steve's TODO #2, still open, later.)
+
+**Feature A — LINK tab (C72): gun as a networked input device.**
+- New C72 tab arms BOTH inputs: BT-scanner barcodes and trigger RFID
+  reads (existing strongest-of-600ms pick). Each scan POSTs to the
+  server immediately — no Bluetooth to the PC, ever.
+- Web terminal gets a "C72 LINK" toggle (Scan Station first); while on,
+  it polls ~1s and treats incoming barcodes exactly like wedge input and
+  EPCs like tag scans — same code paths, every existing guard intact.
+- Scans keyed to the operator-picker identity (two guns = two streams).
+- Feedback on both ends: gun dings on delivery, then gets the outcome
+  (paired ✓ / duplicate 409 / no product selected) so the user isn't
+  glued to the monitor; web shows the same on the product card.
+- Pairing may be driven from the gun OR the computer — LINK just makes
+  the gun an extension of whichever screen is driving.
+
+**Feature B — receiving batches (server + web + C72).**
+- Batch kind = 'receiving' (new column → one-off ALTER for prod). No
+  bin. Excluded from bin-done/"Recently done" like side trips; History
+  labels it as receiving.
+- Loop, not a line: collect → PRINT → pair → back to collect, as many
+  passes/pallets as needed. PRINT is repeatable and queues labels only
+  for collected-but-unprinted boxes, in scan order (sticker stack
+  matches the walking order). Confirm screen shows "new since last
+  print" to catch re-scanned boxes; printed-vs-paired ticker flags
+  orphan labels at finish.
+- Labels carry each product's HOME BIN (live bin map) so every box
+  leaves the desk knowing where it goes. No-bin products: assign-a-bin
+  prompt at print time (existing sanctioned bin write) or hold them out
+  of the job.
+- No-barcode boxes: typed SKU is first-class; distributor barcodes get
+  linked once via the existing alias system.
+- Finish: NO verify step. Instead files one Review task per bin that
+  received stock ("Inventory check <bin>") + a manual mark-a-rack
+  option. Nick confirmed per-bin volume is fine (~10/shipment; each is
+  a quick RFID walk-scan). Resolving = run the existing bin audit on
+  that shelf — on-hand updates happen ONLY through the audit's existing
+  operator-confirmed increase-only button. Receiving itself never
+  touches counts (standing decision holds).
+- Printer walks between passes are acceptable (small warehouse; the
+  printer sits on the desk, so desk receiving has zero walks).
+
+Build order: A first (small, immediately useful standalone), then B,
+then the Review tie-in. New test suites per convention; C72 version
+bumps per release.
 
 ## 📥 Steve's TODO list (captured 2026-07-28, not yet designed)
 
