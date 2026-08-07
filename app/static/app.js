@@ -444,6 +444,7 @@ function resetStation() {
   closeLinkbox();
   closeSetbox();
   setResult("", null);
+  bulkVisitReset();
   activate("barcode");
 }
 
@@ -517,6 +518,9 @@ function acceptProduct(product, message) {
   showSerialPanel(product);
   setResult(message, "ok");
   activate("rfid");
+  // Bulk defaults to OFF for every product; auto-print below still counts
+  // into the fresh printed-this-visit ledger.
+  bulkVisitReset();
   maybeAutoPrint();
 }
 
@@ -1490,6 +1494,8 @@ async function queueLabels(quantity) {
       return;
     }
     const data = await res.json();
+    bulkPrinted += (data.jobs || []).length;
+    renderBulk();
     watchPrintJobs(data.jobs.map((j) => j.id));
   } catch (err) {
     el.printStatus.textContent = "Network error while queueing.";
@@ -1609,12 +1615,21 @@ async function stationTagScan(rfid) {
       );
     }
     prependRecent(saved);
+    bulkTagged += 1;
+    lastSweep = [saved.rfid_id];
     if (saved.suspect || !el.autoReset.checked) {
-      // Keep the product loaded (bulk mode, or so a flagged tag can be
-      // re-scanned immediately).
+      // Keep the product loaded (stay-on-product mode, or so a flagged
+      // tag can be re-scanned immediately).
       el.rfid.value = "";
       el.rfid.focus();
       loadTags(pendingProduct);
+    } else if (bulkOn) {
+      // Bulk scan: stay loaded — the printed-vs-tagged ledger decides
+      // when this product is finished.
+      el.rfid.value = "";
+      el.rfid.focus();
+      loadTags(pendingProduct);
+      bulkCheckpoint();
     } else {
       // One tag per product: brief confirmation, then back to the barcode.
       setTimeout(resetStation, 700);
@@ -1736,6 +1751,173 @@ if (linkToggle) {
     }
   });
 }
+
+// --- Bulk scan --------------------------------------------------------------
+// Apply many labels, then let the tags stream in — single reads (wedge or
+// LINK) and pulled C72 sweeps both count against a printed-this-visit
+// ledger that decides when the product is done. A strict subset of
+// auto-reset: auto-reset OFF disables the chip, and the chip falls back to
+// OFF every time a new product loads.
+let bulkOn = false;
+let bulkPrinted = 0; // labels queued while this product has been loaded
+let bulkTagged = 0; // new tags assigned to it this visit
+let lastSweep = []; // EPCs from the most recent assigning action
+let bulkWarnedAt = -1; // over-count the operator already chose to keep
+const bulkToggle = document.getElementById("bulk-toggle");
+const bulkSweepBtn = document.getElementById("bulk-sweep");
+const bulkProgress = document.getElementById("bulk-progress");
+const bulkWarnEl = document.getElementById("bulk-warn");
+
+function bulkVisitReset() {
+  bulkOn = false;
+  bulkPrinted = 0;
+  bulkTagged = 0;
+  lastSweep = [];
+  bulkWarnedAt = -1;
+  if (bulkWarnEl) bulkWarnEl.hidden = true;
+  renderBulk();
+}
+
+function renderBulk() {
+  if (!bulkToggle) return;
+  const allowed = el.autoReset.checked;
+  if (!allowed) bulkOn = false;
+  bulkToggle.disabled = !allowed;
+  bulkToggle.classList.toggle("chip-toggle--on", bulkOn);
+  bulkToggle.textContent = bulkOn ? "⚡ BULK: ON" : "⚡ BULK: OFF";
+  const active = bulkOn && !!pendingProduct;
+  bulkSweepBtn.hidden = !active;
+  bulkProgress.hidden = !active;
+  if (active) {
+    bulkProgress.textContent =
+      bulkPrinted > 0
+        ? `${bulkTagged} of ${bulkPrinted} label(s) printed this visit ` +
+          `are tagged` +
+          (bulkTagged < bulkPrinted
+            ? ` — ${bulkPrinted - bulkTagged} to go.`
+            : ".")
+        : `${bulkTagged} tag(s) assigned · no labels printed this visit, ` +
+          `so no auto-reset target — Reset (Esc) when done.`;
+  }
+}
+
+bulkToggle.addEventListener("click", () => {
+  if (bulkToggle.disabled) return;
+  bulkOn = !bulkOn;
+  bulkWarnEl.hidden = true;
+  renderBulk();
+});
+el.autoReset.addEventListener("change", renderBulk);
+
+// The ledger's verdict after every assigning action: exact = done (reset
+// as a single scan would), over = ask (a blank label may have been swept).
+function bulkCheckpoint() {
+  renderBulk();
+  if (!bulkPrinted) return;
+  if (bulkTagged === bulkPrinted) {
+    setResult(
+      `All ${bulkPrinted} label(s) printed this visit are tagged ✓ — ` +
+        `resetting.`,
+      "ok",
+      "rfid"
+    );
+    bulkWarnEl.hidden = true;
+    setTimeout(resetStation, 900);
+  } else if (bulkTagged > bulkPrinted && bulkTagged > bulkWarnedAt) {
+    document.getElementById("bulk-warn-text").textContent =
+      `${bulkTagged} tag(s) assigned against ${bulkPrinted} label(s) ` +
+      `printed this visit — a spare or blank label in range may have ` +
+      `been swept and wrongly assigned. Undo removes only the ` +
+      `${lastSweep.length} tag(s) this last action assigned.`;
+    document.getElementById("bulk-warn-undo").textContent =
+      `UNDO THIS SWEEP (${lastSweep.length})`;
+    bulkWarnEl.hidden = false;
+  }
+}
+
+bulkSweepBtn.addEventListener("click", async () => {
+  if (!pendingProduct) return;
+  const operator = requireOperator();
+  if (!operator) return;
+  bulkSweepBtn.disabled = true;
+  try {
+    const capRes = await apiFetch("/api/epc-captures/latest");
+    if (capRes.status === 404) {
+      setResult(
+        "No C72 sweeps received yet — SWEEP then SEND on the gun first.",
+        "err",
+        "rfid"
+      );
+      return;
+    }
+    const cap = await capRes.json();
+    const res = await postJson("/api/rfid-assignments/sweep", {
+      epcs: cap.epcs || [],
+      ...pendingProduct,
+      assigned_by: operator,
+    });
+    (res.assigned || []).forEach(prependRecent);
+    bulkTagged += res.count;
+    if (res.count > 0) lastSweep = res.assigned.map((a) => a.rfid_id);
+    const dup = (res.duplicates || []).length;
+    setResult(
+      `Sweep (${cap.epc_count} tag(s) heard): ${res.count} new assigned` +
+        (dup ? ` · ${dup} already assigned — skipped` : "") +
+        ".",
+      res.count > 0 ? "ok" : "err",
+      "rfid"
+    );
+    loadTags(pendingProduct);
+    bulkCheckpoint();
+  } catch (err) {
+    setResult(err.message, "err", "rfid");
+  } finally {
+    bulkSweepBtn.disabled = false;
+  }
+});
+
+document
+  .getElementById("bulk-warn-undo")
+  .addEventListener("click", async () => {
+    if (!lastSweep.length) {
+      bulkWarnEl.hidden = true;
+      return;
+    }
+    const btn = document.getElementById("bulk-warn-undo");
+    btn.disabled = true;
+    try {
+      const res = await postJson("/api/rfid-assignments/sweep/undo", {
+        epcs: lastSweep,
+        sku: (pendingProduct && pendingProduct.sku) || null,
+        by: operatorEl.value || null,
+      });
+      bulkTagged = Math.max(0, bulkTagged - res.count);
+      for (const epc of res.epcs || []) {
+        const li = el.recentList.querySelector(`li[data-rfid="${epc}"]`);
+        if (li) li.remove();
+      }
+      lastSweep = [];
+      bulkWarnEl.hidden = true;
+      setResult(
+        `Sweep undone — ${res.count} tag(s) unlinked (History has the ` +
+          `receipt).`,
+        "ok",
+        "rfid"
+      );
+      if (pendingProduct) loadTags(pendingProduct);
+      renderBulk();
+    } catch (err) {
+      setResult(err.message, "err", "rfid");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+document.getElementById("bulk-warn-keep").addEventListener("click", () => {
+  bulkWarnedAt = bulkTagged; // don't re-ask until the count grows again
+  bulkWarnEl.hidden = true;
+  setResult("Kept — the over-count stands.", "ok", "rfid");
+});
 
 // --- Recent list -----------------------------------------------------------
 function recentRow(a) {
@@ -6218,8 +6400,20 @@ function renderHistory() {
     return;
   }
   body.innerHTML = rows
-    .map(
-      (e, i) => `<tr>
+    .map((e, i) => {
+      // Sweep events fold their EPCs behind an expander: the row reads
+      // "4 × RFID tag", the tags themselves are one click away.
+      const exp =
+        e.epcs && e.epcs.length
+          ? ` <a href="#" class="hist-exp" data-idx="${i}" data-n="${e.epcs.length}">▸ show EPCs</a>`
+          : "";
+      const sub =
+        e.epcs && e.epcs.length
+          ? `<tr class="hist-epcrow" data-for="${i}" hidden><td colspan="7"><div class="hist-epclist">${e.epcs
+              .map((x) => `<div class="mono">${escapeHtml(x || "?")}</div>`)
+              .join("")}</div></td></tr>`
+          : "";
+      return `<tr>
       <td class="recent__meta" style="white-space:nowrap">${escapeHtml(fmtWhen(e.at))}</td>
       <td>${evChip(e.type)}</td>
       <td>${escapeHtml(e.worker || "—")}</td>
@@ -6233,17 +6427,28 @@ function renderHistory() {
           ? `<span class="prodopen hist-prod" data-sku="${escapeHtml(e.sku)}">${escapeHtml(e.title)}</span>`
           : escapeHtml(e.title || "—")
       }</td>
-      <td class="recent__meta">${escapeHtml(e.detail || "")}</td>
+      <td class="recent__meta">${escapeHtml(e.detail || "")}${exp}</td>
       <td>${
         e.undo
           ? `<button class="reset hist-undo" data-idx="${i}" type="button">Undo</button>`
           : ""
       }</td>
-    </tr>`
-    )
+    </tr>${sub}`;
+    })
     .join("");
   body.querySelectorAll(".hist-undo").forEach((btn) => {
     btn.addEventListener("click", () => undoHistoryEvent(rows[+btn.dataset.idx], btn));
+  });
+  body.querySelectorAll(".hist-exp").forEach((a) => {
+    a.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const sub = body.querySelector(
+        `tr.hist-epcrow[data-for="${a.dataset.idx}"]`
+      );
+      if (!sub) return;
+      sub.hidden = !sub.hidden;
+      a.textContent = sub.hidden ? "▸ show EPCs" : "▾ hide EPCs";
+    });
   });
   body.querySelectorAll(".hist-sku, .hist-prod").forEach((a) => {
     a.addEventListener("click", (ev) => {

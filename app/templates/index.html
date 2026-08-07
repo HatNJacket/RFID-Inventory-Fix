@@ -29,12 +29,7 @@
         <details class="settings" id="settings-menu">
           <summary>⚙ Settings</summary>
           <div class="settings__panel">
-            <label class="settings__item">
-              <input type="checkbox" id="auto-reset" />
-              <span>Auto-reset after tag scan
-                <span class="settings__hint">Return to the barcode step after each tag saves (one tag per product). Off = stay on the product for bulk tagging.</span>
-              </span>
-            </label>
+            <!-- Auto-reset moved into the Scan RFID cell (next to BULK). -->
             <label class="settings__item" id="auto-print-item">
               <input type="checkbox" id="auto-print" />
               <span>Auto-print label on scan
@@ -308,6 +303,25 @@
             placeholder="Confirm product above, then scan the tag…"
             disabled
           />
+          <div class="rfidopts">
+            <label class="rfidopts__auto" title="Return to the barcode step after each tag saves (one tag per product). Off = stay on the product.">
+              <input type="checkbox" id="auto-reset" />
+              <span>Auto-reset after tag scan</span>
+            </label>
+            <button class="chip-toggle" id="bulk-toggle" type="button"
+                    title="Bulk scan: keep accepting tags — single reads and pulled C72 sweeps — counted against labels printed this visit. Needs auto-reset ON; switches itself OFF whenever a new product loads.">⚡ BULK: OFF</button>
+            <button class="sweep-pull" id="bulk-sweep" type="button" hidden
+                    title="Assign every NEW tag from the most recent C72 sweep (SWEEP tab → SEND on the gun) to this product. Tags already assigned — this product's or anyone's — are skipped and named, never stolen.">📶 Use latest C72 sweep</button>
+          </div>
+          <p class="step__hint" id="bulk-progress" hidden></p>
+          <div class="bulkwarn" id="bulk-warn" hidden>
+            <div class="bulkwarn__text" id="bulk-warn-text"></div>
+            <div class="bulkwarn__btns">
+              <button class="bulkwarn__undo" id="bulk-warn-undo" type="button"
+                      title="Removes ONLY the tags this last sweep/read assigned (each unlink is History-logged). Need to roll back more? Every assignment of this visit can be unlinked from Recent assignments below or the product's History panel.">UNDO THIS SWEEP</button>
+              <button class="reset" id="bulk-warn-keep" type="button">KEEP ALL — the count is right</button>
+            </div>
+          </div>
           <p class="step__hint">One tag per package — keep scanning tags for this product. Reset (Esc) to switch products.</p>
         </div>
       </section>

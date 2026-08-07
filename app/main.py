@@ -690,6 +690,148 @@ def create_assignment(
     return assignment.as_dict()
 
 
+class SweepAssignIn(BaseModel):
+    """Bulk-scan: one sweep's worth of EPCs tied to ONE product. Same
+    product fields as a single assignment; the EPC list replaces rfid_id."""
+
+    epcs: list[str] = Field(min_length=1, max_length=200)
+    shopify_variant_id: str = Field(max_length=64)
+    shopify_product_id: str | None = Field(default=None, max_length=300)
+    product_title: str = Field(max_length=255)
+    variant_title: str | None = Field(default=None, max_length=255)
+    sku: str | None = Field(default=None, max_length=100)
+    barcode: str | None = Field(default=None, max_length=64)
+    bin_location: str | None = Field(default=None, max_length=100)
+    assigned_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/rfid-assignments/sweep",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def sweep_assign(
+    payload: SweepAssignIn, session: Session = Depends(get_session)
+):
+    """Assign every NEW tag a sweep heard to the loaded product, in one
+    write. Already-assigned EPCs are skipped and named (the sweep will
+    always hear neighbours), never stolen. All rows share one timestamp,
+    which is what lets History fold the sweep into a single expandable
+    event instead of N identical rows."""
+    now = datetime.now(timezone.utc)
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for raw in payload.epcs:
+        epc = (raw or "").strip()
+        if epc and epc.upper() not in seen:
+            seen.add(epc.upper())
+            cleaned.append(epc)
+    if not cleaned:
+        raise HTTPException(422, "No usable EPCs in that sweep.")
+    existing = {
+        r.rfid_id.upper(): r
+        for r in session.scalars(
+            select(RfidAssignment).where(
+                func.upper(RfidAssignment.rfid_id).in_(
+                    [e.upper() for e in cleaned]
+                )
+            )
+        )
+    }
+    own_sku = (payload.sku or "").strip().upper()
+    assigned: list[RfidAssignment] = []
+    duplicates: list[dict] = []
+    for epc in cleaned:
+        row = existing.get(epc.upper())
+        if row is not None:
+            duplicates.append({
+                "epc": epc,
+                "sku": row.sku,
+                "product_title": row.product_title,
+                # Its own earlier tag answering ≠ someone else's box.
+                "own": bool(own_sku
+                            and (row.sku or "").strip().upper() == own_sku),
+            })
+            continue
+        a = RfidAssignment(
+            rfid_id=epc,
+            shopify_variant_id=payload.shopify_variant_id,
+            shopify_product_id=payload.shopify_product_id,
+            product_title=payload.product_title,
+            variant_title=payload.variant_title,
+            sku=payload.sku,
+            barcode=payload.barcode,
+            bin_location=payload.bin_location,
+            assigned_by=payload.assigned_by,
+            assigned_at=now,
+        )
+        a.suspect = re.fullmatch(r"[0-9A-Fa-f]{24}", epc) is None
+        session.add(a)
+        assigned.append(a)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(
+            409, "A tag in that sweep was assigned by someone else "
+                 "mid-write — pull the sweep again.",
+        )
+    for a in assigned:
+        session.refresh(a)
+    return {
+        "count": len(assigned),
+        "assigned": [a.as_dict() for a in assigned],
+        "duplicates": duplicates,
+    }
+
+
+class SweepUndoIn(BaseModel):
+    """Roll back one sweep's assignments — the blank-label rescue."""
+
+    epcs: list[str] = Field(min_length=1, max_length=200)
+    # Safety rail: only unlink tags that belong to THIS product.
+    sku: str | None = Field(default=None, max_length=100)
+    by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/rfid-assignments/sweep/undo",
+    dependencies=[Depends(require_user)],
+)
+def sweep_undo(payload: SweepUndoIn, session: Session = Depends(get_session)):
+    """Unlink the tags one sweep just assigned. Each unlink leaves the
+    usual History receipt; sharing one timestamp folds them into a single
+    expandable event, mirroring the sweep that made them."""
+    now = datetime.now(timezone.utc)
+    wanted = {(e or "").strip().upper() for e in payload.epcs if e}
+    guard = (payload.sku or "").strip().upper()
+    rows = session.scalars(
+        select(RfidAssignment).where(
+            func.upper(RfidAssignment.rfid_id).in_(sorted(wanted))
+        )
+    ).all()
+    removed: list[str] = []
+    skipped: list[str] = []
+    for row in rows:
+        if guard and (row.sku or "").strip().upper() != guard:
+            skipped.append(row.rfid_id)
+            continue
+        session.add(BarcodeChange(
+            sku=row.sku,
+            product_title=row.product_title,
+            shopify_variant_id=row.shopify_variant_id,
+            changed_field="tag-unlinked",
+            old_barcode=(row.rfid_id or "")[:64] or None,
+            new_barcode=(row.bin_location or "")[:64] or None,
+            changed_by=(payload.by or "").strip()[:100] or None,
+            changed_at=now,
+        ))
+        removed.append(row.rfid_id)
+        session.delete(row)
+    session.commit()
+    return {"count": len(removed), "epcs": removed, "skipped": skipped}
+
+
 @app.get("/api/rfid-assignments", dependencies=[Depends(require_user)])
 def list_assignments(
     q: str | None = None,
@@ -6125,11 +6267,36 @@ def product_history(term: str, session: Session = Depends(get_session)):
 
     events = []
 
+    # Sweep-assigned tags fold into one expandable event here too.
+    ph_groups: dict = {}
+    ph_order: list = []
     for a in session.scalars(
         select(RfidAssignment).where(or_(
             RfidAssignment.sku == sku, RfidAssignment.barcode == barcode
         ))
     ):
+        key = (a.assigned_by or "", iso(a.assigned_at))
+        if key not in ph_groups:
+            ph_groups[key] = []
+            ph_order.append(key)
+        ph_groups[key].append(a)
+    for key in ph_order:
+        group = ph_groups[key]
+        a = group[0]
+        if len(group) > 1:
+            suspects = sum(1 for x in group if x.suspect)
+            events.append({
+                "at": iso(a.assigned_at),
+                "type": "tag-assigned",
+                "worker": a.assigned_by,
+                "detail": f"{len(group)} × RFID tag (sweep)"
+                          + (f" · {suspects} SUSPECT" if suspects else "")
+                          + (f" · bin {a.bin_location}"
+                             if a.bin_location else ""),
+                "epcs": [x.rfid_id for x in group],
+                "shopify": False,
+            })
+            continue
         events.append({
             "at": iso(a.assigned_at),
             "type": "tag-assigned",
@@ -6331,19 +6498,47 @@ def history(
     def iso(dt):
         return dt.isoformat() if dt else None
 
+    # Sweep-assigned tags share one product, operator and timestamp — one
+    # expandable event ("4 × RFID tag") beats four identical rows. Singles
+    # keep their EPC in the detail as always.
+    assign_groups: dict = {}
+    assign_order: list = []
     for a in session.scalars(
         select(RfidAssignment)
         .order_by(RfidAssignment.id.desc()).limit(limit)
     ):
+        key = (a.sku or "", a.assigned_by or "", iso(a.assigned_at))
+        if key not in assign_groups:
+            assign_groups[key] = []
+            assign_order.append(key)
+        assign_groups[key].append(a)
+    for key in assign_order:
+        group = assign_groups[key]
+        a = group[0]
+        if len(group) == 1:
+            events.append({
+                "at": iso(a.assigned_at),
+                "type": "tag-assigned",
+                "worker": a.assigned_by,
+                "sku": a.sku,
+                "title": a.product_title,
+                "detail": f"EPC {a.rfid_id}"
+                          + (" · SUSPECT read" if a.suspect else "")
+                          + (f" · bin {a.bin_location}"
+                             if a.bin_location else ""),
+            })
+            continue
+        suspects = sum(1 for x in group if x.suspect)
         events.append({
             "at": iso(a.assigned_at),
             "type": "tag-assigned",
             "worker": a.assigned_by,
             "sku": a.sku,
             "title": a.product_title,
-            "detail": f"EPC {a.rfid_id}"
-                      + (" · SUSPECT read" if a.suspect else "")
+            "detail": f"{len(group)} × RFID tag (sweep)"
+                      + (f" · {suspects} SUSPECT" if suspects else "")
                       + (f" · bin {a.bin_location}" if a.bin_location else ""),
+            "epcs": [x.rfid_id for x in group],
         })
 
     change_types = {
@@ -6353,9 +6548,20 @@ def history(
         "tagged-before": "already-tagged-set",
         "tag-unlinked": "tag-unlinked",
     }
+    # A sweep undo unlinks its tags with one shared timestamp — fold
+    # those the same way sweep assigns fold.
+    unlink_groups: dict = {}
+    unlink_order: list = []
     for c in session.scalars(
         select(BarcodeChange).order_by(BarcodeChange.id.desc()).limit(limit)
     ):
+        if c.changed_field == "tag-unlinked":
+            key = (c.sku or "", c.changed_by or "", iso(c.changed_at))
+            if key not in unlink_groups:
+                unlink_groups[key] = []
+                unlink_order.append(key)
+            unlink_groups[key].append(c)
+            continue
         event = {
             "at": iso(c.changed_at),
             "type": change_types.get(c.changed_field, c.changed_field),
@@ -6369,6 +6575,28 @@ def history(
         if c.changed_field == "on-hand":
             event["undo"] = {"kind": "on-hand", "change_id": c.id}
         events.append(event)
+    for key in unlink_order:
+        group = unlink_groups[key]
+        c = group[0]
+        if len(group) == 1:
+            events.append({
+                "at": iso(c.changed_at),
+                "type": "tag-unlinked",
+                "worker": c.changed_by,
+                "sku": c.sku,
+                "title": c.product_title,
+                "detail": f"{c.old_barcode or '(none)'} → {c.new_barcode}",
+            })
+            continue
+        events.append({
+            "at": iso(c.changed_at),
+            "type": "tag-unlinked",
+            "worker": c.changed_by,
+            "sku": c.sku,
+            "title": c.product_title,
+            "detail": f"{len(group)} × RFID tag unlinked (sweep undo)",
+            "epcs": [x.old_barcode for x in group],
+        })
 
     job_types = {
         "done": "label-printed", "error": "label-failed",

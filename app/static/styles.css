@@ -637,6 +637,98 @@ body {
   flex-wrap: wrap;
 }
 
+/* Scan-RFID cell options: auto-reset + BULK chip + sweep pull */
+.rfidopts {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.rfidopts__auto {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip-toggle {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip-toggle--on {
+  color: #fff;
+  background: #005bd3;
+  border-color: #005bd3;
+}
+.chip-toggle:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.sweep-pull {
+  font-size: 12px;
+  font-weight: 600;
+  color: #005bd3;
+  background: #e3edfb;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sweep-pull:disabled { opacity: 0.55; cursor: default; }
+
+/* Over-scan warning: more tags than labels printed this visit */
+.bulkwarn {
+  margin-top: 10px;
+  border: 1px solid #e8cf9a;
+  background: #faeeda;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.bulkwarn__text {
+  font-size: 13px;
+  color: #5c4708;
+  line-height: 1.5;
+}
+.bulkwarn__btns {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.bulkwarn__undo {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  background: #d72c0d;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+.bulkwarn__undo:disabled { opacity: 0.55; cursor: default; }
+
+/* Expanded sweep rows in History: the folded EPC list */
+.hist-epcrow td { background: var(--card); }
+.hist-epclist {
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  columns: 2;
+  max-width: 640px;
+}
+
 /* result line */
 .result {
   min-height: 22px;
