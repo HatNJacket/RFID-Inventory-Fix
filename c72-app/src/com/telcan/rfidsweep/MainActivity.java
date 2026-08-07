@@ -39,13 +39,13 @@ import android.widget.ArrayAdapter;
 import android.widget.ScrollView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -3931,41 +3931,165 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** "just now" / "20 min ago" / "2 h ago" from a server UTC timestamp. */
+    private static String ago(String iso) {
+        try {
+            java.text.SimpleDateFormat f = new java.text.SimpleDateFormat(
+                    "yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US);
+            f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+            long m = (System.currentTimeMillis()
+                    - f.parse(iso.substring(0, 19)).getTime()) / 60000L;
+            if (m < 1) return "just now";
+            if (m < 60) return m + " min ago";
+            if (m < 48 * 60) return (m / 60) + " h ago";
+            return (m / 1440) + " d ago";
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static String stageWord(JSONObject b) {
+        String s = b.optString("ui_step", "");
+        if ("collect".equals(s)) return "collecting";
+        if ("check".equals(s)) return "checking";
+        if ("print".equals(s)) return "printing";
+        if ("pair".equals(s)) return "pairing";
+        if ("verify".equals(s)) return "verifying";
+        return b.optString("status", "");
+    }
+
     private void openBatchPicker() {
         status.setText("Loading open batches…");
         new Thread(() -> {
             try {
                 JSONObject resp = api("GET", "/api/batches?status=open", null);
                 JSONArray bs = resp.getJSONArray("batches");
-                final List<String> labels = new ArrayList<>();
-                final List<Integer> ids = new ArrayList<>();
+                final List<JSONObject> rows = new ArrayList<>();
                 for (int i = 0; i < bs.length(); i++) {
-                    JSONObject b = bs.getJSONObject(i);
-                    labels.add("Bin " + b.optString("bin_name") + "  ·  "
-                            + b.optInt("boxes") + " boxes · "
-                            + b.optInt("paired") + " tags  (#"
-                            + b.optInt("id") + ")");
-                    ids.add(b.optInt("id"));
+                    rows.add(bs.getJSONObject(i));
                 }
                 ui.post(() -> {
-                    if (labels.isEmpty()) {
+                    if (rows.isEmpty()) {
                         status.setText("No open batches — scan a BIN "
                                 + "barcode (like D1-3) to start one right "
                                 + "here.");
                         return;
                     }
-                    new AlertDialog.Builder(this)
-                            .setTitle("Open batch")
-                            .setItems(labels.toArray(new String[0]),
-                                    (d, which) -> enterBatch(ids.get(which)))
-                            .setNegativeButton("Cancel", null)
-                            .show();
+                    showBatchPickerCards(rows);
                 });
             } catch (Exception e) {
                 ui.post(() -> status.setText("Could not load batches: "
                         + e.getMessage()));
             }
         }).start();
+    }
+
+    /** The open-batch list as cards: a bin chip readable at arm's length,
+     *  age + stage, and a boxes-vs-tagged progress bar. */
+    private void showBatchPickerCards(List<JSONObject> rows) {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(14), dp(8), dp(14), 0);
+        scroll.addView(list);
+        final AlertDialog[] dref = new AlertDialog[1];
+
+        for (JSONObject b : rows) {
+            final int id = b.optInt("id");
+            int boxes = b.optInt("boxes");
+            int paired = b.optInt("paired");
+            boolean sideTrip = b.optInt("parent_batch_id", 0) > 0;
+
+            LinearLayout card = new LinearLayout(this);
+            card.setOrientation(LinearLayout.HORIZONTAL);
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setBackground(btnBg(Color.WHITE, C_LINE, C_PRESS, 8));
+            card.setPadding(dp(10), dp(9), dp(10), dp(9));
+
+            TextView chip = new TextView(this);
+            chip.setText(b.optString("bin_name"));
+            chip.setTextSize(16);
+            chip.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+            chip.setTextColor(C_BLUE_DK);
+            chip.setBackground(rr(C_SOFT, 0, 6));
+            chip.setPadding(dp(9), dp(8), dp(9), dp(8));
+            card.addView(chip);
+
+            LinearLayout mid = new LinearLayout(this);
+            mid.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams ml = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            ml.leftMargin = dp(10);
+            card.addView(mid, ml);
+
+            LinearLayout l1 = new LinearLayout(this);
+            l1.setOrientation(LinearLayout.HORIZONTAL);
+            l1.setGravity(Gravity.CENTER_VERTICAL);
+            TextView t1 = new TextView(this);
+            String age = ago(b.optString("created_at", ""));
+            t1.setText("#" + id + (age.isEmpty() ? "" : " · " + age));
+            t1.setTextSize(12);
+            t1.setTextColor(C_TEXT);
+            l1.addView(t1);
+            if (sideTrip) {
+                TextView badge = new TextView(this);
+                badge.setText("side trip");
+                badge.setTextSize(10);
+                badge.setTextColor(Color.parseColor("#854f0b"));
+                badge.setBackground(rr(Color.parseColor("#faeeda"), 0, 4));
+                badge.setPadding(dp(5), dp(1), dp(5), dp(1));
+                LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+                bl.leftMargin = dp(6);
+                l1.addView(badge, bl);
+            }
+            mid.addView(l1);
+
+            TextView t2 = new TextView(this);
+            String stage = stageWord(b);
+            t2.setText(boxes + (boxes == 1 ? " box · " : " boxes · ")
+                    + paired + " tagged"
+                    + (stage.isEmpty() ? "" : " · " + stage));
+            t2.setTextSize(11);
+            t2.setTextColor(C_MUTED);
+            mid.addView(t2);
+
+            android.widget.ProgressBar pb = new android.widget.ProgressBar(
+                    this, null, android.R.attr.progressBarStyleHorizontal);
+            pb.setMax(Math.max(boxes, 1));
+            pb.setProgress(Math.min(paired, Math.max(boxes, 1)));
+            pb.setProgressTintList(
+                    android.content.res.ColorStateList.valueOf(C_BLUE));
+            LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(5));
+            pl.topMargin = dp(4);
+            mid.addView(pb, pl);
+
+            LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            cl.bottomMargin = dp(8);
+            list.addView(card, cl);
+            card.setOnClickListener(v -> {
+                if (dref[0] != null) dref[0].dismiss();
+                enterBatch(id);
+            });
+        }
+
+        TextView foot = new TextView(this);
+        foot.setText("…or scan a bin barcode to start a new batch");
+        foot.setTextSize(11);
+        foot.setTextColor(C_MUTED);
+        foot.setPadding(dp(2), dp(2), 0, dp(10));
+        list.addView(foot);
+
+        dref[0] = new AlertDialog.Builder(this)
+                .setTitle("Open batch")
+                .setView(scroll)
+                .setNegativeButton("Cancel", null)
+                .create();
+        dref[0].show();
     }
 
     private void enterBatch(int id) {
@@ -4275,13 +4399,11 @@ public class MainActivity extends Activity {
         sweepOut.setPadding(dp(4), 0, dp(4), dp(8));
         box.addView(sweepOut);
 
-        final android.widget.CheckBox held =
-                new android.widget.CheckBox(this);
+        final Switch held = mkToggle(true);
         held.setText("The box I just scanned is one of the stickered ones "
                 + "— don't count its scan again");
         held.setTextSize(12);
         held.setTextColor(C_TEXT);
-        held.setChecked(true);
         held.setVisibility(offerUncount ? View.VISIBLE : View.GONE);
         box.addView(held);
 
@@ -4852,6 +4974,7 @@ public class MainActivity extends Activity {
      *  dense shelves). Falls back to most-often-heard when the SDK gives
      *  no usable RSSI. Blocking — call off the UI thread. */
     private TagRead readStrongestTag(long windowMs) {
+        final boolean strongest = prefs.getBoolean("strongest_read", true);
         final java.util.HashMap<String, Double> best =
                 new java.util.HashMap<>();
         final java.util.HashMap<String, Integer> times =
@@ -4880,6 +5003,7 @@ public class MainActivity extends Activity {
                 if (prev == null || rssi > prev) best.put(epc, rssi);
                 Integer n = times.get(epc);
                 times.put(epc, n == null ? 1 : n + 1);
+                if (!strongest) break;
             }
         } catch (Exception ignored) {
         }
@@ -5717,7 +5841,8 @@ public class MainActivity extends Activity {
                     + "• Scan a barcode (or type a SKU) — the product "
                     + "shows with its tag count.\n"
                     + "• Pull the trigger near ONE sticker to link it. "
-                    + "The strongest tag wins, and UNDO unlinks the last."
+                    + "The strongest tag wins (Settings can switch to "
+                    + "first-tag-heard), and UNDO unlinks the last."
                     + "\n• WHAT'S THIS TAG? is a TOGGLE: tap it and the "
                     + "trigger identifies stickers instead of linking "
                     + "them (it stays on for several in a row; tap again "
@@ -6598,17 +6723,166 @@ public class MainActivity extends Activity {
     }
 
     // --------------------------------------------------------- settings -----
+    /** Blue-on / gray-off horizontal switch, the settings control. */
+    private Switch mkToggle(boolean checked) {
+        Switch sw = new Switch(this);
+        sw.setChecked(checked);
+        android.content.res.ColorStateList track =
+                new android.content.res.ColorStateList(
+                        new int[][]{{android.R.attr.state_checked}, {}},
+                        new int[]{C_BLUE, Color.parseColor("#b9bfc5")});
+        sw.setTrackTintList(track);
+        sw.setThumbTintList(
+                android.content.res.ColorStateList.valueOf(Color.WHITE));
+        return sw;
+    }
+
+    /** Label (+ optional explainer) on the left, switch on the right.
+     *  The label dims while the switch is off. */
+    private LinearLayout toggleRow(String label, String sub, Switch sw) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(7), 0, dp(7));
+        LinearLayout txt = new LinearLayout(this);
+        txt.setOrientation(LinearLayout.VERTICAL);
+        final TextView l = new TextView(this);
+        l.setText(label);
+        l.setTextSize(14);
+        l.setTextColor(sw.isChecked() ? C_TEXT : C_MUTED);
+        txt.addView(l);
+        if (sub != null) {
+            TextView s = new TextView(this);
+            s.setText(sub);
+            s.setTextSize(11);
+            s.setTextColor(C_MUTED);
+            txt.addView(s);
+        }
+        row.addView(txt, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(sw);
+        sw.setOnCheckedChangeListener(
+                (b, c) -> l.setTextColor(c ? C_TEXT : C_MUTED));
+        return row;
+    }
+
+    private TextView sectionLabel(String t) {
+        TextView v = new TextView(this);
+        v.setText(t);
+        v.setTextSize(11);
+        v.setTextColor(C_MUTED);
+        v.setTypeface(null, Typeface.BOLD);
+        v.setPadding(0, dp(12), 0, dp(2));
+        return v;
+    }
+
     private void showSettings() {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        box.setPadding(pad, pad, pad, 0);
+        scroll.addView(box);
+
+        // Connection card: everyday settings shouldn't share a screen with
+        // the server URL and station key — those live one tap deeper.
+        LinearLayout conn = new LinearLayout(this);
+        conn.setOrientation(LinearLayout.HORIZONTAL);
+        conn.setGravity(Gravity.CENTER_VERTICAL);
+        conn.setBackground(btnBg(Color.WHITE, C_LINE, C_PRESS, 8));
+        conn.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout ct = new LinearLayout(this);
+        ct.setOrientation(LinearLayout.VERTICAL);
+        TextView cTitle = new TextView(this);
+        cTitle.setText("Connection");
+        cTitle.setTextSize(14);
+        cTitle.setTextColor(C_TEXT);
+        cTitle.setTypeface(null, Typeface.BOLD);
+        ct.addView(cTitle);
+        final TextView cSum = new TextView(this);
+        cSum.setTextSize(11);
+        cSum.setTextColor(C_MUTED);
+        ct.addView(cSum);
+        final Runnable refreshSum = () -> {
+            String host = prefs.getString("server", DEFAULT_SERVER)
+                    .replaceAll("^https?://", "").replaceAll("/+$", "");
+            cSum.setText(host + "\n"
+                    + (prefs.getString("key", "").isEmpty()
+                        ? "NO KEY SET" : "key set ✓")
+                    + " · device " + prefs.getString("device", "C72"));
+        };
+        refreshSum.run();
+        conn.addView(ct, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        TextView arrow = new TextView(this);
+        arrow.setText("›");
+        arrow.setTextSize(22);
+        arrow.setTextColor(C_MUTED);
+        conn.addView(arrow);
+        conn.setOnClickListener(v -> showConnectionSettings(refreshSum));
+        box.addView(conn);
+
+        box.addView(sectionLabel("TRIGGER READ"));
+        final Switch swStrong =
+                mkToggle(prefs.getBoolean("strongest_read", true));
+        box.addView(toggleRow("Pick strongest tag",
+                "Listens ~600 ms and pairs the strongest answer. "
+                + "Off: the first tag heard wins.", swStrong));
+
+        box.addView(sectionLabel("VISIBLE TABS · BATCH ALWAYS SHOWS"));
+        final Switch swStation =
+                mkToggle(prefs.getBoolean("tab_station", true));
+        box.addView(toggleRow("Station", null, swStation));
+        final Switch swSweep = mkToggle(prefs.getBoolean("tab_sweep", true));
+        box.addView(toggleRow("Sweep", null, swSweep));
+        final Switch swFind = mkToggle(prefs.getBoolean("tab_find", true));
+        box.addView(toggleRow("Find bin", null, swFind));
+        final Switch swLocate =
+                mkToggle(prefs.getBoolean("tab_locate", true));
+        box.addView(toggleRow("Locate", null, swLocate));
+
+        new AlertDialog.Builder(this)
+                .setTitle("Settings")
+                .setView(scroll)
+                .setPositiveButton("Save", (d, w) -> {
+                    prefs.edit()
+                            .putBoolean("strongest_read", swStrong.isChecked())
+                            .putBoolean("tab_station", swStation.isChecked())
+                            .putBoolean("tab_sweep", swSweep.isChecked())
+                            .putBoolean("tab_find", swFind.isChecked())
+                            .putBoolean("tab_locate", swLocate.isChecked())
+                            .apply();
+                    if (!tabVisible(activeTab)) activeTab = TAB_BATCH;
+                    selectTab(activeTab);
+                    status.setText(prefs.getString("key", "").isEmpty()
+                            ? "Saved — but the station key is still empty "
+                              + "(Settings → Connection)"
+                            : "Settings saved ✓");
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Server link, station key and device name — with a reachability line
+     *  so a bad URL or key shows up here, not at the next failed scan. */
+    private void showConnectionSettings(Runnable onSaved) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(16);
         box.setPadding(pad, pad, pad, 0);
 
         final EditText serverIn = new EditText(this);
-        serverIn.setHint("Server or station link (key is read from ?key=)");
+        serverIn.setHint("Server or station link");
         serverIn.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
         serverIn.setText(prefs.getString("server", DEFAULT_SERVER));
         box.addView(serverIn);
+        TextView hint = new TextView(this);
+        hint.setText("Paste the whole station link — the key is read "
+                + "from ?key= automatically.");
+        hint.setTextSize(11);
+        hint.setTextColor(C_MUTED);
+        hint.setPadding(dp(4), 0, dp(4), dp(6));
+        box.addView(hint);
 
         final EditText keyIn = new EditText(this);
         keyIn.setHint("Station key");
@@ -6620,29 +6894,15 @@ public class MainActivity extends Activity {
         deviceIn.setText(prefs.getString("device", "C72"));
         box.addView(deviceIn);
 
-        TextView tabsLabel = new TextView(this);
-        tabsLabel.setText("Visible tabs (BATCH always shows):");
-        tabsLabel.setPadding(0, dp(10), 0, 0);
-        box.addView(tabsLabel);
-        final CheckBox cbStation = new CheckBox(this);
-        cbStation.setText("Station");
-        cbStation.setChecked(prefs.getBoolean("tab_station", true));
-        box.addView(cbStation);
-        final CheckBox cbSweep = new CheckBox(this);
-        cbSweep.setText("Sweep");
-        cbSweep.setChecked(prefs.getBoolean("tab_sweep", true));
-        box.addView(cbSweep);
-        final CheckBox cbFind = new CheckBox(this);
-        cbFind.setText("Find bin");
-        cbFind.setChecked(prefs.getBoolean("tab_find", true));
-        box.addView(cbFind);
-        final CheckBox cbLocate = new CheckBox(this);
-        cbLocate.setText("Locate (WIP)");
-        cbLocate.setChecked(prefs.getBoolean("tab_locate", true));
-        box.addView(cbLocate);
+        final TextView state = new TextView(this);
+        state.setTextSize(12);
+        state.setTextColor(C_MUTED);
+        state.setText("Checking the saved connection…");
+        state.setPadding(dp(4), dp(8), dp(4), 0);
+        box.addView(state);
 
         new AlertDialog.Builder(this)
-                .setTitle("Settings")
+                .setTitle("Connection")
                 .setView(box)
                 .setPositiveButton("Save", (d, w) -> {
                     String server = serverIn.getText().toString().trim();
@@ -6662,19 +6922,31 @@ public class MainActivity extends Activity {
                             .putString("key", key)
                             .putString("device",
                                     deviceIn.getText().toString().trim())
-                            .putBoolean("tab_station", cbStation.isChecked())
-                            .putBoolean("tab_sweep", cbSweep.isChecked())
-                            .putBoolean("tab_find", cbFind.isChecked())
-                            .putBoolean("tab_locate", cbLocate.isChecked())
                             .apply();
-                    if (!tabVisible(activeTab)) activeTab = TAB_BATCH;
-                    selectTab(activeTab);
+                    if (onSaved != null) onSaved.run();
                     status.setText(key.isEmpty()
                             ? "Saved — but the station key is still empty"
-                            : "Settings saved ✓");
+                            : "Connection saved ✓");
                 })
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton("Back", null)
                 .show();
+
+        new Thread(() -> {
+            try {
+                api("GET", "/api/batches?status=open&limit=1", null);
+                ui.post(() -> {
+                    state.setText("Server reachable, key accepted ✓ "
+                            + "(saved settings)");
+                    state.setTextColor(C_OK);
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    state.setText("Saved settings can't reach the server: "
+                            + e.getMessage());
+                    state.setTextColor(C_OVER);
+                });
+            }
+        }).start();
     }
 
     // ------------------------------------------------------- persistence ----
