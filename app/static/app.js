@@ -232,6 +232,10 @@ const EVENT_META = {
   "side-trip-completed": ["Completed Side Trip", "#0e7a8a"],
   "side-trip-abandoned": ["Abandoned Side Trip", "#6d7175"],
   "bin-marked-tagged": ["Bin Marked Tagged", "#8a6116"],
+  "receiving-started": ["Started Receiving", "#7a5c0e"],
+  "receiving-completed": ["Completed Receiving", "#29845a"],
+  "receiving-abandoned": ["Abandoned Receiving", "#6d7175"],
+  "bin-check": ["Bin Check", "#7a5c0e"],
   "already-tagged-set": ["Already-tagged Count", "#6f42c1"],
   "review-opened": ["Opened Review", "#8a6116"],
   "review-resolved": ["Resolved Review", "#29845a"],
@@ -448,7 +452,12 @@ el.barcode.addEventListener("keydown", async (event) => {
   if (event.key !== "Enter") return;
   const barcode = el.barcode.value.trim();
   if (!barcode) return;
+  await stationBarcodeScan(barcode);
+});
 
+// Callable form of the barcode-input Enter handler, so C72 LINK relays can
+// run the exact same path the wedge scanner does (guards, windows and all).
+async function stationBarcodeScan(barcode) {
   setResult("Looking up product…", "busy");
   try {
     const res = await apiFetch(
@@ -498,7 +507,7 @@ el.barcode.addEventListener("keydown", async (event) => {
   } catch (err) {
     setResult("Network error during lookup.", "err");
   }
-});
+}
 
 function acceptProduct(product, message) {
   pendingProduct = product;
@@ -1545,6 +1554,15 @@ el.rfid.addEventListener("keydown", async (event) => {
   if (event.key !== "Enter") return;
   const rfid = el.rfid.value.trim();
   if (!rfid || !pendingProduct) return;
+  await stationTagScan(rfid);
+});
+
+// Callable form of the RFID-input Enter handler — the C72 LINK relay path.
+async function stationTagScan(rfid) {
+  if (!pendingProduct) {
+    setResult("No product loaded — scan a barcode first.", "err", "rfid");
+    return;
+  }
   const operator = requireOperator();
   if (!operator) return;
 
@@ -1606,7 +1624,120 @@ el.rfid.addEventListener("keydown", async (event) => {
   } catch (err) {
     setResult("Network error while saving the RFID tag.", "err", "rfid");
   }
-});
+}
+
+// --- C72 LINK --------------------------------------------------------------
+// The gun's LINK tab forwards every read here instead of acting on the gun:
+// BT barcodes run the barcode path, trigger RFID reads run the tag path —
+// identical to wedge input, every guard intact. Each scan's outcome is
+// posted back so the gun can ding or buzz without the operator looking up.
+let linkOn = false;
+let linkCursor = -1;
+let linkTimer = null;
+let linkBusy = false;
+const linkToggle = document.getElementById("link-toggle");
+const linkStatus = document.getElementById("link-status");
+
+function stationOutcome(where) {
+  const target = where === "rfid" ? el.resultRfid : el.result;
+  const cls = target.className || "";
+  if (cls.includes("result--err")) {
+    return { ok: false, text: target.textContent };
+  }
+  if (cls.includes("result--ok")) {
+    return { ok: true, text: target.textContent };
+  }
+  // Still "busy" (or blank): the scan opened a window instead of settling —
+  // unknown barcode, alias confirm, multi-box set. Human needed.
+  return {
+    ok: false,
+    text: "Needs attention on the terminal screen (a window opened).",
+  };
+}
+
+function stopLink(msg) {
+  linkOn = false;
+  if (linkTimer) clearInterval(linkTimer);
+  linkTimer = null;
+  linkToggle.textContent = "C72 LINK: OFF";
+  linkToggle.classList.remove("linkbar__btn--on");
+  if (msg) linkStatus.textContent = msg;
+}
+
+async function actOnLinkScan(s) {
+  let out;
+  if (s.kind === "barcode") {
+    el.barcode.value = s.value;
+    await stationBarcodeScan(s.value);
+    out = stationOutcome("barcode");
+  } else if (!pendingProduct) {
+    out = { ok: false, text: "No product loaded — scan a barcode first." };
+    setResult(out.text, "err", "rfid");
+  } else {
+    el.rfid.value = s.value;
+    await stationTagScan(s.value);
+    out = stationOutcome("rfid");
+  }
+  linkStatus.textContent = `${s.value} → ${out.text}`.slice(0, 140);
+  try {
+    await apiFetch(`/api/link/scans/${s.id}/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ok: out.ok,
+        outcome: (out.text || "").slice(0, 300),
+      }),
+    });
+  } catch (err) {
+    // The action already happened; a lost outcome just means no gun ding.
+  }
+}
+
+async function pollLink() {
+  if (!linkOn || linkBusy) return;
+  // Only act while the Scan station is actually on screen — relayed scans
+  // silently mutating a hidden tab would be spooky.
+  if (tabSections.scan[0].hidden) return;
+  linkBusy = true;
+  try {
+    const res = await apiFetch(`/api/link/scans?after=${linkCursor}`);
+    if (!res.ok) return;
+    const body = await res.json();
+    for (const s of body.scans) {
+      await actOnLinkScan(s);
+    }
+    linkCursor = body.cursor;
+  } catch (err) {
+    // Poll again next tick.
+  } finally {
+    linkBusy = false;
+  }
+}
+
+if (linkToggle) {
+  linkToggle.addEventListener("click", async () => {
+    if (linkOn) {
+      stopLink("Gun scans stay on the gun.");
+      return;
+    }
+    linkStatus.textContent = "Connecting…";
+    try {
+      // Seat the cursor at "now" so scans fired before the toggle never
+      // replay into the station.
+      const res = await apiFetch("/api/link/scans?after=-1");
+      const body = await res.json();
+      linkCursor = body.cursor;
+      linkOn = true;
+      linkToggle.textContent = "C72 LINK: ON";
+      linkToggle.classList.add("linkbar__btn--on");
+      linkStatus.textContent =
+        "Listening — scans from the gun's LINK tab act here now.";
+      linkTimer = setInterval(pollLink, 1000);
+    } catch (err) {
+      linkStatus.textContent = "Could not reach the server — try again.";
+    }
+  });
+}
 
 // --- Recent list -----------------------------------------------------------
 function recentRow(a) {
@@ -2079,8 +2210,12 @@ async function loadResumeList() {
     bEl.resumeWrap.hidden = !batches.length;
     batches.forEach((b) => {
       const li = document.createElement("li");
+      const label =
+        b.kind === "receiving"
+          ? "📦 Receiving"
+          : `Bin ${escapeHtml(b.bin_name)}`;
       li.innerHTML =
-        `<b>Bin ${escapeHtml(b.bin_name)}</b> — ${b.products} product(s), ` +
+        `<b>${label}</b> — ${b.products} product(s), ` +
         `${b.boxes} box(es), ${b.paired} paired · ${escapeHtml(b.status)} ` +
         `<span class="mono">${escapeHtml(fmtWhen(b.created_at))}` +
         `${b.created_by ? " · " + escapeHtml(b.created_by) : ""}</span>`;
@@ -2440,6 +2575,111 @@ document.getElementById("batch-baseline").addEventListener("click", async () => 
 });
 
 bEl.create.addEventListener("click", startBatch);
+
+// Start a receiving (shipment) batch: no bin, everything comes from scans.
+document
+  .getElementById("batch-create-receiving")
+  .addEventListener("click", async () => {
+    const operator = operatorEl.value;
+    if (!operator) {
+      setBatchResult("Pick who's scanning (top right) first.", "err");
+      operatorEl.focus();
+      return;
+    }
+    try {
+      batch = await postJson("/api/batches", {
+        kind: "receiving",
+        created_by: operator,
+      });
+      batchItems = batch.items || [];
+      openBatchView("collect");
+      setBatchResult(
+        "Receiving started — scan every box you can reach, then Print " +
+          "new labels. Labels come out in scan order, each with the " +
+          "product's home bin.",
+        "ok"
+      );
+    } catch (err) {
+      setBatchResult(err.message, "err");
+    }
+  });
+
+// PRINT for a receiving pass: only boxes not yet labelled queue.
+document.getElementById("recv-print").addEventListener("click", async () => {
+  if (!isReceivingBatch()) return;
+  try {
+    const res = await postJson(`/api/batches/${batch.id}/queue-labels`, {
+      requested_by: operatorEl.value || null,
+    });
+    let msg =
+      res.count > 0
+        ? `${res.count} label(s) queued — collect the stack and walk your ` +
+          `line of boxes, then pair.`
+        : "Nothing new to print.";
+    if (res.skipped_no_bin && res.skipped_no_bin.length) {
+      msg +=
+        ` HELD (no bin assigned): ${res.skipped_no_bin.join(", ")} — ` +
+        `assign bins and print again.`;
+    }
+    setBatchResult(msg, res.count > 0 ? "ok" : "err");
+    if (res.count > 0) showBatchStage("print");
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+});
+
+// Finish receiving: close the shipment, file one bin-check per touched bin.
+document.getElementById("recv-finish").addEventListener("click", async () => {
+  if (!isReceivingBatch()) return;
+  const unpaired = batchItems.reduce(
+    (n, i) =>
+      n +
+      (i.resolved
+        ? Math.max(
+            0,
+            (i.labels_total ?? i.qty_scanned + (i.case_count || 0)) -
+              (i.paired_count || 0)
+          )
+        : 0),
+    0
+  );
+  const warn = unpaired
+    ? `\n\n⚠ ${unpaired} label(s) still have no tag paired — they'll be ` +
+      `flagged for Review.`
+    : "";
+  if (
+    !confirm(
+      "Finish receiving?\n\nFiles an inventory-check Review task for " +
+        "every bin that received stock — each one is a quick bin-audit " +
+        "walk-scan." + warn
+    )
+  ) {
+    return;
+  }
+  try {
+    const res = await postJson(`/api/batches/${batch.id}/complete`, {
+      finalize: true,
+      created_by: operatorEl.value || null,
+    });
+    const bins = res.bins_touched || {};
+    const parts = Object.entries(bins).map(([b, n]) => `${b} (${n})`);
+    batch = null;
+    batchItems = [];
+    stopBatchPrintPoll();
+    stopBatchLive();
+    enterBatchTab();
+    setBatchResult(
+      parts.length
+        ? `Receiving done ✓ — inventory checks filed for: ${parts.join(
+            ", "
+          )} (see Review).`
+        : "Receiving done ✓ — nothing was shelved, no checks filed.",
+      "ok"
+    );
+  } catch (err) {
+    setBatchResult(err.message, "err");
+  }
+});
 bEl.bin.addEventListener("keydown", (e) => {
   if (e.key === "Enter") startBatch();
 });
@@ -2665,11 +2905,28 @@ async function resumeBatch(id) {
   }
 }
 
+// Receiving: a bin-less shipment batch that loops collect → print → pair.
+// Labels/verify don't exist for it; PRINT repeats per pass and finishing
+// files a bin-check Review task per touched bin.
+function isReceivingBatch() {
+  return !!(batch && batch.kind === "receiving");
+}
+
 function openBatchView(stage) {
   bEl.start.hidden = true;
   bEl.active.hidden = false;
   document.querySelector(".binboard").hidden = true;
-  bEl.binChip.textContent = `Bin ${batch.bin_name}`;
+  bEl.binChip.textContent = isReceivingBatch()
+    ? "Receiving"
+    : `Bin ${batch.bin_name}`;
+  // Labels and verify aren't part of the receiving loop — hide their chips
+  // so the flow reads collect → print → pair.
+  bEl.stages.querySelectorAll(".stage").forEach((chip) => {
+    const gone =
+      isReceivingBatch() &&
+      (chip.dataset.stage === "labels" || chip.dataset.stage === "verify");
+    chip.style.display = gone ? "none" : "";
+  });
   setBatchResult("", null);
   showBatchStage(stage);
   startBatchLive();
@@ -2678,6 +2935,9 @@ function openBatchView(stage) {
 const BATCH_STAGES = ["collect", "labels", "print", "pair", "verify"];
 
 function showBatchStage(stage) {
+  if (isReceivingBatch() && (stage === "labels" || stage === "verify")) {
+    stage = "collect";
+  }
   batchStage = stage;
   stopBatchPrintPoll();
   const idx = BATCH_STAGES.indexOf(stage);
@@ -2689,6 +2949,10 @@ function showBatchStage(stage) {
   BATCH_STAGES.forEach((s) => {
     document.getElementById(`bstage-${s}`).hidden = s !== stage;
   });
+  const recvBar = document.getElementById("recv-bar");
+  if (recvBar) recvBar.hidden = !isReceivingBatch();
+  bEl.toLabels.hidden = isReceivingBatch();
+  bEl.toVerify.hidden = isReceivingBatch();
   if (stage === "collect") {
     renderBatchItems();
     bEl.scan.focus();

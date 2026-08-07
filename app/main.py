@@ -11,7 +11,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import AliasChoices, BaseModel, Field, field_validator
-from sqlalchemy import bindparam, func, or_, select, text
+from sqlalchemy import bindparam, delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.requests import Request
@@ -45,6 +45,7 @@ from app.models import (
     FlaggedBin,
     HiddenBin,
     LabelName,
+    LinkScan,
     PrintJob,
     ProductKind,
     ReviewTask,
@@ -2405,6 +2406,10 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
     done_batches: list = []
     for b in session.scalars(select(Batch).order_by(Batch.id)):
         key = (b.bin_name or "").strip().lower()
+        # Receiving batches have no bin of their own — they must neither
+        # count any bin as done nor appear as a bin's continue-batch.
+        if b.kind == "receiving":
+            continue
         side = b.parent_batch_id is not None
         if b.status == "done":
             # A side trip only ever covered the few boxes carried over —
@@ -3227,15 +3232,23 @@ def _apply_product_to_item(
 
 
 class BatchIn(BaseModel):
-    bin: str = Field(max_length=100)
+    bin: str | None = Field(default=None, max_length=100)
     created_by: str | None = Field(default=None, max_length=100)
+    # "receiving": a shipment batch — no home bin, everything comes from
+    # scans, printing repeats per pass, labels carry each item's own bin.
+    kind: Literal["receiving"] | None = None
 
     @field_validator("bin")
     @classmethod
-    def not_blank(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("must not be blank")
-        return v.strip()
+    def strip_bin(cls, v: str | None) -> str | None:
+        return v.strip() if v and v.strip() else None
+
+
+RECEIVING_BIN = "RECEIVING"
+
+
+def _is_receiving(batch: Batch) -> bool:
+    return batch.kind == "receiving"
 
 
 @app.post(
@@ -3244,7 +3257,25 @@ class BatchIn(BaseModel):
 def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
     """Start a bin batch pre-seeded with everything Shopify expects in that
     bin (0/N tickers before the first scan). Scanning products not on the
-    list still adds them — the seed is a head start, not a wall."""
+    list still adds them — the seed is a head start, not a wall.
+
+    kind="receiving" starts a shipment batch instead: no bin, no pre-seed —
+    the collect → print → pair loop runs as many passes as the pallet
+    takes, and finishing files per-bin inventory checks."""
+    if payload.kind == "receiving":
+        batch = Batch(
+            bin_name=RECEIVING_BIN,
+            kind="receiving",
+            created_by=payload.created_by,
+        )
+        session.add(batch)
+        session.commit()
+        session.refresh(batch)
+        result = batch.as_dict()
+        result["items"] = []
+        return result
+    if not payload.bin:
+        raise HTTPException(422, "Which bin? (bin must not be blank)")
     batch = Batch(bin_name=payload.bin, created_by=payload.created_by)
     session.add(batch)
     session.flush()
@@ -3380,6 +3411,104 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
     result = batch.as_dict()
     result["items"] = [i.as_dict() for i in items]
     return result
+
+
+# --------------------------------------------------------------------------
+# LINK relay: the C72's LINK tab turns the gun into a networked input device
+# for the web terminal — every BT barcode and trigger RFID read lands here,
+# the terminal polls with an id cursor and acts on each scan through its
+# normal input paths, then posts the outcome back so the gun can ding/buzz.
+# No Bluetooth to the PC, ever. Rows are plumbing, not history.
+
+
+class LinkScanIn(BaseModel):
+    kind: Literal["barcode", "epc"]
+    value: str = Field(min_length=1, max_length=200)
+    rssi: str | None = Field(default=None, max_length=20)
+    device: str | None = Field(default=None, max_length=100)
+
+
+class LinkResultIn(BaseModel):
+    ok: bool
+    outcome: str = Field(default="", max_length=300)
+
+
+@app.post("/api/link/scans", dependencies=[Depends(require_user)])
+def link_scan_submit(
+    payload: LinkScanIn, session: Session = Depends(get_session)
+):
+    # Sweep day-old plumbing on the way in so the table can't grow forever.
+    session.execute(
+        delete(LinkScan).where(
+            LinkScan.created_at
+            < datetime.now(timezone.utc) - timedelta(days=1)
+        )
+    )
+    row = LinkScan(
+        kind=payload.kind,
+        value=payload.value.strip(),
+        rssi=payload.rssi,
+        device=(payload.device or "").strip() or None,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return {"scan": row.as_dict()}
+
+
+@app.get("/api/link/scans", dependencies=[Depends(require_user)])
+def link_scans_poll(
+    after: int = -1,
+    device: str | None = None,
+    limit: int = 20,
+    session: Session = Depends(get_session),
+):
+    """Cursor poll for the web terminal. after=-1 returns just the current
+    cursor (max id) with no rows — the terminal calls that when its LINK
+    toggle turns ON, so scans fired before the toggle never replay."""
+    if after < 0:
+        latest = session.scalar(select(func.max(LinkScan.id))) or 0
+        return {"cursor": latest, "scans": []}
+    stmt = (
+        select(LinkScan)
+        .where(LinkScan.id > after)
+        .order_by(LinkScan.id)
+    )
+    if device:
+        stmt = stmt.where(LinkScan.device == device.strip())
+    rows = session.scalars(stmt.limit(min(max(limit, 1), 100))).all()
+    return {
+        "cursor": rows[-1].id if rows else after,
+        "scans": [r.as_dict() for r in rows],
+    }
+
+
+@app.get("/api/link/scans/{scan_id}", dependencies=[Depends(require_user)])
+def link_scan_get(scan_id: int, session: Session = Depends(get_session)):
+    """The gun polls its own scan by id until an outcome appears."""
+    row = session.get(LinkScan, scan_id)
+    if row is None:
+        raise HTTPException(404, "No such scan (it may have been swept).")
+    return {"scan": row.as_dict()}
+
+
+@app.post(
+    "/api/link/scans/{scan_id}/result",
+    dependencies=[Depends(require_user)],
+)
+def link_scan_result(
+    scan_id: int,
+    payload: LinkResultIn,
+    session: Session = Depends(get_session),
+):
+    row = session.get(LinkScan, scan_id)
+    if row is None:
+        raise HTTPException(404, "No such scan (it may have been swept).")
+    row.ok = payload.ok
+    row.outcome = payload.outcome.strip()[:300] or None
+    row.consumed_at = datetime.now(timezone.utc)
+    session.commit()
+    return {"scan": row.as_dict()}
 
 
 @app.get("/api/batches", dependencies=[Depends(require_user)])
@@ -3591,11 +3720,14 @@ def batch_scan(
 
     # Bin mismatch is informational: the operator decides at the shelf
     # (keep saved bin / move it via the existing confirmed bin update).
+    # Receiving has no shelf — EVERY product would "mismatch" its sentinel
+    # bin and the keep-or-move prompt would fire on every box, so it's off.
     saved_bin = item.bin_location
     # A product split across shelves ("G2-1 & B17") is legitimately here as
     # long as this bin is one of the ones listed.
     bin_mismatch = bool(
-        item.resolved
+        not _is_receiving(batch)
+        and item.resolved
         and saved_bin
         and saved_bin not in MISSING_BIN_VALUES
         and not bin_contains(saved_bin, batch.bin_name)
@@ -3755,8 +3887,11 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                     flags.append("ambiguous")
                 else:
                     candidates = []
+            # Receiving compares against nothing: expected_qty is the
+            # SHELF count, and a shipment legitimately adds to it.
             if (
-                item.expected_qty is not None
+                not _is_receiving(batch)
+                and item.expected_qty is not None
                 and _units_on_shelf(item) != item.expected_qty
             ):
                 flags.append("count-mismatch")
@@ -3766,10 +3901,13 @@ def batch_review(batch_id: int, session: Session = Depends(get_session)):
                     flags.append("unconfirmed-name")
             # Saved bin differs from the bin being walked: the boxes are on
             # the wrong shelf (or the record is). Never blocks — the
-            # operator picks move / relabel here / ignore.
+            # operator picks move / relabel here / ignore. A receiving
+            # batch has no shelf, so EVERY product would "mismatch" — the
+            # whole flag is meaningless there and stays off.
             saved = (item.bin_location or "").strip()
             if (
-                saved
+                not _is_receiving(batch)
+                and saved
                 and saved.lower() != "no bin assigned"
                 and not bin_contains(
                     saved, _get_batch(session, batch_id).bin_name
@@ -4492,8 +4630,34 @@ def batch_queue_labels(
 ):
     """One print job per scanned box. Labels carry the BATCH bin — that's
     where the boxes physically are. Only from 'collecting' so a double-click
-    can't queue the whole batch twice; single reprints live in Print Queue."""
+    can't queue the whole batch twice; single reprints live in Print Queue.
+
+    Receiving batches loop collect → PRINT → pair per pass instead: PRINT
+    is repeatable and queues only boxes not yet labelled, each label carries
+    the ITEM's home bin (that's where the box is going), and items with no
+    bin are held out and named so the operator can assign one first."""
     batch = _get_batch(session, batch_id)
+    if _is_receiving(batch):
+        if batch.status in ("done", "abandoned"):
+            raise HTTPException(409, f"This batch is {batch.status}.")
+        jobs, skipped_no_bin = _build_receiving_label_jobs(
+            session, batch, payload.requested_by
+        )
+        if not jobs and not skipped_no_bin:
+            raise HTTPException(
+                422, "Nothing new to label — every scanned box already "
+                     "has a label queued or printed.",
+            )
+        session.add_all(jobs)
+        session.commit()
+        return {
+            "count": len(jobs),
+            "batch": batch.as_dict(),
+            "skipped_bundles": [],
+            # Held out, not silently dropped: these need a bin before a
+            # label can tell the shelver where the box goes.
+            "skipped_no_bin": skipped_no_bin,
+        }
     if batch.status != "collecting":
         raise HTTPException(
             409,
@@ -4585,6 +4749,69 @@ def _build_label_jobs(
     return jobs, skipped_bundles
 
 
+def _build_receiving_label_jobs(
+    session: Session, batch: Batch, requested_by: str | None
+) -> tuple[list[PrintJob], list[str]]:
+    """Print jobs for a receiving pass: only boxes NOT yet labelled (the
+    loop repeats PRINT per pass), each label carrying the ITEM's home bin —
+    a received box's label is its shelving instruction. Items without a bin
+    are held out and named so the operator can assign one and re-print;
+    cancelled jobs free their box to be re-queued next pass."""
+    jobs: list[PrintJob] = []
+    skipped_no_bin: list[str] = []
+    for item in _batch_items(session, batch.id):
+        if not item.resolved or not item.shopify_variant_id:
+            continue
+        if item.skipped or item.kind == "bundle":
+            continue
+        want = item.qty_scanned + item.case_count
+        if want <= 0:
+            continue
+        have = session.scalar(
+            select(func.count()).where(
+                PrintJob.batch_id == batch.id,
+                PrintJob.shopify_variant_id == item.shopify_variant_id,
+                PrintJob.status.in_(("pending", "printing", "done")),
+            )
+        ) or 0
+        delta = want - have
+        if delta <= 0:
+            continue
+        bin_ = (item.bin_location or "").strip()
+        if not bin_ or bin_.lower() == "no bin assigned":
+            skipped_no_bin.append(item.product_title or item.sku or "?")
+            continue
+        label_name, label_placement, label_sku = _label_name_for(
+            session, item
+        )
+        # Loose boxes label first, cases after — same order pairing walks.
+        per_label_units = (
+            [None] * item.qty_scanned + [item.case_units] * item.case_count
+        )[have:]
+        for units in per_label_units[:delta]:
+            jobs.append(
+                PrintJob(
+                    epc=_new_epc(),
+                    status="pending",
+                    case_units=units,
+                    batch_id=batch.id,
+                    shopify_variant_id=item.shopify_variant_id,
+                    shopify_product_id=item.shopify_product_id,
+                    product_title=item.product_title or "",
+                    variant_title=item.variant_title,
+                    sku=item.sku,
+                    barcode=item.barcode,
+                    bin_location=bin_,
+                    other_bins=item.other_bins,
+                    label_name=label_name,
+                    label_placement=label_placement,
+                    label_sku=label_sku,
+                    requested_by=requested_by or batch.created_by,
+                )
+            )
+    return jobs, skipped_no_bin
+
+
 class DivertIn(BaseModel):
     # The shelf these strays actually belong on.
     bin: str = Field(max_length=100)
@@ -4608,6 +4835,12 @@ def divert_to_bin(
 
     The parent batch is left exactly as it was, minus the strays."""
     parent = _get_batch(session, batch_id)
+    if _is_receiving(parent):
+        raise HTTPException(
+            422,
+            "Receiving doesn't need side trips — every label already "
+            "carries its product's home bin.",
+        )
     if parent.status not in ("collecting", "printing"):
         raise HTTPException(
             409,
@@ -4946,6 +5179,12 @@ def batch_pair(
     on_a_case = (
         item.case_count > 0 and item.paired_count >= item.qty_scanned
     )
+    # Receiving has no bin of its own — the tag records the box's HOME bin
+    # (where it's about to be shelved), matching the label on the box.
+    tag_bin = (
+        (item.bin_location or batch.bin_name)
+        if _is_receiving(batch) else batch.bin_name
+    )
     assignment = RfidAssignment(
         rfid_id=payload.epc,
         shopify_variant_id=item.shopify_variant_id,
@@ -4954,7 +5193,7 @@ def batch_pair(
         variant_title=item.variant_title,
         sku=item.sku,
         barcode=item.barcode,
-        bin_location=batch.bin_name,
+        bin_location=tag_bin,
         case_units=item.case_units if on_a_case else None,
         assigned_by=payload.created_by,
         batch_id=batch.id,
@@ -5196,6 +5435,13 @@ def batch_verify(
     paired-vs-detected counts. Read-only — completion decides what becomes
     a ReviewTask."""
     batch = _get_batch(session, batch_id)
+    if _is_receiving(batch):
+        raise HTTPException(
+            422,
+            "Receiving batches don't verify against a shelf — finishing "
+            "files a bin-check Review task for every bin that received "
+            "stock instead.",
+        )
     items = [i for i in _batch_items(session, batch_id) if i.resolved]
     epcs = {e.strip().upper() for e in payload.epcs if e and e.strip()}
     if epcs and batch.verified_at is None:
@@ -5332,6 +5578,8 @@ def batch_complete(
     batch = _get_batch(session, batch_id)
     if batch.status in ("done", "abandoned"):
         raise HTTPException(409, f"This batch is already {batch.status}.")
+    if _is_receiving(batch):
+        return _complete_receiving(session, batch, payload)
     if not payload.finalize:
         if batch.status != "awaiting-verify":
             batch.status = "awaiting-verify"
@@ -5422,6 +5670,155 @@ def batch_complete(
     return {
         "batch": batch.as_dict(),
         "review_tasks": [t.as_dict() for t in tasks],
+    }
+
+
+def _complete_receiving(session: Session, batch: Batch, payload) -> dict:
+    """Close a receiving batch. No verify step and no shelf-count checks —
+    the boxes fan out to many bins that get audited later instead: one
+    bin-check Review task per bin that received stock (the RFID walk-scan
+    list), plus the usual unresolved/skipped/orphan-label flags."""
+    tasks: list[ReviewTask] = []
+    bins: dict[str, int] = {}
+    for item in _batch_items(session, batch.id):
+        name = item.label_name or item.product_title
+        if item.skipped:
+            tasks.append(ReviewTask(
+                category="could-not-scan",
+                sku=item.sku,
+                product_title=name,
+                detail=(
+                    f"Receiving #{batch.id}: {name or item.scanned_code} "
+                    f"was skipped"
+                    + (f" ({item.skip_reason})" if item.skip_reason else "")
+                    + ". It was NOT counted — it still needs identifying "
+                      "and tagging."
+                )[:500],
+                batch_id=batch.id,
+                created_by=payload.created_by,
+            ))
+            continue
+        if not item.resolved:
+            tasks.append(ReviewTask(
+                category="unresolved-barcode",
+                detail=(
+                    f"Barcode {item.scanned_code} was scanned "
+                    f"{item.qty_scanned}x while receiving (#{batch.id}) but "
+                    f"never resolved to a product. Link or fix it at the "
+                    f"Scan Station."
+                )[:500],
+                batch_id=batch.id,
+                created_by=payload.created_by,
+            ))
+            continue
+        boxes = item.qty_scanned + item.case_count
+        if item.paired_count < boxes:
+            tasks.append(ReviewTask(
+                category="pairing-incomplete",
+                sku=item.sku,
+                product_title=name,
+                detail=(
+                    f"Receiving #{batch.id}: only {item.paired_count} of "
+                    f"{boxes} labels were paired for {name or item.sku} — "
+                    f"an unpaired label is an orphan sticker. Pair or "
+                    f"reprint before shelving."
+                )[:500],
+                batch_id=batch.id,
+                created_by=payload.created_by,
+            ))
+        bin_ = (item.bin_location or "").strip()
+        if boxes > 0 and bin_ and bin_.lower() != "no bin assigned":
+            bins[bin_] = bins.get(bin_, 0) + boxes
+    for bin_, count in sorted(bins.items()):
+        tasks.append(ReviewTask(
+            category="bin-check",
+            detail=(
+                f"Bin {bin_}: {count} box(es) shelved from receiving "
+                f"#{batch.id}. RFID walk-scan the shelf (Audits → bin "
+                f"audit) to confirm the count."
+            )[:500],
+            batch_id=batch.id,
+            created_by=payload.created_by,
+        ))
+    session.add_all(tasks)
+    batch.status = "done"
+    batch.completed_at = datetime.now(timezone.utc)
+    session.commit()
+    return {
+        "batch": batch.as_dict(),
+        "review_tasks": [t.as_dict() for t in tasks],
+        "bins_touched": bins,
+    }
+
+
+class BinChecksIn(BaseModel):
+    """Manual "mark for inventory check": explicit bins, or a whole rack
+    by prefix (every bin-map bin starting `rack`, e.g. rack=I1)."""
+
+    bins: list[str] = Field(default_factory=list)
+    rack: str | None = Field(default=None, max_length=100)
+    created_by: str | None = Field(default=None, max_length=100)
+    note: str | None = Field(default=None, max_length=200)
+
+
+@app.post(
+    "/api/review/bin-checks",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def file_bin_checks(
+    payload: BinChecksIn, session: Session = Depends(get_session)
+):
+    wanted: list[str] = [b.strip() for b in payload.bins if b and b.strip()]
+    if payload.rack and payload.rack.strip():
+        prefix = payload.rack.strip().lower()
+        rack_bins = session.scalars(
+            select(BinMapEntry.bin)
+            .where(BinMapEntry.bin.isnot(None))
+            .distinct()
+        ).all()
+        wanted += [b for b in rack_bins
+                   if b and b.strip().lower().startswith(prefix)]
+    # De-dupe (CI) and skip bins that already have an OPEN bin-check.
+    seen: set[str] = set()
+    bins: list[str] = []
+    for b in wanted:
+        key = b.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            bins.append(b.strip())
+    if not bins:
+        raise HTTPException(422, "Which bins? (none given, rack matched none)")
+    open_checks = {
+        (t.detail.split(":", 1)[0].removeprefix("Bin ").strip().lower())
+        for t in session.scalars(
+            select(ReviewTask).where(
+                ReviewTask.category == "bin-check",
+                ReviewTask.status == "open",
+            )
+        )
+    }
+    tasks = []
+    for b in bins:
+        if b.lower() in open_checks:
+            continue
+        tasks.append(ReviewTask(
+            category="bin-check",
+            detail=(
+                f"Bin {b}: marked for an inventory check"
+                + (f" — {payload.note.strip()}"
+                   if payload.note and payload.note.strip() else "")
+                + ". RFID walk-scan the shelf (Audits → bin audit) to "
+                  "confirm the count."
+            )[:500],
+            created_by=payload.created_by,
+        ))
+    session.add_all(tasks)
+    session.commit()
+    return {
+        "count": len(tasks),
+        "already_open": len(bins) - len(tasks),
+        "tasks": [t.as_dict() for t in tasks],
     }
 
 
@@ -6298,6 +6695,35 @@ def history(
                           f"shelf walk, nothing printed or written",
                 "undo": undo,
             })
+            continue
+        # Receiving batches have no bin — History calls them what they are
+        # (a shipment worked at the desk/pallet), never a bin's batch.
+        if b.kind == "receiving":
+            events.append({
+                "at": iso(b.created_at),
+                "type": "receiving-started",
+                "worker": b.created_by,
+                "sku": None,
+                "title": "Receiving",
+                "detail": f"Receiving #{b.id}"
+                          + (f" · {tie_count} tag(s) tied"
+                             if tie_count else ""),
+                "undo": undo,
+            })
+            if b.completed_at:
+                events.append({
+                    "at": iso(b.completed_at),
+                    "type": ("receiving-abandoned"
+                             if b.status == "abandoned"
+                             else "receiving-completed"),
+                    "worker": b.created_by,
+                    "sku": None,
+                    "title": "Receiving",
+                    "detail": f"Receiving #{b.id}"
+                              + (f" · {tie_count} tag(s) tied"
+                                 if tie_count else ""),
+                    "undo": undo,
+                })
             continue
         # A side trip is a few boxes carried to their real shelf, not a
         # check of that shelf — its events must never read as if the bin

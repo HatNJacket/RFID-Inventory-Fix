@@ -70,6 +70,13 @@
     </nav>
 
     <main class="flow" id="tab-scan">
+      <!-- C72 LINK: the gun forwards its scans here instead of acting
+           locally — no Bluetooth pairing to the PC, ever. -->
+      <div class="linkbar">
+        <button id="link-toggle" type="button" class="linkbar__btn">C72 LINK: OFF</button>
+        <span class="linkbar__status" id="link-status">Gun scans stay on the gun. Turn this on (and open LINK on the C72) to scan for this screen.</span>
+      </div>
+
       <!-- STEP 1: barcode -->
       <section class="step step--active" id="step-barcode" data-step="barcode">
         <div class="step__index">1</div>
@@ -391,6 +398,8 @@
           <input id="batch-bin" class="linkbox__input linkbox__short" type="text" maxlength="100"
                  autocomplete="off" spellcheck="false" placeholder="Bin…" />
           <button class="print__btn" id="batch-create" type="button">Start batch</button>
+          <button class="reset" id="batch-create-receiving" type="button"
+                  title="Shipment mode — no bin. Loop collect → print → pair per pallet pass; labels print each product's home bin; finishing files an inventory check per touched bin.">📦 Start receiving</button>
         </div>
         <div id="batch-resume-wrap" hidden>
           <p class="linkbox__extra-label">Unfinished batches — click to resume:</p>
@@ -465,6 +474,13 @@
           <p class="linkbox__text" id="bcollect-summary" hidden></p>
           <ul class="batch__items" id="batch-items"></ul>
           <button class="print__btn" id="batch-to-labels" type="button">Next step →</button>
+          <!-- Receiving loop controls (shown only for kind=receiving) -->
+          <div class="recvbar" id="recv-bar" hidden>
+            <button class="print__btn" id="recv-print" type="button"
+                    title="Queues one label per box scanned but not yet labelled — in scan order, each printed with the product's home bin. Repeatable every pass.">🖨 Print new labels</button>
+            <button class="reset" id="recv-finish" type="button"
+                    title="Closes the shipment and files an inventory-check Review task for every bin that received stock.">✅ Finish receiving…</button>
+          </div>
         </div>
 
         <!-- Stage 2: check (only items needing a decision) -->

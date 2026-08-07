@@ -311,6 +311,13 @@ class Batch(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     bin_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # None = a normal bin batch. "receiving" = a shipment worked at the
+    # desk/pallet: no home bin (bin_name is the RECEIVING sentinel), labels
+    # carry each ITEM's bin, printing repeats per pass, and finishing files
+    # per-bin inventory checks instead of running verify. Receiving batches
+    # never count a bin as done, like side trips.
+    # (Prod needs dev/alter_add_batch_kind.py once — sqlite tests recreate.)
+    kind: Mapped[str | None] = mapped_column(String(20), index=True)
     status: Mapped[str] = mapped_column(
         String(20), index=True, nullable=False, default="collecting"
     )
@@ -351,6 +358,7 @@ class Batch(Base):
         return {
             "id": self.id,
             "bin_name": self.bin_name,
+            "kind": self.kind,
             "status": self.status,
             "parent_batch_id": self.parent_batch_id,
             "baseline_at": (
@@ -727,4 +735,47 @@ class ReviewTask(Base):
                 self.resolved_at.isoformat() if self.resolved_at else None
             ),
             "resolution_note": self.resolution_note,
+        }
+
+
+class LinkScan(Base):
+    """One scan relayed from the C72's LINK tab to the web terminal.
+
+    The gun POSTs every read (BT barcode or trigger RFID) here instead of
+    acting on it; the web terminal polls with an id cursor, feeds the value
+    through its normal input paths, and posts the outcome back so the gun
+    can ding or buzz. Rows are transient plumbing, not history — the actions
+    they trigger do their own History logging — and get swept after a day.
+    """
+
+    __tablename__ = "link_scans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)  # barcode|epc
+    value: Mapped[str] = mapped_column(String(200), nullable=False)
+    rssi: Mapped[str | None] = mapped_column(String(20))
+    device: Mapped[str | None] = mapped_column(String(100), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # Set by the consuming terminal once the scan has been acted on.
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ok: Mapped[bool | None] = mapped_column(Boolean)
+    outcome: Mapped[str | None] = mapped_column(String(300))
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "value": self.value,
+            "rssi": self.rssi,
+            "device": self.device,
+            "created_at": (
+                self.created_at.isoformat() if self.created_at else None
+            ),
+            "consumed_at": (
+                self.consumed_at.isoformat() if self.consumed_at else None
+            ),
+            "ok": self.ok,
+            "outcome": self.outcome,
         }

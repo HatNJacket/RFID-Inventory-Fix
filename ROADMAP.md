@@ -184,7 +184,29 @@ next bin.
   - completion screen with per-product stock deltas ("+1 (5 → 6)") to
     confirm before filing inventory changes
 
-## 📦 Receiving (designed 2026-08-07 with Nick — ready to build, not started)
+## 📦 Receiving — ✅ SHIPPED 2026-08-07 (server + web + C72 v3.29)
+
+Both features below are BUILT, tested (14/14 suites incl. new test_link +
+test_receiving), browser-verified on the seed server, and deployed.
+Prod got the one-off `rfid_batches.kind` ALTER (dev/alter_add_batch_kind.py)
+before the deploy. Field test pending — Nick has the v3.29 APK link.
+Also shipped same day (C72 v3.28): settings redesign (Connection
+sub-window + switches + strongest-tag-on-trigger toggle) and the
+open-batch picker cards.
+
+What shipped, per the design below: LINK tab (barcode + RFID relay,
+outcome ding/buzz, web C72 LINK toggle on Scan Station, operator-keyed by
+device name); receiving batches (RECEIVING sentinel bin, repeatable PRINT
+of only-unlabelled boxes with home-bin labels, no-bin items held out by
+name, pair records home bin, verify/side-trip/wrong-bin/count-mismatch
+all correctly refuse or stay silent, finish files per-bin "bin-check"
+Review tasks + History receiving-started/completed); manual
+POST /api/review/bin-checks (bins list or rack= prefix). Web: Start
+receiving button, collect→print→pair chips, print/finish bar. C72:
+START RECEIVING in the picker, COLLECT⟳/PAIR⟳ loop, EXIT → FINISH
+RECEIVING with per-bin summary.
+
+### Original design (2026-08-07, agreed with Nick)
 
 Two features cover every receiving workflow (desk, pallet, or a mix).
 Planner (TC-Inventory-Planner) integration deliberately SKIPPED for v1:
@@ -235,9 +257,14 @@ Steve's TODO #2, still open, later.)
 - Printer walks between passes are acceptable (small warehouse; the
   printer sits on the desk, so desk receiving has zero walks).
 
-Build order: A first (small, immediately useful standalone), then B,
-then the Review tie-in. New test suites per convention; C72 version
-bumps per release.
+Build order was A then B, as planned. Open receiving follow-ups:
+- Review "bin-check" tasks resolve manually today; a one-tap "run this
+  bin's audit" jump from the Review card is the natural next step.
+- The C72 item editor's change-bin flow is how held no-bin products get
+  bins at the desk; a dedicated prompt at PRINT time could streamline it.
+- On-hand counts still only move via the bin audit's gated button
+  (standing decision holds); TC-Planner integration remains skipped
+  (Steve's TODO #2).
 
 ## 📥 Steve's TODO list (captured 2026-07-28, not yet designed)
 

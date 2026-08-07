@@ -138,14 +138,17 @@ with Session(get_engine()) as s:
     # Audit-board data: Steve's worked example (score 6), a score-4 bin,
     # an untagged bin, and the T1-1 products (received-not-found: NORMAL
     # shows 5 on hand, only 2 tagged).
-    def m(sku, title, bin_, qty):
+    def m(sku, title, bin_, qty, barcode=None):
         return BinMapEntry(sku=sku, product_title=title, bin=bin_, qty=qty,
-                           shopify_variant_id="t:" + sku)
-    nm = m("NORMAL-1", "Baader UHC Filter 2in", "T1-1", 5)
+                           barcode=barcode, shopify_variant_id="t:" + sku)
+    # Barcodes on the T1-1 rows so scan-station lookups (and C72 LINK
+    # relays) resolve locally from the live bin map, like prod does.
+    nm = m("NORMAL-1", "Baader UHC Filter 2in", "T1-1", 5, barcode="111")
     nm.shopify_product_id = "gid://shopify/Product/123456789"
     s.add_all([
         nm,
-        m("OPTO-LPRO", "Optolong L-Pro 2in (won't-scan test)", "T1-1", 2),
+        m("OPTO-LPRO", "Optolong L-Pro 2in (won't-scan test)", "T1-1", 2,
+          barcode="222"),
         # Expected here, nothing tagged: the row that hides behind the
         # audit's untagged toggle.
         m("PROD-Z", "Product Z (never tagged)", "BIN-T", 3),
@@ -199,6 +202,14 @@ def _fake_set(sku, qty):
     return before
 _sh.get_on_hand = _fake_get
 _sh.set_on_hand = _fake_set
+# No-op the API lookup paths too: the live bin map answers product
+# identity locally, and a dead API must degrade to that instead of
+# surfacing token errors (mirrors the dev/tests mocking).
+_sh.lookup_barcode = lambda code: None
+_sh.lookup_barcode_all = lambda code: []
+_sh.fetch_all_variant_bins = lambda: []
+_sh.get_stock_info_by_skus = lambda skus: {}
+_sh.get_quantities_by_skus = lambda skus: {}
 
 import uvicorn  # noqa: E402
 uvicorn.run(app, host="127.0.0.1", port=8123)
