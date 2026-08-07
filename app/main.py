@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
-from app import config, shopify
+from app import config, planner, shopify
 from app.auth import require_user
 from app.database import (
     DatabaseNotConfigured,
@@ -6096,6 +6096,26 @@ def get_capture(capture_id: int, session: Session = Depends(get_session)):
     if row is None:
         raise HTTPException(404, "No such sweep.")
     return row.as_dict(with_epcs=True)
+
+
+# ------------------------------------------------------- planner (read-only) ---
+# The TC-Planner bridge is STRICTLY read-only: these endpoints answer "is
+# this product on an open purchase order" for scan-time hints. Nothing
+# here (or anywhere in this app) files receipts, changes PO statuses, or
+# pushes stock — that future feature is Steve's TODO #2 and will be its
+# own explicitly gated, operator-confirmed flow.
+
+
+@app.get("/api/planner/status", dependencies=[Depends(require_user)])
+def planner_status():
+    return planner.health()
+
+
+@app.get("/api/planner/on-order/{sku}", dependencies=[Depends(require_user)])
+def planner_on_order(sku: str):
+    # Always 200: planner hints are decoration on the scan flow, so an
+    # outage answers ok=False instead of failing the caller.
+    return planner.on_order_for_sku(sku)
 
 
 # ------------------------------------------------------------ label names ---

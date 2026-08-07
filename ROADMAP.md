@@ -267,13 +267,69 @@ Steve's TODO #2, still open, later.)
   printer sits on the desk, so desk receiving has zero walks).
 
 Build order was A then B, as planned. Open receiving follow-ups:
-- Review "bin-check" tasks resolve manually today; a one-tap "run this
-  bin's audit" jump from the Review card is the natural next step.
+- ✅ SHIPPED 2026-08-07: Review "bin-check" cards now carry a one-tap
+  "run audit" jump — lands on the Audits tab with the bin loaded, and if
+  the newest C72 sweep is under 5 minutes old (the operator clearly just
+  walked the shelf) the audit runs itself; a stale sweep instead gets a
+  "walk-scan <bin>, then RUN" prompt naming the sweep's age. Fixing the
+  age math surfaced an app-wide bug: server timestamps are UTC but
+  unsuffixed, so new Date() read them as LOCAL and everything under 4 h
+  old displayed "just now" — all client-side timestamp parsing now goes
+  through tsDate() (assumes UTC when no zone is present).
 - The C72 item editor's change-bin flow is how held no-bin products get
   bins at the desk; a dedicated prompt at PRINT time could streamline it.
 - On-hand counts still only move via the bin audit's gated button
-  (standing decision holds); TC-Planner integration remains skipped
-  (Steve's TODO #2).
+  (standing decision holds).
+
+## ⚡ Bulk scan on the web Scan Station — ✅ DEPLOYED 2026-08-07
+
+Nick approved the preview; deployed same day. BULK chip lives beside
+auto-reset INSIDE the Scan RFID cell (auto-reset moved out of Settings);
+chip is disabled/gray unless auto-reset is on and defaults OFF per
+product. Tracks tags assigned vs labels printed this visit: exact →
+auto-reset, over → inline warning with UNDO THIS SWEEP (SKU-guarded,
+only the offending sweep; hover text points at History for more) and
+KEEP ALL (won't re-ask until the count grows). Sweeps write with one
+shared timestamp so History folds them into "N × RFID tag (sweep)"
+expandable rows (▸ show EPCs); undos fold the same way. Sweep assigns
+never steal: already-assigned tags are skipped and named. Server:
+POST /api/rfid-assignments/sweep + /sweep/undo. test_bulkscan (14).
+
+## 🔗 TC-Planner bridge — ✅ phase 1 (READ-ONLY) DEPLOYED 2026-08-07
+
+The RFID server now talks to TC-Planner (tc-planner-app, same resource
+group). STRICTLY read-only: it answers "is this SKU on an open purchase
+order, how many are still expected" — it never files receipts, never
+changes PO statuses, never emails vendors, never touches Shopify stock.
+
+- `app/planner.py`: Bearer-token client (PLANNER_URL + PLANNER_TOKEN app
+  settings; token unset = bridge off, all surfaces degrade silently).
+  Per-SKU answers cached 5 min; planner outages fail SOFT (ok=False,
+  still 200) because hints must never break a scan.
+- Endpoints: GET /api/planner/status, GET /api/planner/on-order/{sku}
+  (open-PO lines for that exact CI SKU with ordered/received/remaining).
+- UI: "📦 On order: N more expected — PO#935 Sky-Watcher (ETA …)" hint
+  on the Scan Station product card AND under the receiving-batch collect
+  result. Hidden when off/down/nothing-on-order. test_planner (8).
+- Verified against the LIVE planner: 45 open POs, 320 on-order SKUs;
+  prod smoke S11710 → 6 expected on PO#935.
+- Currently authenticated with the planner's shared token (shows as
+  "Unknown" in planner attribution). A dedicated RFID entry in
+  TC_PLANNER_USER_TOKENS is the right move before any phase 2 —
+  needs Nick/Steve (adding one restarts the planner app).
+- Found in passing (planner-side, NOT fixed): GET
+  /api/replenishment/summary 500s with "unsupported operand type(s)
+  for +=: 'float' and 'decimal.Decimal'". /api/refresh/status is idle
+  and PO detail's live Shopify bin fetch works, so the shpat token
+  itself looks healthy.
+
+**Phase 2 plan (NOT built — Nick/Steve to approve):** finishing a
+receiving batch offers an operator-confirmed "file against PO" step:
+match the batch's counted SKUs to open-PO lines, preview per PO, then
+POST /receive on confirm (planner-local only — its own Shopify write,
+apply-stock-update, stays untouched; our standing never-auto-write
+decision holds on both sides). Same offer from Scan Station sessions is
+possible once wanted. This is the on-ramp to Steve's TODO #2.
 
 ## 📥 Steve's TODO list (captured 2026-07-28, not yet designed)
 

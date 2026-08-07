@@ -252,6 +252,11 @@
           <div><dt>Tags on file</dt><dd id="p-tagcount">—</dd></div>
         </dl>
 
+        <!-- TC-Planner hint: this product sits on an open purchase order.
+             Read-only decoration — appears only when the planner bridge is
+             configured AND the SKU has units still expected. -->
+        <p class="planner-hint" id="planner-hint" hidden></p>
+
         <!-- Existing tags for this product -->
         <details class="tags" id="tags-panel" hidden>
           <summary class="tags__summary">Show tags</summary>
@@ -470,6 +475,9 @@
           <button class="reset" id="batch-abandon" type="button">Abandon</button>
         </div>
         <div class="result" id="batch-result" role="status" aria-live="polite"></div>
+        <!-- TC-Planner hint for receiving: the just-scanned product is on an
+             open purchase order. Read-only decoration, same as Scan Station's. -->
+        <p class="planner-hint" id="batch-planner-hint" hidden></p>
 
         <!-- Stage 1: collect -->
         <div id="bstage-collect" hidden>

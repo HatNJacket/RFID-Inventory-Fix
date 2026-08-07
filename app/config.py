@@ -57,6 +57,16 @@ SHOPIFY_WRITE_MODE = os.getenv(
     "SHOPIFY_WRITE_MODE", "scan_station_only"
 ).strip().lower()
 
+# Read-only bridge to TC-Planner (Steve's purchase-order app). The RFID
+# side only ever READS the PO ledger — "is this product on an open order,
+# how many are still expected" — never files receipts, changes statuses,
+# emails vendors, or pushes stock. Unset token = bridge off; every surface
+# that uses it degrades to "no planner info" instead of erroring.
+PLANNER_URL = os.getenv(
+    "PLANNER_URL", "https://tc-planner-app.azurewebsites.net"
+).rstrip("/")
+PLANNER_TOKEN = os.getenv("PLANNER_TOKEN")
+
 # Who can be picked in the UI's operator dropdown, comma-separated.
 OPERATORS = [
     name.strip()

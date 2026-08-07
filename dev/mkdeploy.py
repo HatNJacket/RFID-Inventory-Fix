@@ -33,6 +33,7 @@ FILES = [
     "app/database.py",
     "app/main.py",
     "app/models.py",
+    "app/planner.py",
     "app/shopify.py",
     "app/static/app.js",
     "app/static/styles.css",

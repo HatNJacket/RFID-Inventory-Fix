@@ -359,10 +359,20 @@ document
       document.getElementById("evcolor-overlay").hidden = true;
   });
 
+// Server timestamps are UTC but arrive with no timezone suffix, which
+// new Date() reads as LOCAL — every fresh event then sits "in the future"
+// for a whole UTC offset (Toronto: 4 h of "just now"). Parse them as the
+// UTC they are; strings that already carry a zone pass through untouched.
+function tsDate(iso) {
+  return new Date(
+    /[Zz]$|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z"
+  );
+}
+
 // "3 days ago" style timestamps for list surfaces (exact time in hover).
 function fmtAgo(iso) {
   if (!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
+  const ms = Date.now() - tsDate(iso).getTime();
   if (!Number.isFinite(ms)) return "—";
   const mins = Math.floor(ms / 60000);
   if (mins < 1) return "just now";
@@ -1418,6 +1428,46 @@ function showProduct(p) {
   el.productCard.hidden = false;
   el.printPanel.hidden = !printingEnabled;
   loadTags(p);
+  loadPlannerHint(p);
+}
+
+// --- TC-Planner on-order hint ----------------------------------------------
+// "This product is on an open purchase order — N more expected." Pure
+// decoration from the read-only planner bridge: it loads after the card,
+// never blocks a scan, and stays hidden when the bridge is off, the
+// planner is down, or nothing is on order. Shared by the Scan Station
+// product card and the receiving-batch collect result.
+const plannerHintSeqs = {};
+async function showPlannerHint(sku, elId) {
+  const hint = document.getElementById(elId);
+  hint.hidden = true;
+  if (!sku) return;
+  const seq = (plannerHintSeqs[elId] = (plannerHintSeqs[elId] || 0) + 1);
+  try {
+    const data = await apiJson(
+      `/api/planner/on-order/${encodeURIComponent(sku)}`
+    );
+    // A newer scan owns this surface now — drop the stale answer.
+    if (seq !== plannerHintSeqs[elId]) return;
+    if (!data.configured || !data.ok || !data.total_remaining) return;
+    const pos = data.orders
+      .map(
+        (o) =>
+          `PO#${o.reference_number} ${o.vendor} (${o.remaining} left` +
+          (o.expected_date ? `, ETA ${o.expected_date}` : "") +
+          `)`
+      )
+      .join(" · ");
+    hint.textContent =
+      `📦 On order: ${data.total_remaining} more expected — ${pos}`;
+    hint.hidden = false;
+  } catch (err) {
+    /* hint only — a failure just means no hint */
+  }
+}
+
+function loadPlannerHint(p) {
+  showPlannerHint(p && p.sku, "planner-hint");
 }
 
 // --- Tags on file for the scanned product ----------------------------------
@@ -1924,7 +1974,7 @@ function recentRow(a) {
   const li = document.createElement("li");
   li.dataset.rfid = a.rfid_id;
   const when = a.assigned_at
-    ? new Date(a.assigned_at).toLocaleString(undefined, {
+    ? tsDate(a.assigned_at).toLocaleString(undefined, {
         dateStyle: "medium",
         timeStyle: "short",
       })
@@ -2208,7 +2258,7 @@ function renderInventory() {
             'box — sweeps don\'t expect it to answer">⊘ no RFID</span>'
           : "");
       const when = p.last_assigned_at
-        ? new Date(p.last_assigned_at).toLocaleString(undefined, {
+        ? tsDate(p.last_assigned_at).toLocaleString(undefined, {
             dateStyle: "medium",
             timeStyle: "short",
           })
@@ -2330,7 +2380,7 @@ function escapeHtml(s) {
 
 function fmtWhen(iso) {
   return iso
-    ? new Date(iso).toLocaleString(undefined, {
+    ? tsDate(iso).toLocaleString(undefined, {
         dateStyle: "medium",
         timeStyle: "short",
       })
@@ -2766,7 +2816,7 @@ document.getElementById("batch-baseline").addEventListener("click", async () => 
     return;
   }
   const when = cap.created_at
-    ? new Date(cap.created_at).toLocaleTimeString()
+    ? tsDate(cap.created_at).toLocaleTimeString()
     : "?";
   if (
     !confirm(
@@ -3485,6 +3535,11 @@ bEl.scan.addEventListener("keydown", async (event) => {
         "ok"
       );
     }
+    // Receiving: say when the box in hand sits on an open PO. The hint
+    // clears on every scan so it always describes the LAST product.
+    document.getElementById("batch-planner-hint").hidden = true;
+    if (item.resolved && isReceivingBatch())
+      showPlannerHint(item.sku, "batch-planner-hint");
   } catch (err) {
     batchSound("err");
     setBatchResult(err.message, "err");
@@ -5770,11 +5825,21 @@ function renderReview() {
     // on its own line — the collapsed row keeps just the facts.
     const rec = /Recommend[^.]*\.\s*$/.exec(t.detail || "");
     const short = rec ? t.detail.slice(0, rec.index).trim() : t.detail;
+    // Bin checks carry their bin in the detail ("Bin K3-1: …") — that's
+    // enough to jump straight into the Audits tab with the bin loaded.
+    const checkBin =
+      t.category === "bin-check" && /^Bin\s+(.+?):/.exec(t.detail || "");
     li.innerHTML =
       `<div class="rv-row">
         ${evChip(t.category)}
         <span class="recent__prod"><b>${escapeHtml(t.product_title || t.sku || "")}</b> ${escapeHtml(short)}</span>
         <span class="recent__meta recent__when" title="${escapeHtml(fmtWhen(t.created_at))}">${escapeHtml(fmtAgo(t.created_at))}</span>
+        ${
+          checkBin
+            ? `<button class="rv-btn rv-btn--audit" data-act="audit" type="button"
+                 title="Open the Audits tab with ${escapeHtml(checkBin[1])} loaded — runs right away if a fresh C72 sweep is waiting">run audit</button>`
+            : ""
+        }
         <button class="rv-btn rv-btn--resolve" data-act="resolve" type="button">resolve</button>
         <button class="rv-btn rv-btn--dismiss" data-act="dismiss" type="button">dismiss</button>
         <span class="auditrow__chev">${open ? "▾" : "▸"}</span>
@@ -5838,6 +5903,9 @@ function renderReview() {
     };
     li.querySelector('[data-act="resolve"]').addEventListener("click", () => act(false));
     li.querySelector('[data-act="dismiss"]').addEventListener("click", () => act(true));
+    const auditBtn = li.querySelector('[data-act="audit"]');
+    if (auditBtn)
+      auditBtn.addEventListener("click", () => jumpToBinAudit(checkBin[1]));
     list.append(li);
   });
 }
@@ -5979,6 +6047,33 @@ function renderAuditBins() {
 // from History) and "Record as batch tagged" (local batch record only).
 let binAudit = null; // { rep, cap } — kept so toggles re-render for free
 let binAuditShowUntagged = false;
+
+// One-tap jump from a Review bin-check card: land on the Audits tab with
+// the bin loaded. If the newest C72 sweep is fresh the operator has
+// clearly just walked the shelf, so the audit runs itself; a stale sweep
+// would only produce a scary everything-is-missing report, so instead the
+// panel says what to go do.
+async function jumpToBinAudit(bin) {
+  document.querySelector('.tabs__tab[data-tab="audits"]').click();
+  const binEl = document.getElementById("binaudit-bin");
+  const out = document.getElementById("binaudit-report");
+  binEl.value = bin;
+  binEl.scrollIntoView({ behavior: "smooth", block: "center" });
+  try {
+    const cap = await apiJson("/api/epc-captures/latest");
+    const ageMs = Date.now() - tsDate(cap.created_at).getTime();
+    if (Number.isFinite(ageMs) && ageMs <= 5 * 60000) {
+      document.getElementById("binaudit-run").click();
+      return;
+    }
+    out.innerHTML = `<p class="result">Walk-scan ${escapeHtml(bin)} with the C72
+      (SWEEP → SEND), then hit RUN — the newest sweep on file is
+      ${escapeHtml(fmtAgo(cap.created_at))}.</p>`;
+  } catch (err) {
+    out.innerHTML = `<p class="result">Walk-scan ${escapeHtml(bin)} with the C72
+      (SWEEP → SEND), then hit RUN.</p>`;
+  }
+}
 
 document.getElementById("binaudit-run").addEventListener("click", async () => {
   const binEl = document.getElementById("binaudit-bin");
@@ -6528,7 +6623,7 @@ async function openProductHistory(term) {
     if (pk) {
       const who = pk.updated_by ? ` by ${pk.updated_by}` : "";
       const when = pk.updated_at
-        ? ` on ${new Date(pk.updated_at).toLocaleString()}`
+        ? ` on ${tsDate(pk.updated_at).toLocaleString()}`
         : "";
       kindBox.classList.toggle("kindrow--bundle", pk.kind === "bundle");
       document.getElementById("phist-kind-what").textContent = pk.excluded

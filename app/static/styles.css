@@ -890,6 +890,17 @@ body {
 }
 .binfix:hover { background: #f5e3c0; }
 .binfix:disabled { opacity: 0.55; cursor: default; }
+
+/* TC-Planner on-order hint (Scan Station card + receiving collect) */
+.planner-hint {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #1c4d8f;
+  background: #eaf2ff;
+  border: 1px solid #c7dcff;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
 .inventory__empty { color: var(--ink-dim); text-align: center; padding: 24px !important; }
 
 /* seven tabs need to scroll on narrow screens (iPad portrait) */
@@ -1451,6 +1462,7 @@ a { color: var(--accent); }
 .rv-btn:hover { filter: brightness(0.9); transform: translateY(-1px); }
 .rv-btn--resolve { background: var(--ok-bg); color: var(--ok-ink); }
 .rv-btn--dismiss { background: var(--bad-bg); color: var(--bad-ink); }
+.rv-btn--audit { background: var(--accent-bg, #dbe9ff); color: var(--accent-ink, #1c4d8f); }
 
 /* event colour editor rows */
 .evcolor-row {

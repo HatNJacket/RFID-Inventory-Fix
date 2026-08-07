@@ -233,5 +233,24 @@ _sh.fetch_all_variant_bins = lambda: []
 _sh.get_stock_info_by_skus = lambda skus: {}
 _sh.get_quantities_by_skus = lambda skus: {}
 
+# Fake TC-Planner bridge: NORMAL-1 sits on an open PO so the on-order
+# hint shows on both the Scan Station card and receiving collect.
+from app import planner as _pl  # noqa: E402
+_pl.health = lambda: {"configured": True, "ok": True,
+                      "service": "fake-planner", "identified_as": "RFID"}
+def _fake_on_order(sku):
+    base = {"configured": True, "ok": True, "sku": sku,
+            "total_remaining": 0, "orders": []}
+    if (sku or "").upper() == "NORMAL-1":
+        base["orders"] = [{
+            "order_id": 10, "reference_number": 935,
+            "vendor": "Sky-Watcher", "status": "partial_received",
+            "expected_date": "2026-09-04",
+            "ordered": 6, "received": 2, "remaining": 4,
+        }]
+        base["total_remaining"] = 4
+    return base
+_pl.on_order_for_sku = _fake_on_order
+
 import uvicorn  # noqa: E402
 uvicorn.run(app, host="127.0.0.1", port=8123)
