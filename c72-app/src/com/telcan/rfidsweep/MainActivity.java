@@ -2635,22 +2635,43 @@ public class MainActivity extends Activity {
         }
         if (scanning || sweepRunning || holdSweepRunning) return false;
         if (activeTab == TAB_LINK) return true;
+        // Batch PAIR: a held trigger runs the existing unlinked-tags
+        // rescue sweep for the selected product — the same one the arm
+        // button starts. Without a product selected there's nothing to
+        // sweep FOR, so the pull falls through to the normal single read
+        // (whose message says to scan a product barcode).
+        if (activeTab == TAB_BATCH && inBatch() && step == STEP_PAIR) {
+            return pairActive != null;
+        }
         // Station too — but an armed identify keeps its instant read.
         return activeTab == TAB_STATION && !identifyArmed;
+    }
+
+    private void applySweepPowerOverride() {
+        if (!prefs.getBoolean("sweep_pow_on", true)) return;
+        try {
+            holdSweepSavedPower = prefs.getInt("power", 5);
+            reader.setPower(prefs.getInt("sweep_pow", 1));
+        } catch (Exception ignored) {
+            holdSweepSavedPower = -1;
+        }
     }
 
     private void holdSweepStart() {
         holdSweepStarter = null;
         if (!readerReady || scanning || holdSweepRunning) return;
-        synchronized (tags) { tags.clear(); }
-        if (prefs.getBoolean("sweep_pow_on", true)) {
-            try {
-                holdSweepSavedPower = prefs.getInt("power", 5);
-                reader.setPower(prefs.getInt("sweep_pow", 1));
-            } catch (Exception ignored) {
-                holdSweepSavedPower = -1;
-            }
+        // Pair step: hand off to the batch's own held sweep (assigns
+        // unowned swept tags to the selected product), at the sweep
+        // power. Its keyUp path is stopHeldSweep, which restores power.
+        if (activeTab == TAB_BATCH && inBatch() && step == STEP_PAIR) {
+            if (pairActive == null) return;
+            applySweepPowerOverride();
+            startHeldSweep();
+            if (!sweepRunning) restoreHoldSweepPower();
+            return;
         }
+        synchronized (tags) { tags.clear(); }
+        applySweepPowerOverride();
         if (!reader.startInventoryTag()) {
             restoreHoldSweepPower();
             status.setText("Could not start the sweep.");
@@ -3823,6 +3844,9 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
         }
         scanning = false;
+        // No-op unless this sweep was started by hold-to-sweep with the
+        // power override on — then the operator's power comes back.
+        restoreHoldSweepPower();
         final BItem target = pairActive;
         final List<String> swept = new ArrayList<>();
         synchronized (tags) { swept.addAll(tags.keySet()); }
@@ -7583,8 +7607,9 @@ public class MainActivity extends Activity {
         final Switch swHold = mkToggle(prefs.getBoolean("sweep_hold", false));
         box.addView(toggleRow("Hold trigger to sweep",
                 "A quick pull reads one tag. Holding past the threshold "
-                + "sweeps until you let go, then sends the sweep to the "
-                + "PC. LINK and STATION tabs.", swHold));
+                + "sweeps until you let go. LINK and STATION send the "
+                + "sweep to the PC; the batch PAIR step assigns the swept "
+                + "unlinked tags to the selected product.", swHold));
 
         // Everything below greys out together when the master is off.
         final LinearLayout grp = new LinearLayout(this);
