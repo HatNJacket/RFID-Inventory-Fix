@@ -1,7 +1,33 @@
 # RFID Inventory System — Roadmap
 
 Source of truth for project status. Updated by Claude each working session.
-Last updated: 2026-08-07.
+Last updated: 2026-08-08.
+
+## 🔫 C72 v3.31 + Scan Station polish — ✅ DEPLOYED 2026-08-08
+
+C72 v3.31 (versionCode 49), design iterated with Nick over five widget
+previews before building:
+- **Hold-to-sweep** (⚙ → Trigger pulls, OFF by default): on LINK and
+  STATION, holding the trigger past a threshold turns the pull into a
+  sweep — release auto-sends it as an EPC capture (the thing bulk scan /
+  verify / bin audits pull), so LINK no longer needs SWEEP-tab round
+  trips. Quick pulls stay single reads but fire on RELEASE while the
+  mode is on (the known tradeoff, why it's a toggle). Armed identify on
+  STATION keeps its instant read; batch pair/verify sweeps untouched.
+- **Trigger pulls window**: threshold in ms (clamped 200–2000) + "Set
+  threshold with trigger pull" calibration (times a real pull);
+  "Sweep at its own power" toggle with the pick behind a button —
+  favourites picker (starred fav_powers pills + 1–30 slider, pills
+  sync to the slider only on release), default PWR 1 per Nick.
+- Everything under the master toggle greys out together when it's off.
+
+Scan Station same day (all Nick's asks): step 2 ("Scan RFID tag")
+hidden until a barcode loads a product; Labels input 52px/centered,
+digits-only (0–999, 3-digit cap, click selects all, spinners gone,
+resets to 1 per new barcode); "Live catalog" hover explains itself;
+header pills restyled Shopify-admin quiet (hairline badge + status
+dot; hover on "Shopify connected"); toggleable red "No bin set"
+warning beside Print & encode (⚙, ON by default, printer stations).
 
 ## 🔶 Current field-test round (C72 v3.27, installed from the terminal)
 

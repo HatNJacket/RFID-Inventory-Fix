@@ -296,6 +296,14 @@ public class MainActivity extends Activity {
     private boolean sweepArmed = false;
     private volatile boolean sweepRunning = false;
 
+    // Hold-to-sweep (Settings → Trigger pulls): on LINK/STATION a trigger
+    // held past the threshold becomes a capture sweep (sent like a SWEEP
+    // tab SEND on release); a quick pull stays a single read — fired on
+    // release, since the gun has to wait out the threshold to know.
+    private volatile boolean holdSweepRunning = false;
+    private Runnable holdSweepStarter = null;
+    private int holdSweepSavedPower = -1;
+
     private JSONObject stationProduct = null;
     private int stationTags = 0;
     private final ArrayDeque<String> stationHistory = new ArrayDeque<>();
@@ -2589,6 +2597,10 @@ public class MainActivity extends Activity {
                 if (sweepArmed && activeTab == TAB_BATCH
                         && inBatch() && step == STEP_PAIR) {
                     startHeldSweep();
+                } else if (holdSweepEligible()) {
+                    holdSweepStarter = this::holdSweepStart;
+                    ui.postDelayed(holdSweepStarter,
+                            prefs.getInt("sweep_hold_ms", 450));
                 } else {
                     onTrigger();
                 }
@@ -2601,10 +2613,103 @@ public class MainActivity extends Activity {
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
         if (isTriggerKey(keyCode)) {
-            if (sweepRunning) stopHeldSweep();
+            if (sweepRunning) {
+                stopHeldSweep();
+            } else if (holdSweepRunning) {
+                holdSweepStop();
+            } else if (holdSweepStarter != null) {
+                // Released before the threshold: a quick pull — cancel the
+                // pending sweep and run the normal single read now.
+                ui.removeCallbacks(holdSweepStarter);
+                holdSweepStarter = null;
+                onTrigger();
+            }
             return true;
         }
         return super.onKeyUp(keyCode, event);
+    }
+
+    private boolean holdSweepEligible() {
+        if (!prefs.getBoolean("sweep_hold", false) || !readerReady) {
+            return false;
+        }
+        if (scanning || sweepRunning || holdSweepRunning) return false;
+        if (activeTab == TAB_LINK) return true;
+        // Station too — but an armed identify keeps its instant read.
+        return activeTab == TAB_STATION && !identifyArmed;
+    }
+
+    private void holdSweepStart() {
+        holdSweepStarter = null;
+        if (!readerReady || scanning || holdSweepRunning) return;
+        synchronized (tags) { tags.clear(); }
+        if (prefs.getBoolean("sweep_pow_on", true)) {
+            try {
+                holdSweepSavedPower = prefs.getInt("power", 5);
+                reader.setPower(prefs.getInt("sweep_pow", 1));
+            } catch (Exception ignored) {
+                holdSweepSavedPower = -1;
+            }
+        }
+        if (!reader.startInventoryTag()) {
+            restoreHoldSweepPower();
+            status.setText("Could not start the sweep.");
+            return;
+        }
+        scanning = true;
+        holdSweepRunning = true;
+        beep(SOUND_OTHER);
+        status.setText("Sweeping… release the trigger to send.");
+    }
+
+    private void restoreHoldSweepPower() {
+        if (holdSweepSavedPower > 0) {
+            try {
+                reader.setPower(holdSweepSavedPower);
+            } catch (Exception ignored) {
+            }
+            holdSweepSavedPower = -1;
+        }
+    }
+
+    private void holdSweepStop() {
+        holdSweepRunning = false;
+        try {
+            reader.stopInventory();
+        } catch (Exception ignored) {
+        }
+        scanning = false;
+        restoreHoldSweepPower();
+        final List<String> swept = new ArrayList<>();
+        synchronized (tags) { swept.addAll(tags.keySet()); }
+        if (swept.isEmpty()) {
+            beep(SOUND_ERR);
+            status.setText("Swept nothing — hold longer, or raise the "
+                    + "sweep power (⚙ → Trigger pulls).");
+            return;
+        }
+        status.setText("Sending sweep (" + swept.size() + " tags)…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("device", prefs.getString("device", "C72"))
+                        .put("note", "hold-to-sweep")
+                        .put("epcs", new JSONArray(swept));
+                JSONObject resp = api("POST", "/api/epc-captures", body);
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    status.setText("Sweep #" + resp.optInt("id") + " sent ✓ "
+                            + "(" + swept.size() + " tags) — pull it on the "
+                            + "PC: bulk scan, verify, or a bin audit.");
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Sweep send FAILED: " + e.getMessage()
+                            + " — sweep again once Wi-Fi is back.");
+                });
+            }
+        }).start();
     }
 
     private void onTrigger() {
@@ -7309,6 +7414,50 @@ public class MainActivity extends Activity {
                 "Listens ~600 ms and pairs the strongest answer. "
                 + "Off: the first tag heard wins.", swStrong));
 
+        // Trigger pulls card — hold-to-sweep lives one tap deeper, like
+        // Connection, so the everyday screen stays short.
+        LinearLayout trig = new LinearLayout(this);
+        trig.setOrientation(LinearLayout.HORIZONTAL);
+        trig.setGravity(Gravity.CENTER_VERTICAL);
+        trig.setBackground(btnBg(Color.WHITE, C_LINE, C_PRESS, 8));
+        trig.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout tt = new LinearLayout(this);
+        tt.setOrientation(LinearLayout.VERTICAL);
+        TextView tTitle = new TextView(this);
+        tTitle.setText("Trigger pulls");
+        tTitle.setTextSize(14);
+        tTitle.setTextColor(C_TEXT);
+        tTitle.setTypeface(null, Typeface.BOLD);
+        tt.addView(tTitle);
+        final TextView tSum = new TextView(this);
+        tSum.setTextSize(11);
+        tSum.setTextColor(C_MUTED);
+        tt.addView(tSum);
+        final Runnable refreshTrig = () -> tSum.setText(
+                prefs.getBoolean("sweep_hold", false)
+                        ? "hold to sweep ON · "
+                          + prefs.getInt("sweep_hold_ms", 450) + " ms"
+                          + (prefs.getBoolean("sweep_pow_on", true)
+                              ? " · sweeps at PWR "
+                                + prefs.getInt("sweep_pow", 1)
+                              : "")
+                        : "hold to sweep off");
+        refreshTrig.run();
+        trig.addView(tt, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        TextView tArrow = new TextView(this);
+        tArrow.setText("›");
+        tArrow.setTextSize(22);
+        tArrow.setTextColor(C_MUTED);
+        trig.addView(tArrow);
+        LinearLayout.LayoutParams trigLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        trigLp.topMargin = dp(8);
+        trig.setLayoutParams(trigLp);
+        trig.setOnClickListener(v -> showTriggerPullSettings(refreshTrig));
+        box.addView(trig);
+
         box.addView(sectionLabel("VISIBLE TABS · BATCH ALWAYS SHOWS"));
         final Switch swStation =
                 mkToggle(prefs.getBoolean("tab_station", true));
@@ -7343,6 +7492,305 @@ public class MainActivity extends Activity {
                             : "Settings saved ✓");
                 })
                 .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Recursively enable/disable a settings group — the grey-out for
+     *  everything living under the hold-to-sweep master toggle. */
+    private void setEnabledDeep(View v, boolean enabled) {
+        v.setEnabled(enabled);
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                setEnabledDeep(g.getChildAt(i), enabled);
+            }
+        }
+    }
+
+    private String sweepPowLabel() {
+        int p = prefs.getInt("sweep_pow", 1);
+        String name = favMap().get(p);
+        if (name == null) return "PWR " + p;
+        return "★ " + p + (name.isEmpty() ? "" : " · " + name);
+    }
+
+    /** The Trigger pulls window (design approved from the widget preview,
+     *  2026-08-08): master hold-to-sweep switch; threshold in ms with a
+     *  pull-the-trigger calibration; sweep power behind a button that
+     *  opens the favourites picker. */
+    private void showTriggerPullSettings(Runnable onSaved) {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        box.setPadding(pad, pad, pad, 0);
+        scroll.addView(box);
+
+        final Switch swHold = mkToggle(prefs.getBoolean("sweep_hold", false));
+        box.addView(toggleRow("Hold trigger to sweep",
+                "A quick pull reads one tag. Holding past the threshold "
+                + "sweeps until you let go, then sends the sweep to the "
+                + "PC. LINK and STATION tabs.", swHold));
+
+        // Everything below greys out together when the master is off.
+        final LinearLayout grp = new LinearLayout(this);
+        grp.setOrientation(LinearLayout.VERTICAL);
+        box.addView(grp);
+
+        LinearLayout thRow = new LinearLayout(this);
+        thRow.setOrientation(LinearLayout.HORIZONTAL);
+        thRow.setGravity(Gravity.CENTER_VERTICAL);
+        thRow.setPadding(0, dp(7), 0, dp(2));
+        TextView thLabel = new TextView(this);
+        thLabel.setText("Sweep threshold");
+        thLabel.setTextSize(14);
+        thLabel.setTextColor(C_TEXT);
+        thRow.addView(thLabel, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        final EditText msIn = new EditText(this);
+        msIn.setInputType(InputType.TYPE_CLASS_NUMBER);
+        msIn.setText(String.valueOf(prefs.getInt("sweep_hold_ms", 450)));
+        msIn.setEms(3);
+        msIn.setGravity(Gravity.CENTER);
+        thRow.addView(msIn);
+        TextView msUnit = new TextView(this);
+        msUnit.setText(" ms");
+        msUnit.setTextSize(12);
+        msUnit.setTextColor(C_MUTED);
+        thRow.addView(msUnit);
+        grp.addView(thRow);
+
+        Button calib = smallBtn("Set threshold with trigger pull");
+        calib.setOnClickListener(v -> showThresholdCalibration(msIn));
+        grp.addView(calib);
+        TextView calHint = new TextView(this);
+        calHint.setText("Pull and hold the gun's trigger for the feel you "
+                + "want — your hold time becomes the threshold.");
+        calHint.setTextSize(11);
+        calHint.setTextColor(C_MUTED);
+        calHint.setPadding(dp(4), dp(2), dp(4), dp(6));
+        grp.addView(calHint);
+
+        // Sweep power: label+description left; toggle with the picker
+        // button underneath on the right (the approved layout).
+        LinearLayout powRow = new LinearLayout(this);
+        powRow.setOrientation(LinearLayout.HORIZONTAL);
+        powRow.setPadding(0, dp(7), 0, dp(7));
+        LinearLayout powTxt = new LinearLayout(this);
+        powTxt.setOrientation(LinearLayout.VERTICAL);
+        TextView powLabel = new TextView(this);
+        powLabel.setText("Sweep at its own power");
+        powLabel.setTextSize(14);
+        powLabel.setTextColor(C_TEXT);
+        powTxt.addView(powLabel);
+        TextView powSub = new TextView(this);
+        powSub.setText("Held sweeps drop to this power, then your normal "
+                + "power comes right back.");
+        powSub.setTextSize(11);
+        powSub.setTextColor(C_MUTED);
+        powTxt.addView(powSub);
+        powRow.addView(powTxt, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout powRight = new LinearLayout(this);
+        powRight.setOrientation(LinearLayout.VERTICAL);
+        powRight.setGravity(Gravity.END);
+        final Switch swPow =
+                mkToggle(prefs.getBoolean("sweep_pow_on", true));
+        powRight.addView(swPow);
+        final Button powBtn = smallBtn(sweepPowLabel());
+        powBtn.setBackground(btnBg(C_SOFT, C_SOFT_DK, C_SOFT_DK, 999));
+        powBtn.setTextColor(C_BLUE);
+        LinearLayout.LayoutParams pbLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        pbLp.topMargin = dp(6);
+        powBtn.setLayoutParams(pbLp);
+        powBtn.setOnClickListener(v -> showSweepPowerPicker(powBtn));
+        powRight.addView(powBtn);
+        powRow.addView(powRight);
+        grp.addView(powRow);
+
+        final Runnable grey = () -> {
+            boolean on = swHold.isChecked();
+            setEnabledDeep(grp, on);
+            grp.setAlpha(on ? 1f : 0.35f);
+            boolean pow = on && swPow.isChecked();
+            powBtn.setEnabled(pow);
+            powBtn.setAlpha(swPow.isChecked() ? 1f : 0.35f);
+        };
+        swHold.setOnCheckedChangeListener((b, c) -> grey.run());
+        swPow.setOnCheckedChangeListener((b, c) -> grey.run());
+        grey.run();
+
+        new AlertDialog.Builder(this)
+                .setTitle("Trigger pulls")
+                .setView(scroll)
+                .setPositiveButton("Save", (d, w) -> {
+                    int ms = prefs.getInt("sweep_hold_ms", 450);
+                    try {
+                        ms = Integer.parseInt(msIn.getText().toString().trim());
+                    } catch (Exception ignored) {
+                    }
+                    ms = Math.max(200, Math.min(2000, ms));
+                    prefs.edit()
+                            .putBoolean("sweep_hold", swHold.isChecked())
+                            .putInt("sweep_hold_ms", ms)
+                            .putBoolean("sweep_pow_on", swPow.isChecked())
+                            .apply();
+                    if (onSaved != null) onSaved.run();
+                    status.setText("Trigger pulls saved ✓"
+                            + (swHold.isChecked()
+                                ? " — hold " + ms + " ms to sweep."
+                                : ""));
+                })
+                .setNegativeButton("Back", null)
+                .show();
+    }
+
+    /** Time a real trigger pull and make its duration the threshold. */
+    private void showThresholdCalibration(final EditText msIn) {
+        final TextView msg = new TextView(this);
+        msg.setText("Pull and hold the gun's trigger for the feel you "
+                + "want.\n\nRelease to set the threshold.");
+        msg.setTextSize(14);
+        msg.setTextColor(C_TEXT);
+        msg.setPadding(dp(20), dp(16), dp(20), dp(8));
+        final long[] downAt = {0};
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("Set threshold with trigger pull")
+                .setView(msg)
+                .setNegativeButton("Cancel", null)
+                .create();
+        dlg.setOnKeyListener((d, keyCode, event) -> {
+            if (!isTriggerKey(keyCode)) return false;
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (event.getRepeatCount() == 0) {
+                    downAt[0] = System.currentTimeMillis();
+                    msg.setText("Holding…");
+                }
+                return true;
+            }
+            if (event.getAction() == KeyEvent.ACTION_UP && downAt[0] > 0) {
+                long held = System.currentTimeMillis() - downAt[0];
+                long set = Math.max(200, Math.min(2000, held));
+                msIn.setText(String.valueOf(set));
+                Toast.makeText(this, "Held " + held + " ms — threshold "
+                        + (set == held ? "set." : "set to " + set
+                          + " (kept between 200 and 2000)."),
+                        Toast.LENGTH_LONG).show();
+                d.dismiss();
+                return true;
+            }
+            return false;
+        });
+        dlg.show();
+    }
+
+    /** Sweep power picker: the operator's starred favourites as pills,
+     *  plus a 1–30 slider for anything else. Tapping a pill snaps the
+     *  slider; releasing the slider on a favourite lights its pill. */
+    private void showSweepPowerPicker(final Button opener) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        box.setPadding(pad, pad, pad, 0);
+        TextView sub = new TextView(this);
+        sub.setText("Your starred favourites, or any value.");
+        sub.setTextSize(11);
+        sub.setTextColor(C_MUTED);
+        sub.setPadding(0, 0, 0, dp(8));
+        box.addView(sub);
+
+        final java.util.TreeMap<Integer, String> favs = favMap();
+        final java.util.HashMap<Integer, Button> pills =
+                new java.util.HashMap<>();
+        final int[] sel = {prefs.getInt("sweep_pow", 1)};
+
+        final Runnable paint = () -> {
+            for (java.util.Map.Entry<Integer, Button> e : pills.entrySet()) {
+                boolean hit = e.getKey() == sel[0];
+                e.getValue().setBackground(hit
+                        ? btnBg(C_BLUE, C_BLUE, C_BLUE_DK, 999)
+                        : btnBg(Color.WHITE, C_LINE, C_PRESS, 999));
+                e.getValue().setTextColor(hit ? Color.WHITE : C_TEXT);
+            }
+        };
+
+        final TextView num = new TextView(this);
+        final SeekBar bar = new SeekBar(this);
+
+        LinearLayout row = null;
+        int i = 0;
+        for (java.util.Map.Entry<Integer, String> e : favs.entrySet()) {
+            if (i % 2 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_HORIZONTAL);
+                box.addView(row);
+            }
+            final int val = e.getKey();
+            Button pill = smallBtn("★ " + val
+                    + (e.getValue().isEmpty() ? "" : " · " + e.getValue()));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+            pill.setLayoutParams(lp);
+            pill.setOnClickListener(v -> {
+                sel[0] = val;
+                bar.setProgress(val - 1);
+                num.setText(String.valueOf(val));
+                paint.run();
+            });
+            pills.put(val, pill);
+            row.addView(pill);
+            i++;
+        }
+
+        LinearLayout barRow = new LinearLayout(this);
+        barRow.setOrientation(LinearLayout.HORIZONTAL);
+        barRow.setGravity(Gravity.CENTER_VERTICAL);
+        barRow.setPadding(0, dp(10), 0, dp(4));
+        TextView barLabel = new TextView(this);
+        barLabel.setText("Power ");
+        barLabel.setTextSize(12);
+        barLabel.setTextColor(C_MUTED);
+        barRow.addView(barLabel);
+        bar.setMax(29);
+        bar.setProgress(sel[0] - 1);
+        barRow.addView(bar, new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        num.setText(String.valueOf(sel[0]));
+        num.setTextSize(15);
+        num.setTextColor(C_TEXT);
+        num.setTypeface(null, Typeface.BOLD);
+        num.setPadding(dp(8), 0, 0, 0);
+        barRow.addView(num);
+        box.addView(barRow);
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean user) {
+                // Live number while dragging; pills wait for the release.
+                num.setText(String.valueOf(p + 1));
+            }
+            @Override
+            public void onStartTrackingTouch(SeekBar s) { }
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+                sel[0] = s.getProgress() + 1;
+                paint.run();
+            }
+        });
+        paint.run();
+
+        new AlertDialog.Builder(this)
+                .setTitle("Sweep power")
+                .setView(box)
+                .setPositiveButton("Done", (d, w) -> {
+                    prefs.edit().putInt("sweep_pow", sel[0]).apply();
+                    opener.setText(sweepPowLabel());
+                })
+                .setNegativeButton("Back", null)
                 .show();
     }
 

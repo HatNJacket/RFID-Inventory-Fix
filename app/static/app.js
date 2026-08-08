@@ -1562,7 +1562,7 @@ el.printQty.addEventListener("keydown", (ev) => {
   if (["e", "E", "+", "-", "."].includes(ev.key)) ev.preventDefault();
 });
 el.printQty.addEventListener("input", () => {
-  const digits = el.printQty.value.replace(/\D/g, "");
+  const digits = el.printQty.value.replace(/\D/g, "").slice(0, 3);
   if (el.printQty.value !== digits) el.printQty.value = digits;
 });
 
