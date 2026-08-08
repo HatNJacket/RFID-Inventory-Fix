@@ -5166,6 +5166,10 @@ public class MainActivity extends Activity {
                     updateBatchCard();
                     refreshBatchList();
                     maybePriorTagAlert(item, true);
+                    if (receivingBatch && item.resolved
+                            && item.sku != null && !item.sku.isEmpty()) {
+                        fetchPlannerHint(item);
+                    }
                     btInput.requestFocus();
                 });
             } catch (Exception e) {
@@ -5174,6 +5178,48 @@ public class MainActivity extends Activity {
                     status.setText("Scan failed: " + e.getMessage());
                     btInput.requestFocus();
                 });
+            }
+        }).start();
+    }
+
+    // Receiving: ask the server's read-only TC-Planner bridge whether the
+    // box in hand sits on an open purchase order, and append the answer to
+    // the status line. Decoration only — any failure (bridge off, planner
+    // down, nothing on order) is silence, and a scan of a different
+    // product in the meantime drops the stale answer.
+    private void fetchPlannerHint(final BItem item) {
+        new Thread(() -> {
+            try {
+                JSONObject r = api("GET", "/api/planner/on-order/"
+                        + URLEncoder.encode(item.sku, "UTF-8")
+                        + "?operator=" + URLEncoder.encode(
+                                prefs.getString("device", "C72"), "UTF-8"),
+                        null);
+                final int remaining = r.optInt("total_remaining", 0);
+                if (!r.optBoolean("ok") || remaining <= 0) return;
+                JSONArray orders = r.optJSONArray("orders");
+                StringBuilder pos = new StringBuilder();
+                if (orders != null) {
+                    for (int i = 0; i < orders.length(); i++) {
+                        JSONObject o = orders.getJSONObject(i);
+                        if (pos.length() > 0) pos.append(" · ");
+                        pos.append("PO#").append(o.opt("reference_number"))
+                           .append(" ").append(o.optString("vendor", ""));
+                        String eta = o.optString("expected_date", "");
+                        if (!eta.isEmpty() && !"null".equals(eta)) {
+                            pos.append(" ETA ").append(eta);
+                        }
+                    }
+                }
+                final String note = "📦 On order: " + remaining
+                        + " more expected — " + pos;
+                ui.post(() -> {
+                    if (previewItem == item) {
+                        status.setText(status.getText() + "\n" + note);
+                    }
+                });
+            } catch (Exception ignored) {
+                // hint only — never bother the operator about it
             }
         }).start();
     }

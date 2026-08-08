@@ -35,25 +35,38 @@ def configured() -> bool:
     return bool(config.PLANNER_TOKEN)
 
 
-def _get(path: str, params: dict | None = None) -> dict:
+def token_for(operator: str | None) -> str | None:
+    """The planner token to speak with: the operator's own (so the
+    planner attributes the call to the person picked in "Who's
+    scanning?"), falling back to the app's dedicated RFID token."""
+    if operator:
+        personal = config.PLANNER_USER_TOKENS.get(operator.strip().lower())
+        if personal:
+            return personal
+    return config.PLANNER_TOKEN
+
+
+def _get(path: str, params: dict | None = None,
+         operator: str | None = None) -> dict:
     response = requests.get(
         f"{config.PLANNER_URL}{path}",
         params=params,
-        headers={"Authorization": f"Bearer {config.PLANNER_TOKEN}"},
+        headers={"Authorization": f"Bearer {token_for(operator)}"},
         timeout=_TIMEOUT,
     )
     response.raise_for_status()
     return response.json()
 
 
-def health() -> dict:
+def health(operator: str | None = None) -> dict:
     """Connectivity probe. /api/health is unauthenticated; whoami proves
-    the token works too. Never raises — returns ok/error."""
+    the token works too — and names who the planner thinks is calling,
+    which is how attribution gets sanity-checked. Never raises."""
     if not configured():
         return {"configured": False, "ok": False}
     try:
         h = _get("/api/health")
-        who = _get("/api/auth/whoami")
+        who = _get("/api/auth/whoami", operator=operator)
         return {
             "configured": True,
             "ok": h.get("status") == "ok",
@@ -64,7 +77,7 @@ def health() -> dict:
         return {"configured": True, "ok": False, "error": str(exc)[:200]}
 
 
-def on_order_for_sku(sku: str) -> dict:
+def on_order_for_sku(sku: str, operator: str | None = None) -> dict:
     """Every open-PO line for this SKU with units still expected.
 
     Answer shape (also on failure — hint surfaces fail soft):
@@ -82,10 +95,12 @@ def on_order_for_sku(sku: str) -> dict:
         return hit[1]
     try:
         found = _get("/api/stock-orders",
-                     params={"status": "open", "search": sku.strip()})
+                     params={"status": "open", "search": sku.strip()},
+                     operator=operator)
         orders = []
         for summary in (found.get("orders") or [])[:_MAX_DETAIL_FETCHES]:
-            detail = _get(f"/api/stock-orders/{summary['id']}")
+            detail = _get(f"/api/stock-orders/{summary['id']}",
+                          operator=operator)
             for item in detail.get("items") or []:
                 if (item.get("sku") or "").strip().upper() != key:
                     continue

@@ -6107,15 +6107,18 @@ def get_capture(capture_id: int, session: Session = Depends(get_session)):
 
 
 @app.get("/api/planner/status", dependencies=[Depends(require_user)])
-def planner_status():
-    return planner.health()
+def planner_status(operator: str | None = None):
+    # `operator` rides the "Who's scanning?" pick: with a matching entry
+    # in PLANNER_USER_TOKENS the planner sees THAT person, otherwise the
+    # dedicated RFID identity — status echoes who it resolved to.
+    return planner.health(operator=operator)
 
 
 @app.get("/api/planner/on-order/{sku}", dependencies=[Depends(require_user)])
-def planner_on_order(sku: str):
+def planner_on_order(sku: str, operator: str | None = None):
     # Always 200: planner hints are decoration on the scan flow, so an
     # outage answers ok=False instead of failing the caller.
-    return planner.on_order_for_sku(sku)
+    return planner.on_order_for_sku(sku, operator=operator)
 
 
 # ------------------------------------------------------------ label names ---

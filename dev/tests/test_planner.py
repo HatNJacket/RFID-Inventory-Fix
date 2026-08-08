@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 os.environ["SHOPIFY_STORE"]="t.myshopify.com"; os.environ["SHOPIFY_CLIENT_ID"]="x"
 os.environ["SHOPIFY_CLIENT_SECRET"]="x"
 os.environ["PLANNER_TOKEN"]="test-token"
+os.environ["PLANNER_USER_TOKENS"]="Nick:tok-nick, Steve:tok-steve"
 os.environ.pop("STATION_KEY", None); os.environ.pop("PRINT_AGENT_KEY", None)
 db = os.path.join(tempfile.gettempdir(), "rfid_planner_test.db")
 if os.path.exists(db): os.remove(db)
@@ -42,17 +43,21 @@ DETAILS = {
          "items": [{"sku": "ZWO-X", "ordered_qty": 2, "received_qty": 0}]},
 }
 calls = []
+tokens_seen = []
 
 class FakeResponse:
     def __init__(self, data): self.data = data
     def raise_for_status(self): pass
     def json(self): return self.data
 
+VALID = {"Bearer test-token", "Bearer tok-nick", "Bearer tok-steve"}
+
 def fake_get(url, params=None, headers=None, timeout=None):
     calls.append(url)
-    check_auth = headers and headers.get("Authorization") == "Bearer test-token"
-    if not check_auth:
-        raise AssertionError("missing bearer token")
+    auth = (headers or {}).get("Authorization")
+    tokens_seen.append(auth)
+    if auth not in VALID:
+        raise AssertionError("missing/unknown bearer token: " + repr(auth))
     if url.endswith("/api/health"):
         return FakeResponse({"status": "ok", "service": "tc-inventory-planner"})
     if url.endswith("/api/auth/whoami"):
@@ -88,6 +93,24 @@ with TestClient(app) as cl:
         cl.get("/api/planner/on-order/s11710")
         check("repeat scans answer from cache (no new planner calls)",
               len(calls) == before, calls[before:])
+
+        # Attribution: the operator pick rides to the planner as THEIR
+        # token; unknown names (and no name) fall back to the RFID token.
+        planner._cache.clear()
+        n = len(tokens_seen)
+        cl.get("/api/planner/on-order/S11710", params={"operator": "nick"})
+        check("a known operator's calls carry their own planner token",
+              set(tokens_seen[n:]) == {"Bearer tok-nick"}, tokens_seen[n:])
+        planner._cache.clear()
+        n = len(tokens_seen)
+        cl.get("/api/planner/on-order/S11710", params={"operator": "Matt"})
+        check("an unmapped operator falls back to the RFID token",
+              set(tokens_seen[n:]) == {"Bearer test-token"}, tokens_seen[n:])
+        n = len(tokens_seen)
+        r = cl.get("/api/planner/status", params={"operator": "Steve"})
+        check("status carries the operator's token to whoami",
+              r.status_code == 200 and "Bearer tok-steve" in tokens_seen[n:],
+              tokens_seen[n:])
 
     with patch("app.planner.requests.get",
                side_effect=RuntimeError("planner down")):

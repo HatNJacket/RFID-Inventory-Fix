@@ -1444,8 +1444,13 @@ async function showPlannerHint(sku, elId) {
   if (!sku) return;
   const seq = (plannerHintSeqs[elId] = (plannerHintSeqs[elId] || 0) + 1);
   try {
+    // The operator pick rides along so the planner attributes the call
+    // to the person scanning (their own planner token, when one exists).
+    const op = operatorEl.value
+      ? `?operator=${encodeURIComponent(operatorEl.value)}`
+      : "";
     const data = await apiJson(
-      `/api/planner/on-order/${encodeURIComponent(sku)}`
+      `/api/planner/on-order/${encodeURIComponent(sku)}${op}`
     );
     // A newer scan owns this surface now — drop the stale answer.
     if (seq !== plannerHintSeqs[elId]) return;

@@ -67,6 +67,22 @@ PLANNER_URL = os.getenv(
 ).rstrip("/")
 PLANNER_TOKEN = os.getenv("PLANNER_TOKEN")
 
+# Per-operator planner tokens, "Name:token,Name:token" — the same format
+# (and the same tokens) as the planner's own TC_PLANNER_USER_TOKENS.
+# When the "Who's scanning?" operator has an entry here, planner calls
+# carry THEIR token so the planner attributes the action to the person;
+# anyone else rides the dedicated RFID token above.
+def _parse_user_tokens(raw: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for pair in (raw or "").split(","):
+        name, _, tok = pair.strip().partition(":")
+        if name.strip() and tok.strip():
+            mapping[name.strip().lower()] = tok.strip()
+    return mapping
+
+
+PLANNER_USER_TOKENS = _parse_user_tokens(os.getenv("PLANNER_USER_TOKENS", ""))
+
 # Who can be picked in the UI's operator dropdown, comma-separated.
 OPERATORS = [
     name.strip()

@@ -236,9 +236,10 @@ _sh.get_quantities_by_skus = lambda skus: {}
 # Fake TC-Planner bridge: NORMAL-1 sits on an open PO so the on-order
 # hint shows on both the Scan Station card and receiving collect.
 from app import planner as _pl  # noqa: E402
-_pl.health = lambda: {"configured": True, "ok": True,
-                      "service": "fake-planner", "identified_as": "RFID"}
-def _fake_on_order(sku):
+_pl.health = lambda operator=None: {
+    "configured": True, "ok": True,
+    "service": "fake-planner", "identified_as": operator or "RFID"}
+def _fake_on_order(sku, operator=None):
     base = {"configured": True, "ok": True, "sku": sku,
             "total_remaining": 0, "orders": []}
     if (sku or "").upper() == "NORMAL-1":

@@ -313,15 +313,29 @@ changes PO statuses, never emails vendors, never touches Shopify stock.
   result. Hidden when off/down/nothing-on-order. test_planner (8).
 - Verified against the LIVE planner: 45 open POs, 320 on-order SKUs;
   prod smoke S11710 → 6 expected on PO#935.
-- Currently authenticated with the planner's shared token (shows as
-  "Unknown" in planner attribution). A dedicated RFID entry in
-  TC_PLANNER_USER_TOKENS is the right move before any phase 2 —
-  needs Nick/Steve (adding one restarts the planner app).
+- ✅ Attribution (2026-08-08, Nick's call): the planner now has a
+  dedicated `RFID` entry in TC_PLANNER_USER_TOKENS, and the RFID app
+  carries PLANNER_USER_TOKENS (same name:token pairs as the planner's
+  own). Planner calls ride the "Who's scanning?" operator's PERSONAL
+  token when one exists (planner whoami answers "Nick"/"Steve"/…),
+  falling back to the RFID identity. Verified live in prod. The C72
+  (v3.30) shows the on-order hint during receiving collect too —
+  appended to the status line after the count, attributed by the gun's
+  device name; Nick: "display it for now and we'll see."
 - Found in passing (planner-side, NOT fixed): GET
   /api/replenishment/summary 500s with "unsupported operand type(s)
   for +=: 'float' and 'decimal.Decimal'". /api/refresh/status is idle
   and PO detail's live Shopify bin fetch works, so the shpat token
   itself looks healthy.
+- The shpat story per Nick (2026-08-08): the real complaint was that
+  planner-made Shopify inventory adjustments weren't attributed to the
+  planner in Shopify's adjustment history. Code inspection: the
+  planner's adjust_inventory sends reason="received" and nothing else —
+  attribution in Shopify admin comes from the NAME of the custom app
+  that owns the shpat token, so any fix happened in Shopify admin (app
+  rename), not in the repo (which has no history — 2 commits total).
+  Improvement candidate for phase 2: pass referenceDocumentUri (a PO
+  link) on inventoryAdjustQuantities so each adjustment names its PO.
 
 **Phase 2 plan (NOT built — Nick/Steve to approve):** finishing a
 receiving batch offers an operator-confirmed "file against PO" step:
