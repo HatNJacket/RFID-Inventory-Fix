@@ -239,6 +239,11 @@ with patch("app.shopify.lookup_barcode", side_effect=look), \
           bins_todo)
     check("the parent's bin counts as done", "D2-2" not in bins_todo
           and ov["done_bins"]==1, (bins_todo, ov["done_bins"]))
+    done_row = next((b for b in ov.get("done", [])
+                     if b["bin"]=="D2-2"), None)
+    check("overview lists the done bin itself (Show done board toggle)",
+          done_row is not None and done_row["batch_id"]==bid2
+          and done_row["completed_at"], ov.get("done"))
     rec = {r_["batch_id"]: r_ for r_ in ov["recent"]}
     check("recently-done labels the side trip",
           rec[trip["id"]]["side_trip"] is True

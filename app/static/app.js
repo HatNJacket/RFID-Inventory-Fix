@@ -2593,6 +2593,7 @@ async function loadBinBoard() {
 }
 
 let showHiddenBins = false;
+let showDoneBins = false;
 // Odd-named bins (not the usual "B19-2" shape) are a known backlog — 76 of
 // them last count — and they crowd out the bins actually worth working.
 // Remembered, because someone clearing normal bins wants them gone every
@@ -2671,6 +2672,16 @@ function renderBinBoard() {
     : `${ICON_EYE}<span>Show hidden${
         binBoard.hidden_count ? ` (${binBoard.hidden_count})` : ""
       }</span>`;
+  // Bins already batch tagged, on request — the full record, not just
+  // the 8 in Recently done.
+  const doneRows = showDoneBins
+    ? (binBoard.done || []).filter(
+        (b) => !q || b.bin.toLowerCase().includes(q)
+      )
+    : [];
+  document.getElementById("binboard-showdone").textContent = showDoneBins
+    ? "Hide done"
+    : `Show done${binBoard.done_bins ? ` (${binBoard.done_bins})` : ""}`;
   const oddBtn = document.getElementById("binboard-oddfilter");
   oddBtn.innerHTML = hideOddBins
     ? `${ICON_EYE}<span>Show odd names${oddInList ? ` (${oddInList})` : ""}</span>`
@@ -2680,7 +2691,7 @@ function renderBinBoard() {
   // Nothing to offer when every bin is well named.
   oddBtn.hidden = !oddInList && !hideOddBins;
   list.innerHTML = "";
-  if (!rows.length) {
+  if (!rows.length && !doneRows.length) {
     list.innerHTML = `<li class="recent__empty">${
       q
         ? "No bins match that."
@@ -2799,10 +2810,34 @@ function renderBinBoard() {
     );
     list.append(li);
   });
+  doneRows.forEach((b) => {
+    const li = document.createElement("li");
+    li.classList.add("binlist--done");
+    li.innerHTML =
+      `<span class="binlist__check">✓</span>` +
+      `<span class="binlist__name">${escapeHtml(b.bin)}</span>` +
+      `<span class="binlist__count">${b.products} product(s) · done ` +
+      `${escapeHtml(fmtAgo(b.completed_at))}${
+        b.by ? ` · ${escapeHtml(b.by)}` : ""
+      }</span>`;
+    li.title = `Batch #${b.batch_id} finished ${fmtWhen(b.completed_at)}`;
+    // Same affordance as to-do names: click fills the bin box, so a
+    // re-walk of a done shelf is one click + Start batch away.
+    li.querySelector(".binlist__name").addEventListener("click", () => {
+      bEl.bin.value = b.bin;
+      bEl.bin.focus();
+    });
+    list.append(li);
+  });
 }
 
 document.getElementById("binboard-showhidden").addEventListener("click", () => {
   showHiddenBins = !showHiddenBins;
+  renderBinBoard();
+});
+
+document.getElementById("binboard-showdone").addEventListener("click", () => {
+  showDoneBins = !showDoneBins;
   renderBinBoard();
 });
 

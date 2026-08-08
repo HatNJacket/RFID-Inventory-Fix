@@ -1330,6 +1330,12 @@ a { color: var(--accent); }
 .binlist__go:hover { border-color: var(--accent); color: var(--accent); }
 .binlist li.binlist--open { background: var(--accent-soft); }
 .binlist li.binlist--hidden { opacity: 0.55; }
+/* Already-done bins ("Show done"): quiet rows with a green check */
+.binlist li.binlist--done { opacity: 0.7; }
+.binlist__check { color: var(--ok-ink); font-weight: 700; flex: none; }
+@media (prefers-color-scheme: light) {
+  .binlist__check { color: #0c7a43; }
+}
 .binlist__eye {
   flex: none;
   display: inline-flex;

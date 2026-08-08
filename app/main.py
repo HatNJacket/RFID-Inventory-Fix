@@ -2408,6 +2408,7 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
     }
 
     todo = []
+    done = []
     done_bins = 0
     malformed_total = 0
     for name, products in counts:
@@ -2419,6 +2420,17 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
             malformed_total += 1
         if key in last_done:
             done_bins += 1
+            db_ = last_done[key]
+            done.append({
+                "bin": name,
+                "products": products,
+                "batch_id": db_.id,
+                "by": db_.created_by,
+                "completed_at": (
+                    db_.completed_at.isoformat()
+                    if db_.completed_at else None
+                ),
+            })
             continue
         openb = open_by_bin.get(key)
         todo.append({
@@ -2433,10 +2445,12 @@ def bins_overview(recent: int = 8, session: Session = Depends(get_session)):
     # Bins already in progress first, then the biggest jobs.
     todo.sort(key=lambda b: (b["open_batch_id"] is None, -b["products"],
                              b["bin"]))
+    done.sort(key=lambda b: b["completed_at"] or "", reverse=True)
 
     return {
         "total_bins": len(counts),
         "done_bins": done_bins,
+        "done": done,
         "todo_count": sum(1 for b in todo if not b["hidden"]),
         "hidden_count": sum(1 for b in todo if b["hidden"]),
         "malformed_count": malformed_total,
@@ -5510,8 +5524,11 @@ def batch_verify(
 class CompleteIn(BaseModel):
     created_by: str | None = Field(default=None, max_length=100)
     # Closing a bin is a deliberate sign-off made on a full screen, where
-    # the counts and mismatches are readable. Only the web terminal sends
-    # this; a scanner's "finish" hands the batch over instead.
+    # the counts and mismatches are readable. The web terminal sends this;
+    # a scanner's "finish" hands the batch over instead — with one
+    # exception: the C72's confirmed EMPTY-bin complete (nothing scanned,
+    # nothing already-tagged), where there are no counts to check on any
+    # screen and the honest record is "0 of everything, bin done".
     finalize: bool = False
 
 

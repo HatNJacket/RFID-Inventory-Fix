@@ -3173,6 +3173,56 @@ public class MainActivity extends Activity {
         applyBatchUi();
     }
 
+    /** NEXT with nothing scanned and nothing recorded already-tagged:
+     *  either the operator forgot, or the shelf really is bare. An empty
+     *  shelf is an answer worth recording — completing files the normal
+     *  inventory-check tasks (0 counted vs whatever Shopify believes) and
+     *  the bin stops sitting on the to-do board forever. */
+    private void askEmptyBin() {
+        int expected = bItems.size();
+        new AlertDialog.Builder(this)
+                .setTitle("Nothing scanned in " + batchBin)
+                .setMessage("No boxes were scanned and none are recorded "
+                        + "as already tagged.\n\nIs the shelf actually "
+                        + "EMPTY?"
+                        + (expected > 0
+                            ? "\n\nMarking it complete records 0 on the "
+                              + "shelf for the " + expected + " product(s) "
+                              + "Shopify expects here and files an "
+                              + "inventory-check for each."
+                            : "\n\nMarking it complete records the bin as "
+                              + "checked and done.")
+                        + " Nothing in Shopify changes.")
+                .setPositiveButton("BIN IS EMPTY — COMPLETE", (d, w) ->
+                        completeEmptyBin())
+                .setNegativeButton("Keep scanning", null)
+                .show();
+    }
+
+    private void completeEmptyBin() {
+        status.setText("Completing " + batchBin + " as empty…");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject()
+                        .put("created_by", prefs.getString("device", "C72"))
+                        .put("finalize", true);
+                api("POST", "/api/batches/" + batchId + "/complete", body);
+                final String bin = batchBin;
+                ui.post(() -> {
+                    beep(SOUND_OK);
+                    exitBatch(true);
+                    status.setText("Bin " + bin + " recorded as EMPTY and "
+                            + "completed ✓");
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    beep(SOUND_ERR);
+                    status.setText("Could not complete: " + e.getMessage());
+                });
+            }
+        }).start();
+    }
+
     private void stepNext() {
         if (!inBatch()) return;
         // Receiving: collect -> PRINT -> pair -> back to collect, as many
@@ -3222,11 +3272,15 @@ public class MainActivity extends Activity {
             return;
         }
         if (step == STEP_COLLECT) {
+            // Scanned boxes OR recorded already-tagged boxes both count as
+            // work done here — a shelf fully handled on an earlier pass
+            // must not be refused at NEXT.
             boolean any = false;
-            for (BItem b : bItems) if (b.qty > 0) any = true;
+            for (BItem b : bItems) {
+                if (b.qty > 0 || b.taggedBefore > 0) any = true;
+            }
             if (!any) {
-                beep(SOUND_ERR);
-                status.setText("Scan at least one box first.");
+                askEmptyBin();
                 return;
             }
             step = STEP_CHECK;

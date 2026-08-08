@@ -3,6 +3,21 @@
 Source of truth for project status. Updated by Claude each working session.
 Last updated: 2026-08-08.
 
+## 🔫 C72 v3.32: empty bins are an answer — ✅ DEPLOYED 2026-08-08
+
+- NEXT at batch collect now accepts a shelf handled entirely through
+  "already tagged" records (tagged_before counts as work done — it used
+  to refuse with "Scan at least one box").
+- Nothing scanned AND nothing already-tagged → asks "Is the shelf
+  actually EMPTY?" — confirming completes the batch from the gun
+  (finalize; the one scanner-side finalize, since an empty shelf has no
+  counts to check on any screen). Files the normal inventory-check
+  tasks (0 vs Shopify's expectations) and the bin leaves the to-do
+  board honestly.
+- Web "Bins to do" board gains **Show done (N)**: lists every
+  batch-tagged bin (✓ row, products, when, by whom) under the to-do
+  list, filter-aware; /api/bins/overview now returns the `done` list.
+
 ## 🔫 C72 v3.31 + Scan Station polish — ✅ DEPLOYED 2026-08-08
 
 C72 v3.31 (versionCode 49), design iterated with Nick over five widget
