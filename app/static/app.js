@@ -5979,7 +5979,7 @@ function renderReview() {
         ${
           t.synthetic
             ? `<button class="binfix rv-setbin" data-act="setbin" type="button"
-                 title="Shopify says ${escapeHtml(t.shopify_bin || "?")}, the tags say ${escapeHtml(t.tag_bin || "?")}. Write ${escapeHtml(t.tag_bin || "?")} to Shopify — the normal audited bin update, undoable from History. (Moved the boxes instead? This entry clears on the next refresh once the bins agree.)">bin ⇢ ${escapeHtml(t.tag_bin || "?")}</button>`
+                 title="Shopify says ${escapeHtml(t.shopify_bin || "?")}, the tags say ${escapeHtml(t.tag_bin || "?")}. Write ${escapeHtml(t.tag_bin || "?")} to Shopify — the normal audited bin update, undoable from History. (Moved the boxes instead? This entry clears on the next refresh once the bins agree.)">${escapeHtml(t.shopify_bin || "?")} ⇢ ${escapeHtml(t.tag_bin || "?")}</button>`
             : `<button class="rv-btn rv-btn--resolve" data-act="resolve" type="button">resolve</button>
         <button class="rv-btn rv-btn--dismiss" data-act="dismiss" type="button">dismiss</button>`
         }
