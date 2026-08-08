@@ -1512,6 +1512,95 @@ a { color: var(--accent); }
    together instead of the filter floating in the middle. */
 #review-filter { margin-left: auto; }
 
+/* Review notes: flag chip, thread, add box, dismiss-confirm strip */
+.rv-noteflag {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rv-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+}
+.rv-confirm span { flex: 1; }
+.rv-notes { margin-top: 10px; }
+.rv-notes__title { font-size: 12px; font-weight: 650; margin-bottom: 6px; }
+.rv-note {
+  border-left: 3px solid var(--accent-soft);
+  background: var(--card-2);
+  border-radius: 0 8px 8px 0;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+.rv-note__meta { font-size: 11px; color: var(--ink-dim); margin-bottom: 2px; }
+.rv-note__empty { font-size: 12px; color: var(--ink-dim); font-style: italic; }
+.rv-notes__add { display: flex; gap: 6px; margin-top: 8px; }
+.rv-notein {
+  flex: 1;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+.rv-notein:focus { outline: none; border-color: var(--accent); }
+
+/* Resolve window internals */
+.rvw-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rvw-head__title { font-size: 14px; font-weight: 650; flex: 1; }
+.rvw-close { color: var(--ink-dim); cursor: pointer; font-size: 15px; }
+.rvw-stats { display: flex; gap: 8px; margin-bottom: 8px; }
+.rvw-stat {
+  flex: 1;
+  background: var(--card-2);
+  border-radius: 8px;
+  padding: 8px;
+  text-align: center;
+}
+.rvw-stat--live { background: var(--warn-bg); }
+.rvw-stat--live .rvw-stat__l, .rvw-stat--live .rvw-stat__n { color: var(--warn-ink); }
+.rvw-stat__l { font-size: 11px; color: var(--ink-dim); }
+.rvw-stat__n { font-size: 18px; font-weight: 650; }
+.rvw-wide { display: block; width: 100%; margin-bottom: 6px; text-align: center; }
+.rvw-ok { background: var(--ok-bg); color: var(--ok-ink); border-color: transparent; }
+.rvw-bins {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--card-2);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+.rvw-bins__cell { text-align: center; }
+.rvw-bins__b { font-family: var(--mono); font-size: 16px; font-weight: 650; }
+.rvw-bins__arrow { font-size: 18px; color: var(--ink-dim); }
+.rvw-choice { text-align: left !important; padding: 8px 12px; }
+.rvw-choice__sub { display: block; font-weight: 400; font-size: 11px; color: var(--ink-dim); }
+.rvw-choice--amber { background: var(--warn-bg); color: var(--warn-ink); border-color: transparent; }
+.rvw-choice--amber .rvw-choice__sub { color: var(--warn-ink); opacity: 0.8; }
+.rvw-choice--blue { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.rvw-choice--blue .rvw-choice__sub { color: var(--accent); opacity: 0.8; }
+.rvw-resnote { width: 100%; margin: 8px 0 10px; box-sizing: border-box; }
+.rvw-foot { display: flex; gap: 8px; }
+.rvw-grow { flex: 1; }
+
 /* What-does-this-tag-mean note, shown while a Review filter is active */
 .review-note {
   margin: 8px 0 10px;

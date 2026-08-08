@@ -256,6 +256,7 @@ const EVENT_META = {
   "unresolved-barcode": ["Unresolved Barcode", "#d72c0d"],
   "could-not-scan": ["Could Not Scan", "#8a6116"],
   "bin-mismatch": ["Mismatched Bins", "#0e7a8a"],
+  "tags-rebinned": ["Tags Re-binned", "#0e7a8a"],
   sweep: ["Sweep", "#0e7a8a"],
 };
 
@@ -5600,6 +5601,13 @@ async function runVerifyCheck() {
   const tbNote = tbRows.length
     ? `<p class="result">✓ ${tbRows.length} product(s) had boxes already RFID tagged before this batch (side trip or earlier session) — 0 scans and 0 pairs there is expected; their tags are counted in Detected instead.</p>`
     : "";
+  // Unresolved codes are a heads-up, never a blocker: completing simply
+  // drops them (same as removing them by hand) — no Review task is filed.
+  const unresolvedNote = (rep.unresolved_codes || []).length
+    ? `<p class="result result--warn-soft">⚠ ${rep.unresolved_codes.length} unresolved barcode(s) still in this batch (${rep.unresolved_codes
+        .map(escapeHtml)
+        .join(", ")}) — they never matched a product. Completing drops them; nothing goes to Review. Link them at the Scan Station first if they matter.</p>`
+    : "";
 
   // One button to press every eligible "Set to N" in turn — each write
   // stays its own API call and its own History row with its own Undo.
@@ -5619,7 +5627,7 @@ async function runVerifyCheck() {
       : "";
 
   bEl.verifyReport.innerHTML = `
-    ${verdict}${naNote}${tbNote}
+    ${verdict}${naNote}${tbNote}${unresolvedNote}
     <div class="inventory__scroll"><table class="inventory__table">
       <thead><tr><th>Product</th><th>SKU</th><th class="num">Boxes</th><th class="num" title="Shopify on-hand for this shelf; brackets show scanned-vs-expected">Expected</th><th class="num">Paired</th><th class="num">Detected</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
@@ -5867,6 +5875,8 @@ async function loadQueue() {
 let reviewTasks = [];
 let reviewFilter = "";
 let reviewOpenIds = new Set();
+// Tasks whose dismiss is waiting on the notes are-you-sure strip.
+let dismissConfirmIds = new Set();
 
 async function loadReview() {
   const list = document.getElementById("review-list");
@@ -5905,9 +5915,10 @@ const REVIEW_NOTES = {
     "its RFID tag scanned in. An unpaired label is an orphan sticker — " +
     "pair it at the Scan Station or reprint before it ends up on a box.",
   "unresolved-barcode":
-    "These barcodes were scanned during a batch but never matched a " +
-    "product. They were still counted. Link each code to its product " +
-    "at the Scan Station (or fix the barcode in Shopify).",
+    "LEGACY entries — new batches no longer file these (2026-08-08): " +
+    "unresolved codes now show as a heads-up at the verify step and are " +
+    "simply dropped at completion. For these old ones: link the code to " +
+    "its product at the Scan Station, or resolve/dismiss.",
   "could-not-scan":
     "Someone physically couldn't scan these during tagging (damaged " +
     "box, unreachable shelf, dead label). They were NOT counted — " +
@@ -5977,14 +5988,27 @@ function renderReview() {
             : ""
         }
         ${
+          (t.notes || []).length
+            ? `<span class="rv-noteflag" data-act="notes" title="${(t.notes || []).length} note(s) — click to read">📝 ${(t.notes || []).length}</span>`
+            : ""
+        }
+        ${
           t.synthetic
             ? `<button class="binfix rv-setbin" data-act="setbin" type="button"
-                 title="Shopify says ${escapeHtml(t.shopify_bin || "?")}, the tags say ${escapeHtml(t.tag_bin || "?")}. Write ${escapeHtml(t.tag_bin || "?")} to Shopify — the normal audited bin update, undoable from History. (Moved the boxes instead? This entry clears on the next refresh once the bins agree.)">${escapeHtml(t.shopify_bin || "?")} ⇢ ${escapeHtml(t.tag_bin || "?")}</button>`
-            : `<button class="rv-btn rv-btn--resolve" data-act="resolve" type="button">resolve</button>
-        <button class="rv-btn rv-btn--dismiss" data-act="dismiss" type="button">dismiss</button>`
+                 title="Shopify says ${escapeHtml(t.shopify_bin || "?")}, the tags say ${escapeHtml(t.tag_bin || "?")}. Write ${escapeHtml(t.tag_bin || "?")} to Shopify — the normal audited bin update, undoable from History.">${escapeHtml(t.shopify_bin || "?")} ⇢ ${escapeHtml(t.tag_bin || "?")}</button>`
+            : ""
         }
+        <button class="rv-btn rv-btn--resolve" data-act="resolve" type="button">resolve</button>
+        <button class="rv-btn rv-btn--dismiss" data-act="dismiss" type="button">dismiss</button>
         <span class="auditrow__chev">${open ? "▾" : "▸"}</span>
       </div>` +
+      (dismissConfirmIds.has(t.id)
+        ? `<div class="rv-confirm">
+             <span>This task has ${(t.notes || []).length} note(s) — dismiss anyway?</span>
+             <button class="rv-btn rv-btn--dismiss" data-act="dismiss-yes" type="button">YES, DISMISS</button>
+             <button class="rv-btn" data-act="dismiss-no" type="button">Cancel</button>
+           </div>`
+        : "") +
       (open
         ? `<div class="rv-detail">
             ${
@@ -6008,6 +6032,25 @@ function renderReview() {
                   ? `<div class="recent__meta" style="margin-top:4px"><i>${escapeHtml(rec[0].trim())}</i></div>`
                   : ""
               }
+              <div class="rv-notes">
+                <div class="rv-notes__title">Notes</div>
+                ${
+                  (t.notes || []).length
+                    ? (t.notes || [])
+                        .map(
+                          (n) => `<div class="rv-note">
+                            <div class="rv-note__meta">${escapeHtml(n.created_by || "?")} · ${escapeHtml(fmtAgo(n.created_at))}</div>
+                            <div>${escapeHtml(n.note)}</div>
+                          </div>`
+                        )
+                        .join("")
+                    : `<div class="rv-note__empty">No notes yet.</div>`
+                }
+                <div class="rv-notes__add">
+                  <input class="rv-notein" type="text" maxlength="500" placeholder="Add a note…" />
+                  <button class="reset rv-notesave" type="button">Save note</button>
+                </div>
+              </div>
             </div>
           </div>`
         : "");
@@ -6025,17 +6068,29 @@ function renderReview() {
         ev.stopPropagation();
         openProductHistory(t.sku);
       });
-    const act = async (dismissed) => {
+    // Quick dismiss: instant when the task carries no notes; a note means
+    // someone left context, so closing it takes a second, deliberate press.
+    const quickDismiss = async () => {
       const operator = operatorEl.value;
       if (!operator) {
         alert("Pick who's scanning (top right) first.");
         return;
       }
       try {
-        await postJson(`/api/review-tasks/${t.id}/resolve`, {
-          resolved_by: operator,
-          dismissed,
-        });
+        if (t.synthetic) {
+          await postJson("/api/review/mismatch-dismissals", {
+            sku: t.sku,
+            tag_bin: t.tag_bin,
+            shopify_bin: t.shopify_bin,
+            dismissed_by: operator,
+          });
+        } else {
+          await postJson(`/api/review-tasks/${t.id}/resolve`, {
+            resolved_by: operator,
+            dismissed: true,
+          });
+        }
+        dismissConfirmIds.delete(t.id);
         reviewTasks = reviewTasks.filter((x) => x.id !== t.id);
         renderReview();
       } catch (err) {
@@ -6043,9 +6098,63 @@ function renderReview() {
       }
     };
     const resolveBtn = li.querySelector('[data-act="resolve"]');
-    if (resolveBtn) resolveBtn.addEventListener("click", () => act(false));
+    if (resolveBtn)
+      resolveBtn.addEventListener("click", () => openResolveWindow(t));
     const dismissBtn = li.querySelector('[data-act="dismiss"]');
-    if (dismissBtn) dismissBtn.addEventListener("click", () => act(true));
+    if (dismissBtn)
+      dismissBtn.addEventListener("click", () => {
+        if ((t.notes || []).length && !dismissConfirmIds.has(t.id)) {
+          dismissConfirmIds.add(t.id);
+          renderReview();
+        } else {
+          quickDismiss();
+        }
+      });
+    const dyes = li.querySelector('[data-act="dismiss-yes"]');
+    if (dyes) dyes.addEventListener("click", quickDismiss);
+    const dno = li.querySelector('[data-act="dismiss-no"]');
+    if (dno)
+      dno.addEventListener("click", () => {
+        dismissConfirmIds.delete(t.id);
+        renderReview();
+      });
+    const noteFlag = li.querySelector('[data-act="notes"]');
+    if (noteFlag)
+      noteFlag.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        reviewOpenIds.add(t.id);
+        renderReview();
+      });
+    const noteIn = li.querySelector(".rv-notein");
+    const noteSave = li.querySelector(".rv-notesave");
+    if (noteIn)
+      noteIn.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") noteSave.click();
+      });
+    if (noteSave)
+      noteSave.addEventListener("click", async () => {
+        const input = li.querySelector(".rv-notein");
+        const text = (input.value || "").trim();
+        if (!text) return;
+        const operator = operatorEl.value;
+        if (!operator) {
+          alert("Pick who's scanning (top right) first.");
+          return;
+        }
+        noteSave.disabled = true;
+        try {
+          const saved = await postJson("/api/review-notes", {
+            task_key: String(t.id),
+            note: text,
+            created_by: operator,
+          });
+          t.notes = [...(t.notes || []), saved];
+          renderReview();
+        } catch (err) {
+          noteSave.disabled = false;
+          alert(err.message);
+        }
+      });
     const auditBtn = li.querySelector('[data-act="audit"]');
     if (auditBtn)
       auditBtn.addEventListener("click", () => jumpToBinAudit(checkBin[1]));
@@ -6084,6 +6193,336 @@ function renderReview() {
       });
     list.append(li);
   });
+}
+
+// === Review resolve window ==================================================
+// Resolve never closes a task blind: the window shows live context and
+// the category's actual fixes; every write goes through the existing
+// audited endpoints. Dismiss stays the quick action on the card.
+function closeResolveWindow() {
+  document.getElementById("resolve-overlay").hidden = true;
+}
+document.getElementById("resolve-overlay").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) closeResolveWindow();
+});
+
+async function commitResolve(t, note) {
+  const operator = operatorEl.value;
+  if (!operator) {
+    alert("Pick who's scanning (top right) first.");
+    return;
+  }
+  try {
+    await postJson(`/api/review-tasks/${t.id}/resolve`, {
+      resolved_by: operator,
+      dismissed: false,
+      note: (note || "").slice(0, 255) || null,
+    });
+    reviewTasks = reviewTasks.filter((x) => x.id !== t.id);
+    closeResolveWindow();
+    renderReview();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+function openResolveWindow(t) {
+  const overlay = document.getElementById("resolve-overlay");
+  const body = document.getElementById("resolve-body");
+  const binFromDetail = (/^Bin\s+(.+?):/.exec(t.detail || "") || [])[1];
+  const counts = /(\d+)\s+unit\(s\).*?on-hand is (\d+)/.exec(t.detail || "");
+  const counted = counts ? Number(counts[1]) : null;
+  const expectedThen = counts ? Number(counts[2]) : null;
+
+  const notesHtml = (t.notes || []).length
+    ? `<div class="rv-notes" style="margin:10px 0">
+         <div class="rv-notes__title">Notes on this task</div>
+         ${(t.notes || [])
+           .map(
+             (n) => `<div class="rv-note">
+               <div class="rv-note__meta">${escapeHtml(n.created_by || "?")} · ${escapeHtml(fmtAgo(n.created_at))}</div>
+               <div>${escapeHtml(n.note)}</div>
+             </div>`
+           )
+           .join("")}
+       </div>`
+    : "";
+
+  // Category-specific middles; footers differ for synthetic entries
+  // (nothing stored to "mark resolved" — an action or a dismissal IS the
+  // resolution).
+  let middle = "";
+  if (t.category === "inventory-check") {
+    middle = `
+      <div class="rvw-stats">
+        <div class="rvw-stat"><div class="rvw-stat__l">Counted</div><div class="rvw-stat__n">${counted ?? "?"}</div></div>
+        <div class="rvw-stat"><div class="rvw-stat__l">Shopify then</div><div class="rvw-stat__n">${expectedThen ?? "?"}</div></div>
+        <div class="rvw-stat rvw-stat--live"><div class="rvw-stat__l">Shopify NOW</div><div class="rvw-stat__n" id="rvw-live">…</div></div>
+      </div>
+      <div class="recent__meta" id="rvw-liveline" style="margin-bottom:8px">Checking the live count…</div>
+      <div id="rvw-actions"></div>
+      ${binFromDetail ? `<button class="reset rvw-wide" id="rvw-audit" type="button">Jump to ${escapeHtml(binFromDetail)}'s bin audit</button>` : ""}`;
+  } else if (t.category === "pairing-incomplete") {
+    middle = `
+      <div class="recent__meta" id="rvw-liveline" style="margin-bottom:8px">Checking the live pairing state…</div>
+      <div id="rvw-actions"></div>
+      <button class="reset rvw-wide" id="rvw-station" type="button">Open at the Scan Station (pair the stragglers)</button>`;
+  } else if (t.category === "bin-check") {
+    middle = `
+      <div class="recent__meta" id="rvw-liveline" style="margin-bottom:8px"></div>
+      ${binFromDetail ? `<button class="reset rvw-wide" id="rvw-audit" type="button">Run ${escapeHtml(binFromDetail)}'s bin audit</button>` : ""}`;
+  } else if (t.category === "bin-mismatch") {
+    middle = `
+      <div class="rvw-bins">
+        <div class="rvw-bins__cell"><div class="rvw-stat__l">Shopify says</div><div class="rvw-bins__b">${escapeHtml(t.shopify_bin || "?")}</div></div>
+        <div class="rvw-bins__arrow">⇢</div>
+        <div class="rvw-bins__cell"><div class="rvw-stat__l">Tags sit at</div><div class="rvw-bins__b">${escapeHtml(t.tag_bin || "?")}</div></div>
+      </div>
+      <button class="reset rvw-wide rvw-choice rvw-choice--amber" id="rvw-shopwrong" type="button">
+        Shopify is wrong → write ${escapeHtml(t.tag_bin || "?")} to Shopify
+        <span class="rvw-choice__sub">The audited bin update — Shopify, map and tags follow. Undoable.</span>
+      </button>
+      <button class="reset rvw-wide rvw-choice rvw-choice--blue" id="rvw-shopright" type="button">
+        Shopify is right → boxes moved to ${escapeHtml(t.shopify_bin || "?")}
+        <span class="rvw-choice__sub">Updates the tag records only — Shopify already says ${escapeHtml(t.shopify_bin || "?")}.</span>
+      </button>`;
+  } else {
+    // could-not-scan, legacy unresolved-barcode, anything else: the Scan
+    // Station is where identifying/tagging/linking happens.
+    middle = `
+      <div class="recent__meta" id="rvw-liveline" style="margin-bottom:8px"></div>
+      <button class="reset rvw-wide" id="rvw-station" type="button">Open at the Scan Station</button>`;
+  }
+
+  body.innerHTML = `
+    <div class="rvw-head">
+      ${evChip(t.category)}
+      <span class="rvw-head__title">${escapeHtml(t.product_title || t.sku || t.detail.slice(0, 40))}</span>
+      <span class="rvw-close" id="rvw-close" title="Close">✕</span>
+    </div>
+    <div class="recent__meta" style="margin-bottom:10px">${
+      t.sku ? `SKU ${escapeHtml(t.sku)} · ` : ""
+    }${escapeHtml(t.synthetic ? "live entry — clears itself once the bins agree" : `filed ${fmtAgo(t.created_at)}${t.created_by ? ` by ${t.created_by}` : ""}`)}</div>
+    <div class="recent__meta" style="margin-bottom:10px">${escapeHtml(t.detail || "")}</div>
+    ${notesHtml}
+    ${middle}
+    <input class="rv-notein rvw-resnote" id="rvw-note" type="text" maxlength="255" placeholder="Resolution note…" />
+    <div class="rvw-foot">
+      ${
+        t.synthetic
+          ? `<button class="rv-btn rv-btn--dismiss rvw-grow" id="rvw-dismiss" type="button" title="Suppressed for this exact disagreement — reappears only if either bin changes">Dismiss this mismatch</button>`
+          : `<button class="rv-btn rv-btn--resolve rvw-grow" id="rvw-resolve" type="button">Mark resolved</button>`
+      }
+      <button class="rv-btn" id="rvw-cancel" type="button">Cancel</button>
+    </div>`;
+  overlay.hidden = false;
+
+  document.getElementById("rvw-close").addEventListener("click", closeResolveWindow);
+  document.getElementById("rvw-cancel").addEventListener("click", closeResolveWindow);
+  const noteVal = () => document.getElementById("rvw-note").value.trim();
+
+  const resolveBtn = document.getElementById("rvw-resolve");
+  if (resolveBtn)
+    resolveBtn.addEventListener("click", () => {
+      if (
+        t.category === "inventory-check" &&
+        !noteVal() &&
+        !resolveBtn.dataset.armed
+      ) {
+        // "Recounted — still off" without a word of context helps nobody.
+        resolveBtn.dataset.armed = "1";
+        document.getElementById("rvw-note").focus();
+        document.getElementById("rvw-note").placeholder =
+          "What did the recount find? (required — press Mark resolved again)";
+        return;
+      }
+      commitResolve(t, noteVal());
+    });
+
+  const auditBtn = document.getElementById("rvw-audit");
+  if (auditBtn)
+    auditBtn.addEventListener("click", () => {
+      closeResolveWindow();
+      jumpToBinAudit(binFromDetail);
+    });
+
+  const stationBtn = document.getElementById("rvw-station");
+  if (stationBtn)
+    stationBtn.addEventListener("click", () => {
+      closeResolveWindow();
+      document.querySelector('.tabs__tab[data-tab="scan"]').click();
+      const code = t.barcode || t.sku;
+      if (code) {
+        el.barcode.value = code;
+        stationBarcodeScan(code);
+      }
+    });
+
+  const dismissBtn2 = document.getElementById("rvw-dismiss");
+  if (dismissBtn2)
+    dismissBtn2.addEventListener("click", async () => {
+      const operator = operatorEl.value;
+      if (!operator) {
+        alert("Pick who's scanning (top right) first.");
+        return;
+      }
+      try {
+        await postJson("/api/review/mismatch-dismissals", {
+          sku: t.sku,
+          tag_bin: t.tag_bin,
+          shopify_bin: t.shopify_bin,
+          dismissed_by: operator,
+        });
+        reviewTasks = reviewTasks.filter((x) => x.id !== t.id);
+        closeResolveWindow();
+        renderReview();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+
+  const shopWrong = document.getElementById("rvw-shopwrong");
+  if (shopWrong)
+    shopWrong.addEventListener("click", async () => {
+      const operator = operatorEl.value;
+      if (!operator) {
+        alert("Pick who's scanning (top right) first.");
+        return;
+      }
+      if (
+        !confirm(
+          `Set the Shopify bin for ${t.sku} to ${t.tag_bin}?\n\n` +
+            `Shopify currently says: ${t.shopify_bin}. This is the normal ` +
+            `audited bin write — Shopify, the bin map and this product's ` +
+            `tags all follow, with a History entry.`
+        )
+      )
+        return;
+      shopWrong.disabled = true;
+      try {
+        await postJson("/api/bin-updates", {
+          target: t.sku,
+          bin: t.tag_bin,
+          changed_by: operator,
+        });
+        reviewTasks = reviewTasks.filter((x) => x.id !== t.id);
+        closeResolveWindow();
+        renderReview();
+      } catch (err) {
+        shopWrong.disabled = false;
+        alert(err.message);
+      }
+    });
+
+  const shopRight = document.getElementById("rvw-shopright");
+  if (shopRight)
+    shopRight.addEventListener("click", async () => {
+      const operator = operatorEl.value;
+      if (!operator) {
+        alert("Pick who's scanning (top right) first.");
+        return;
+      }
+      if (
+        !confirm(
+          `Move the TAG RECORDS for ${t.sku} to ${t.shopify_bin}?\n\n` +
+            `For when the boxes physically moved (or are moving) to ` +
+            `Shopify's shelf. Local only — nothing in Shopify changes.`
+        )
+      )
+        return;
+      shopRight.disabled = true;
+      try {
+        await postJson("/api/assignments/rebin", {
+          sku: t.sku,
+          bin: t.shopify_bin,
+          changed_by: operator,
+        });
+        reviewTasks = reviewTasks.filter((x) => x.id !== t.id);
+        closeResolveWindow();
+        renderReview();
+      } catch (err) {
+        shopRight.disabled = false;
+        alert(err.message);
+      }
+    });
+
+  // Live context: quick answers that let stale tasks close in one click.
+  if (!t.synthetic) loadResolveContext(t, counted);
+}
+
+async function loadResolveContext(t, counted) {
+  const line = document.getElementById("rvw-liveline");
+  try {
+    const ctx = await apiJson(`/api/review-tasks/${t.id}/context`);
+    if (t.category === "inventory-check") {
+      const live = ctx.live_on_hand;
+      document.getElementById("rvw-live").textContent = live ?? "—";
+      const actions = document.getElementById("rvw-actions");
+      if (live != null && counted != null && live === counted) {
+        line.textContent =
+          "Live on-hand now MATCHES the count — the world caught up.";
+        actions.innerHTML = `<button class="reset rvw-wide rvw-ok" id="rvw-agree" type="button">Counts agree now — resolve</button>`;
+        document.getElementById("rvw-agree").addEventListener("click", () =>
+          commitResolve(t, `Live on-hand now matches the count (${counted}).`)
+        );
+      } else if (live != null && counted != null && counted > live) {
+        line.textContent = `Shelf count (${counted}) is HIGHER than live on-hand (${live}) — physical proof the boxes exist.`;
+        actions.innerHTML = `<button class="reset rvw-wide rvw-ok" id="rvw-seton" type="button">Set Shopify on-hand to ${counted}</button>`;
+        document.getElementById("rvw-seton").addEventListener("click", async () => {
+          const operator = operatorEl.value;
+          if (!operator) {
+            alert("Pick who's scanning (top right) first.");
+            return;
+          }
+          if (
+            !confirm(
+              `Write on-hand ${live} → ${counted} to Shopify for ${t.sku}?\n\nConfirmed, logged, undoable from History.`
+            )
+          )
+            return;
+          try {
+            const r = await postJson("/api/onhand-updates", {
+              sku: t.sku,
+              new_qty: counted,
+              confirmed: true,
+              changed_by: operator,
+            });
+            await commitResolve(t, r.message || `On-hand set to ${counted}.`);
+          } catch (err) {
+            alert(err.message);
+          }
+        });
+      } else if (live != null) {
+        line.textContent = `Live on-hand is ${live} — still above the count. Lowering a number stays a Shopify-admin job (nothing here writes down), so recount or resolve with a note.`;
+      } else {
+        line.textContent = "Live on-hand unavailable right now.";
+      }
+    } else if (t.category === "pairing-incomplete") {
+      if (ctx.paired_count != null && ctx.labels_total != null) {
+        if (ctx.paired_count >= ctx.labels_total) {
+          line.textContent = `Pairing has CAUGHT UP since (${ctx.paired_count} of ${ctx.labels_total}).`;
+          document.getElementById("rvw-actions").innerHTML =
+            `<button class="reset rvw-wide rvw-ok" id="rvw-caught" type="button">Pairing complete now — resolve</button>`;
+          document.getElementById("rvw-caught").addEventListener("click", () =>
+            commitResolve(t, `Pairing complete (${ctx.paired_count}/${ctx.labels_total}).`)
+          );
+        } else {
+          line.textContent = `Still ${ctx.labels_total - ctx.paired_count} unpaired (${ctx.paired_count} of ${ctx.labels_total}).`;
+        }
+      } else {
+        line.textContent = "";
+      }
+    } else if (t.category === "could-not-scan") {
+      if (ctx.units_on_file != null)
+        line.textContent = `The RFID system now holds ${ctx.units_on_file} unit(s) for this SKU${ctx.units_on_file > 0 ? " — if that covers this box, resolve below." : "."}`;
+    } else if (t.category === "bin-check") {
+      line.textContent = ctx.latest_sweep_at
+        ? `Newest C72 sweep: ${fmtAgo(ctx.latest_sweep_at)} from ${ctx.latest_sweep_device || "the gun"}.`
+        : "No C72 sweeps on file yet.";
+    }
+  } catch (err) {
+    if (line) line.textContent = "";
+  }
 }
 
 document.getElementById("review-filter").addEventListener("change", (e) => {
@@ -7133,6 +7572,29 @@ async function undoHistoryEvent(e, btn) {
     btn.disabled = true;
     try {
       await postJson(`/api/review-tasks/${e.undo.task_id}/reopen`, {});
+      await loadHistory();
+    } catch (err) {
+      btn.disabled = false;
+      alert(err.message);
+    }
+    return;
+  }
+  // Dismissed live bin-mismatches: undo deletes the suppression — the
+  // entry is back on the next Review fetch if the bins still disagree.
+  if (e.undo.kind === "mismatch-undismiss") {
+    if (
+      !confirm(
+        `Un-dismiss this bin mismatch?\n\n${e.sku || ""} — if the bins ` +
+          `still disagree, the entry returns to the Review inbox.`
+      )
+    )
+      return;
+    btn.disabled = true;
+    try {
+      await apiJson(
+        `/api/review/mismatch-dismissals/${e.undo.dismissal_id}`,
+        { method: "DELETE" }
+      );
       await loadHistory();
     } catch (err) {
       btn.disabled = false;

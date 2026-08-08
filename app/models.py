@@ -653,6 +653,54 @@ class FlaggedBin(Base):
     )
 
 
+class ReviewNote(Base):
+    """Operator notes pinned to a Review entry. Keyed by STRING so notes
+    stick to both stored tasks (their integer id as text) and the live
+    synthetic bin-mismatch entries ("binmm:SKU"), which have no row of
+    their own. Notes survive resolution — they're the context trail."""
+
+    __tablename__ = "rfid_review_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_key: Mapped[str] = mapped_column(String(120), index=True,
+                                          nullable=False)
+    note: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "task_key": self.task_key,
+            "note": self.note,
+            "created_by": self.created_by,
+            "created_at": (
+                self.created_at.isoformat() if self.created_at else None
+            ),
+        }
+
+
+class MismatchDismissal(Base):
+    """A dismissed live bin-mismatch. The synthetic entries have no row to
+    mark dismissed, so the exact disagreement is recorded instead: the
+    entry stays suppressed while (sku, tags' bin, Shopify's bin) all still
+    match — if either shelf changes, that's a NEW disagreement and it
+    reappears. Undoable from History (deleting the row un-dismisses)."""
+
+    __tablename__ = "rfid_mismatch_dismissals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sku: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    tag_bin: Mapped[str] = mapped_column(String(100), nullable=False)
+    shopify_bin: Mapped[str] = mapped_column(String(255), nullable=False)
+    dismissed_by: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class EpcCapture(Base):
     """One RFID sweep sent from the C72 companion app: the operator scans a
     shelf freely (everything held on the device), then hits Send once —

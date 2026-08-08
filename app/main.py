@@ -46,8 +46,10 @@ from app.models import (
     HiddenBin,
     LabelName,
     LinkScan,
+    MismatchDismissal,
     PrintJob,
     ProductKind,
+    ReviewNote,
     ReviewTask,
     RfidAssignment,
     RfidIncompatible,
@@ -1702,6 +1704,64 @@ def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
 
     product["bin_location"] = payload.bin
     return {"product": product, "easyscan_updated": easyscan_updated}
+
+
+class RebinTagsIn(BaseModel):
+    """Mismatch resolution, "Shopify is right" direction: the boxes moved
+    (or are moving) to Shopify's shelf, so the TAG RECORDS follow it."""
+
+    sku: str = Field(min_length=1, max_length=100)
+    bin: str = Field(min_length=1, max_length=100)
+    changed_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/assignments/rebin",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def rebin_tags(payload: RebinTagsIn, session: Session = Depends(get_session)):
+    """LOCAL-ONLY counterpart of /api/bin-updates: Shopify already holds
+    this bin, only the RFID records disagree — so the tags (and open-batch
+    snapshots) move to match, with a History receipt. Nothing in Shopify
+    is touched."""
+    sku = payload.sku.strip()
+    new_bin = payload.bin.strip()
+    tags = session.scalars(
+        select(RfidAssignment).where(
+            func.upper(RfidAssignment.sku) == sku.upper()
+        )
+    ).all()
+    if not tags:
+        raise HTTPException(404, f"No tags on file for SKU {sku}.")
+    old_bins = sorted({(t.bin_location or "").strip() for t in tags
+                       if (t.bin_location or "").strip()})
+    for t in tags:
+        t.bin_location = new_bin
+    open_batches = {
+        b.id for b in session.scalars(
+            select(Batch).where(Batch.status.notin_(("done", "abandoned"))))
+    }
+    if open_batches:
+        for item in session.scalars(
+            select(BatchItem).where(
+                func.upper(BatchItem.sku) == sku.upper(),
+                BatchItem.batch_id.in_(open_batches),
+            )
+        ):
+            item.bin_location = new_bin
+            item.other_bins = None
+    session.add(BarcodeChange(
+        sku=sku,
+        product_title=tags[0].product_title,
+        shopify_variant_id=tags[0].shopify_variant_id,
+        changed_field="bin-local",
+        old_barcode=(", ".join(old_bins))[:64] or None,
+        new_barcode=new_bin[:64],
+        changed_by=payload.changed_by,
+    ))
+    session.commit()
+    return {"sku": sku, "bin": new_bin, "tags_moved": len(tags)}
 
 
 class OnHandUpdateIn(BaseModel):
@@ -5517,6 +5577,14 @@ def batch_verify(
         "items": report,
         "foreign": foreign,
         "unknown_epcs": unknown,
+        # Unresolved codes still in the batch: worth a heads-up at verify
+        # (they were counted but match no product), never a blocker —
+        # completion drops them without filing Review work (Nick's call,
+        # 2026-08-08: the code is removed either way).
+        "unresolved_codes": [
+            i.scanned_code for i in _batch_items(session, batch_id)
+            if not i.resolved and (i.qty_scanned or 0) > 0
+        ],
         "ok": ok,
     }
 
@@ -5589,17 +5657,10 @@ def batch_complete(
             ))
             continue
         if not item.resolved:
-            tasks.append(ReviewTask(
-                category="unresolved-barcode",
-                detail=(
-                    f"Barcode {item.scanned_code} was scanned "
-                    f"{item.qty_scanned}x in bin {batch.bin_name} but never "
-                    f"resolved to a product. Link or fix it at the Scan "
-                    f"Station."
-                )[:500],
-                batch_id=batch.id,
-                created_by=payload.created_by,
-            ))
+            # No Review task (Nick, 2026-08-08): an unresolved code can't
+            # resolve to a product from an inbox either — the verify step
+            # already flagged it as a non-blocking note, and completing
+            # drops the code exactly as removing it would have.
             continue
         if (
             item.expected_qty is not None
@@ -6010,6 +6071,16 @@ def _bin_mismatch_entries(session: Session) -> list[dict]:
         if img:
             img_by_sku.setdefault(key, img)
 
+    # Dismissed disagreements stay quiet while the exact (sku, tags' bin,
+    # Shopify's bin) triple still holds; either shelf changing makes it a
+    # new situation and it comes back.
+    dismissed = {
+        ((d.sku or "").strip().upper(),
+         (d.tag_bin or "").strip().lower(),
+         (d.shopify_bin or "").strip().lower())
+        for d in session.scalars(select(MismatchDismissal))
+    }
+
     entries: list[dict] = []
     for sku, title, tag_bin, n_tags, newest, barcode in session.execute(
         select(
@@ -6036,6 +6107,8 @@ def _bin_mismatch_entries(session: Session) -> list[dict]:
             or not saved
             or bin_contains(saved, rfid_bin)
         ):
+            continue
+        if (key, rfid_bin.lower(), saved.strip().lower()) in dismissed:
             continue
         entries.append({
             "id": f"binmm:{key}",
@@ -6094,6 +6167,18 @@ def list_review_tasks(
             tasks = _bin_mismatch_entries(session) + tasks
         except Exception as error:
             logger.warning("bin-mismatch entries failed: %s", error)
+    # Notes ride on every entry — stored tasks key by their id as text,
+    # synthetic entries by their stable string id.
+    keys = {str(t["id"]) for t in tasks}
+    if keys:
+        notes_by_key: dict = {}
+        for n in session.scalars(
+            select(ReviewNote).where(ReviewNote.task_key.in_(keys))
+            .order_by(ReviewNote.id)
+        ):
+            notes_by_key.setdefault(n.task_key, []).append(n.as_dict())
+        for t in tasks:
+            t["notes"] = notes_by_key.get(str(t["id"]), [])
     return {"count": len(tasks), "tasks": tasks}
 
 
@@ -6144,6 +6229,147 @@ def reopen_review_task(
     task.resolution_note = None
     session.commit()
     return task.as_dict()
+
+
+class ReviewNoteIn(BaseModel):
+    """A note pinned to a Review entry — stored tasks key by their id as
+    text; synthetic bin-mismatch entries by their "binmm:SKU" id."""
+
+    task_key: str = Field(min_length=1, max_length=120)
+    note: str = Field(min_length=1, max_length=500)
+    created_by: str | None = Field(default=None, max_length=100)
+
+    @field_validator("task_key", "note")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v.strip()
+
+
+@app.post(
+    "/api/review-notes",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def add_review_note(
+    payload: ReviewNoteIn, session: Session = Depends(get_session)
+):
+    row = ReviewNote(
+        task_key=payload.task_key,
+        note=payload.note,
+        created_by=payload.created_by,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row.as_dict()
+
+
+class MismatchDismissIn(BaseModel):
+    """Dismiss one live bin-mismatch: records the exact disagreement so
+    the synthetic entry stays suppressed while it still holds."""
+
+    sku: str = Field(min_length=1, max_length=100)
+    tag_bin: str = Field(min_length=1, max_length=100)
+    shopify_bin: str = Field(min_length=1, max_length=255)
+    dismissed_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/review/mismatch-dismissals",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def dismiss_mismatch(
+    payload: MismatchDismissIn, session: Session = Depends(get_session)
+):
+    row = MismatchDismissal(
+        sku=payload.sku.strip(),
+        tag_bin=payload.tag_bin.strip(),
+        shopify_bin=payload.shopify_bin.strip(),
+        dismissed_by=payload.dismissed_by,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return {"id": row.id, "sku": row.sku}
+
+
+@app.delete(
+    "/api/review/mismatch-dismissals/{dismissal_id}",
+    dependencies=[Depends(require_user)],
+)
+def undismiss_mismatch(
+    dismissal_id: int, session: Session = Depends(get_session)
+):
+    """History's undo: delete the suppression and the live entry is back
+    on the next Review fetch (if the disagreement still exists at all)."""
+    row = session.get(MismatchDismissal, dismissal_id)
+    if row is None:
+        raise HTTPException(404, "No such dismissal.")
+    session.delete(row)
+    session.commit()
+    return {"ok": True}
+
+
+@app.get(
+    "/api/review-tasks/{task_id}/context",
+    dependencies=[Depends(require_user)],
+)
+def review_task_context(
+    task_id: int, session: Session = Depends(get_session)
+):
+    """Live context for the resolve window, per category — the checks
+    that let half the backlog resolve itself with one click. One quick
+    query each; the single Shopify call (inventory-check) degrades to
+    null on failure rather than slowing the window down."""
+    task = session.get(ReviewTask, task_id)
+    if task is None:
+        raise HTTPException(404, "No such review task.")
+    ctx: dict = {"category": task.category}
+    sku = (task.sku or "").strip()
+    if task.category == "inventory-check" and sku:
+        try:
+            ctx["live_on_hand"] = _expected_qty(session, sku)
+        except Exception:  # noqa: BLE001 — live extras fail soft
+            ctx["live_on_hand"] = None
+        ctx["units_on_file"] = _tag_units_for_sku(session, sku)
+    elif task.category == "pairing-incomplete" and task.batch_id and sku:
+        item = session.scalar(
+            select(BatchItem).where(
+                BatchItem.batch_id == task.batch_id,
+                func.upper(BatchItem.sku) == sku.upper(),
+            )
+        )
+        if item is not None:
+            ctx["paired_count"] = item.paired_count
+            ctx["labels_total"] = item.qty_scanned + item.case_count
+    elif task.category == "could-not-scan" and sku:
+        ctx["units_on_file"] = _tag_units_for_sku(session, sku)
+    elif task.category == "bin-check":
+        cap = session.scalar(
+            select(EpcCapture).order_by(EpcCapture.id.desc()).limit(1)
+        )
+        if cap is not None:
+            ctx["latest_sweep_at"] = (
+                cap.created_at.isoformat() if cap.created_at else None
+            )
+            ctx["latest_sweep_device"] = cap.device
+    return ctx
+
+
+def _tag_units_for_sku(session: Session, sku: str) -> int:
+    """Units the RFID system holds for a SKU (case tags count their
+    units)."""
+    total = 0
+    for row in session.scalars(
+        select(RfidAssignment).where(
+            func.upper(RfidAssignment.sku) == sku.strip().upper()
+        )
+    ):
+        total += row.case_units if (row.case_units or 0) > 1 else 1
+    return total
 
 
 # ------------------------------------------------------------ EPC captures ---
@@ -6447,7 +6673,8 @@ def product_history(term: str, session: Session = Depends(get_session)):
 
     change_types = {
         "barcode": "barcode-replaced", "sku": "sku-updated",
-        "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
+        "bin": "bin-updated", "bin-local": "tags-rebinned",
+        "rfid-scan": "rfid-flag-changed",
         "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
         "tagged-before": "already-tagged-set",
         "tag-unlinked": "tag-unlinked",
@@ -6681,7 +6908,8 @@ def history(
 
     change_types = {
         "barcode": "barcode-replaced", "sku": "sku-updated",
-        "bin": "bin-updated", "rfid-scan": "rfid-flag-changed",
+        "bin": "bin-updated", "bin-local": "tags-rebinned",
+        "rfid-scan": "rfid-flag-changed",
         "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
         "tagged-before": "already-tagged-set",
         "tag-unlinked": "tag-unlinked",
@@ -6960,6 +7188,26 @@ def history(
                 # Undo = reopen: the task goes back to the inbox.
                 "undo": {"kind": "review-reopen", "task_id": t.id},
             })
+
+    # Dismissed live bin-mismatches: their "task" is synthetic, so the
+    # dismissal itself is the record — undo deletes it and the entry is
+    # back on the next Review fetch (if the disagreement still exists).
+    for md in session.scalars(
+        select(MismatchDismissal)
+        .order_by(MismatchDismissal.id.desc()).limit(limit)
+    ):
+        events.append({
+            "at": iso(md.created_at),
+            "type": "review-dismissed",
+            "worker": md.dismissed_by,
+            "sku": md.sku,
+            "title": None,
+            "detail": (
+                f"[bin-mismatch] tags at {md.tag_bin}, Shopify says "
+                f"{md.shopify_bin} — stays quiet while both bins hold"
+            ),
+            "undo": {"kind": "mismatch-undismiss", "dismissal_id": md.id},
+        })
 
     # ISO strings sort chronologically; string sort also avoids the
     # naive-vs-aware datetime comparison trap across DB backends.

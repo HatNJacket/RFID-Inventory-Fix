@@ -201,7 +201,11 @@ with Session(get_engine()) as s:
 
 # Fake Shopify inventory so the on-hand button works end-to-end locally.
 from app import shopify as _sh  # noqa: E402
-_FAKE = {"SURPLUS-1": 2, "SURPLUS-2": 1, "NORMAL-1": 5, "OPTO-LPRO": 2}
+# MID-1: counted 8 > live 5 -> the resolve window offers Set-to-8.
+# SMALL-1: live has caught up to the count -> one-click "agree" resolve.
+# BIG-1: live above the count -> recount-with-note path.
+_FAKE = {"SURPLUS-1": 2, "SURPLUS-2": 1, "NORMAL-1": 5, "OPTO-LPRO": 2,
+         "MID-1": 5, "SMALL-1": 3, "BIG-1": 9}
 def _fake_get(sku):
     return _FAKE.get(sku)
 def _fake_set(sku, qty):

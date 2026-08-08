@@ -3,6 +3,38 @@
 Source of truth for project status. Updated by Claude each working session.
 Last updated: 2026-08-08.
 
+## 📥 Review resolve windows + notes — ✅ DEPLOYED 2026-08-08
+
+Plan approved by Nick (category by category), then built same day:
+- **Notes** on every Review entry (incl. synthetic mismatches, keyed
+  "binmm:SKU"): 📝 flag with count on the card, thread + add box in the
+  expanded view, and dismissing a noted task takes a second, deliberate
+  press (inline are-you-sure strip). Notes survive resolution.
+- **Resolve opens a window** (per-category actions, every write via the
+  existing audited endpoints; dismiss stays quick on the card):
+  · inventory-check — live on-hand re-fetch on open: matches → one-click
+    resolve; counted higher → gated Set-to-N then resolve; counted lower
+    → the window says write-downs stay blocked, recount-with-required-
+    note; jump-to-bin-audit.
+  · pairing-incomplete — live catch-up check (one-click resolve when
+    pairing completed since), open-at-Scan-Station, resolve w/ note.
+  · bin-check — run-audit jump + newest-sweep info line.
+  · bin-mismatch — now has resolve AND dismiss (Nick's ask): window
+    offers both truth directions — "Shopify is wrong" (audited bin
+    write) or "Shopify is right" (NEW local-only POST /api/assignments/
+    rebin: tag records + open-batch snapshots follow Shopify's bin;
+    History "tags-rebinned"). Dismiss = suppression row keyed
+    (sku, tags' bin, Shopify's bin) — reappears if either bin changes;
+    History carries it with an un-dismiss undo.
+  · could-not-scan / legacy — open-at-Scan-Station + resolve w/ note
+    (deeper flow pending planning — the 51701 rings case).
+- **Unresolved barcodes leave Review** (Nick's call): normal batch
+  completion no longer files them; the verify step shows a non-blocking
+  note naming them instead (completion drops them either way).
+  Receiving still files its version (no verify step there).
+- New tables rfid_review_notes + rfid_mismatch_dismissals (auto-create).
+  test_binfix grew 8 checks; 17/17 suites.
+
 ## 📥 Review tab upgrade — ✅ DEPLOYED 2026-08-08
 
 - **Mismatched Bins**: products whose tags sit on a different shelf
