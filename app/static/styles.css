@@ -876,20 +876,27 @@ body {
 }
 
 /* "Write this bin to Shopify" offers (batch verify + Inventory rows) */
+/* Bin-fix pill (Verify rows + Inventory "⇢ Shopify") — the warn tokens
+   keep the amber intent and follow the theme; the old hard-coded light
+   hexes glowed unreadably in dark mode. */
 .binfix {
   font-size: 11px;
   font-weight: 600;
-  color: #7a5c0e;
-  background: #faeeda;
-  border: 1px solid #e8cf9a;
+  color: var(--warn-ink);
+  background: var(--warn-bg);
+  border: 1px solid transparent;
   border-radius: 999px;
   padding: 2px 9px;
   cursor: pointer;
   white-space: nowrap;
   vertical-align: 1px;
+  transition: filter 0.12s, transform 0.12s;
 }
-.binfix:hover { background: #f5e3c0; }
-.binfix:disabled { opacity: 0.55; cursor: default; }
+.binfix:hover { filter: brightness(0.95); transform: translateY(-1px); }
+@media (prefers-color-scheme: dark) {
+  .binfix:hover { filter: brightness(1.25); }
+}
+.binfix:disabled { opacity: 0.55; cursor: default; transform: none; }
 
 /* TC-Planner on-order hint (Scan Station card + receiving collect) */
 .planner-hint {

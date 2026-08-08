@@ -119,6 +119,30 @@ with patch("app.shopify.lookup_barcode", return_value=None), \
           "agreement", prods["INV-3"]["bin_differs"] is False,
           prods.get("INV-3"))
 
+    # A bin write for a product with NO map row must CREATE one — without
+    # it the Inventory tab keeps offering "⇢ Shopify" until the next full
+    # map refresh, and the write looks like a no-op (bin-backfill lesson).
+    FIRSTBIN = {"shopify_variant_id": "gid://v/8",
+                "shopify_product_id": "gid://shopify/Product/8",
+                "product_title": "First-bin Product", "variant_title": None,
+                "sku": "INV-1STBIN", "barcode": "8", "bin_location": None}
+    with patch("app.shopify.lookup_barcode", return_value=dict(FIRSTBIN)), \
+         patch("app.shopify.set_variant_bin"), \
+         patch("app.shopify.product_bin_info",
+               return_value={"variant_count": 1, "easy_bin": None}), \
+         patch("app.shopify.set_product_bin"):
+        r = cl.post("/api/bin-updates",
+                    json={"target": "INV-1STBIN", "bin": "K9-9",
+                          "changed_by": "Nick"})
+    with S(get_engine()) as s:
+        from sqlalchemy import select, func as f
+        made = s.scalars(select(BinMapEntry).where(
+            f.upper(BinMapEntry.sku) == "INV-1STBIN")).all()
+    check("a first-ever bin write creates the product's map row",
+          r.status_code == 201 and len(made) == 1
+          and made[0].bin == "K9-9"
+          and made[0].shopify_variant_id == "gid://v/8", r.text)
+
 print()
 print("FAILED: "+", ".join(fails) if fails else "ALL CHECKS PASSED")
 sys.exit(1 if fails else 0)

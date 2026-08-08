@@ -25,6 +25,18 @@ Nick is running the bins and feeding fixes back same-day. Since v3.21:
   identify is a trigger-armed toggle (v3.27). Tap the scanner input to
   type (v3.25).
 - Inventory tab shows ON-HAND (was "available" — negative on oversells).
+- **Bin backfill (2026-08-08, Nick's ask):** one-off
+  `dev/backfill_bins.py` wrote tag placements to Shopify for every
+  product whose bin was MISSING there — 47 written (0 failed) through
+  the normal audited /api/bin-updates (History receipts by
+  "bin-backfill", undoable). 14 products where Shopify has a
+  DIFFERENT bin were deliberately left for the tab's per-row button
+  (listed in the script's dry run; one has garbage value "F 1 3").
+  Root-cause fix shipped with it: a bin write for a product with no
+  bin-map row now CREATES the row (before, the write looked like a
+  no-op on the Inventory tab until the 6-hour map refresh). The
+  "⇢ Shopify"/verify bin-fix pill was restyled onto the theme's warn
+  tokens — it was hard-coded light-mode amber and glowed in dark mode.
 - **Bin-fix offers (2026-08-07):** a walked batch counts as a deep manual
   check of its shelf, so products it physically handled whose Shopify bin
   disagrees (or is missing) get a "bin ⇢ <bin>" button on their Verify

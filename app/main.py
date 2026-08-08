@@ -1651,6 +1651,21 @@ def update_bin(payload: BinUpdateIn, session: Session = Depends(get_session)):
             keep.other_bins = None
             for extra in map_rows[1:]:
                 session.delete(extra)
+        else:
+            # First bin this product has ever had: it was never in the map
+            # (the map only holds binned variants), so CREATE its row —
+            # otherwise batch pre-seeds and the Inventory tab keep saying
+            # "no Shopify bin" until the next full map refresh, and the
+            # write looks like it did nothing (the bin-backfill lesson).
+            session.add(BinMapEntry(
+                sku=product.get("sku"),
+                barcode=product.get("barcode"),
+                product_title=product.get("product_title"),
+                variant_title=product.get("variant_title"),
+                shopify_variant_id=product.get("shopify_variant_id"),
+                shopify_product_id=product.get("shopify_product_id"),
+                bin=payload.bin,
+            ))
         for tag in session.scalars(
             select(RfidAssignment).where(
                 func.upper(RfidAssignment.sku) == sku.upper()
