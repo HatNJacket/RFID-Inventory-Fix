@@ -1508,6 +1508,18 @@ a { color: var(--accent); }
 .rv-btn--dismiss { background: var(--bad-bg); color: var(--bad-ink); }
 .rv-btn--audit { background: var(--accent-bg, #dbe9ff); color: var(--accent-ink, #1c4d8f); }
 
+/* What-does-this-tag-mean note, shown while a Review filter is active */
+.review-note {
+  margin: 8px 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
 /* event colour editor rows */
 .evcolor-row {
   display: flex;

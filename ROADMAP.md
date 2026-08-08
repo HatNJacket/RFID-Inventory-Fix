@@ -3,6 +3,19 @@
 Source of truth for project status. Updated by Claude each working session.
 Last updated: 2026-08-08.
 
+## 📥 Review tab upgrade — ✅ DEPLOYED 2026-08-08
+
+- **Mismatched Bins**: products whose tags sit on a different shelf
+  than Shopify's bin now appear in Review as LIVE synthetic entries
+  (computed per fetch from assignments vs the bin map, never stored —
+  they clear themselves when either side is fixed). Card offers the
+  audited "bin ⇢ <tags' shelf>" write instead of resolve/dismiss;
+  12 live on prod at ship time (the backfill's differs list).
+- Filtering by type shows a plain-language note under the filter
+  explaining what the tag means and why products land there (all six
+  categories covered).
+- Search bar filters open tasks by SKU, barcode, title, or detail text.
+
 ## 🔫 C72 v3.32: empty bins are an answer — ✅ DEPLOYED 2026-08-08
 
 - NEXT at batch collect now accepts a shelf handled entirely through

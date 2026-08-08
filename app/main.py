@@ -5986,6 +5986,82 @@ def batch_unlinked(
 
 
 # ------------------------------------------------------------ review tasks ---
+def _bin_mismatch_entries(session: Session) -> list[dict]:
+    """LIVE bin disagreements as synthetic Review entries: products whose
+    tags sit at a shelf Shopify's bin value doesn't include. Computed
+    fresh on every fetch and never stored — fixing the bin (writing the
+    tags' shelf to Shopify, or moving the product) clears the entry by
+    itself, so there is nothing to resolve, dismiss, or go stale."""
+    shopify_bin_by_sku: dict = {}
+    barcode_by_sku: dict = {}
+    img_by_sku: dict = {}
+    for sku, bin_, other, barcode, img in session.execute(
+        select(BinMapEntry.sku, BinMapEntry.bin, BinMapEntry.other_bins,
+               BinMapEntry.barcode, BinMapEntry.image_url)
+    ):
+        key = (sku or "").strip().upper()
+        if not key:
+            continue
+        full = ", ".join(x for x in ((bin_ or "").strip(), other) if x)
+        if full:
+            shopify_bin_by_sku.setdefault(key, full)
+        if barcode:
+            barcode_by_sku.setdefault(key, barcode)
+        if img:
+            img_by_sku.setdefault(key, img)
+
+    entries: list[dict] = []
+    for sku, title, tag_bin, n_tags, newest, barcode in session.execute(
+        select(
+            RfidAssignment.sku,
+            func.max(RfidAssignment.product_title),
+            func.max(RfidAssignment.bin_location),
+            func.count(),
+            func.max(RfidAssignment.assigned_at),
+            func.max(RfidAssignment.barcode),
+        )
+        .where(RfidAssignment.sku.isnot(None))
+        .group_by(RfidAssignment.sku)
+    ):
+        key = (sku or "").strip().upper()
+        rfid_bin = (tag_bin or "").strip()
+        saved = shopify_bin_by_sku.get(key)
+        # Only a real DISAGREEMENT counts: both sides have a bin and
+        # Shopify's listing doesn't include the tags' shelf. A missing
+        # Shopify bin is the Inventory tab's "⇢ Shopify" case instead.
+        if (
+            not key
+            or not rfid_bin
+            or rfid_bin in MISSING_BIN_VALUES
+            or not saved
+            or bin_contains(saved, rfid_bin)
+        ):
+            continue
+        entries.append({
+            "id": f"binmm:{key}",
+            "synthetic": True,
+            "category": "bin-mismatch",
+            "status": "open",
+            "sku": sku,
+            "barcode": barcode or barcode_by_sku.get(key),
+            "product_title": title,
+            "detail": (
+                f"{n_tags} tag(s) were placed at {rfid_bin}, but Shopify "
+                f"bins this product at {saved}. Either write {rfid_bin} "
+                f"to Shopify (the tags mark where the boxes really are) "
+                f"or move the boxes to {saved}."
+            ),
+            "tag_bin": rfid_bin,
+            "shopify_bin": saved,
+            "batch_id": None,
+            "created_at": newest.isoformat() if newest else None,
+            "created_by": None,
+            "image_url": img_by_sku.get(key),
+        })
+    entries.sort(key=lambda e: e["created_at"] or "", reverse=True)
+    return entries
+
+
 @app.get("/api/review-tasks", dependencies=[Depends(require_user)])
 def list_review_tasks(
     status: str = "open",
@@ -6011,6 +6087,13 @@ def list_review_tasks(
         d = t.as_dict()
         d["image_url"] = imgs.get((t.sku or "").strip().upper())
         tasks.append(d)
+    # Live bin disagreements ride along with the open inbox (they have no
+    # stored row — see _bin_mismatch_entries).
+    if status in ("open", "all"):
+        try:
+            tasks = _bin_mismatch_entries(session) + tasks
+        except Exception as error:
+            logger.warning("bin-mismatch entries failed: %s", error)
     return {"count": len(tasks), "tasks": tasks}
 
 

@@ -255,6 +255,7 @@ const EVENT_META = {
   "pairing-incomplete": ["Pairing Incomplete", "#d72c0d"],
   "unresolved-barcode": ["Unresolved Barcode", "#d72c0d"],
   "could-not-scan": ["Could Not Scan", "#8a6116"],
+  "bin-mismatch": ["Mismatched Bins", "#0e7a8a"],
   sweep: ["Sweep", "#0e7a8a"],
 };
 
@@ -5891,17 +5892,64 @@ async function loadReview() {
   }
 }
 
+// One plain-language paragraph per task type: what the tag means and why
+// products land under it — shown under the filter while it's active.
+const REVIEW_NOTES = {
+  "inventory-check":
+    "The number of units counted on the shelf during batch tagging " +
+    "didn't match Shopify's on-hand. Nothing was changed anywhere — " +
+    "each of these is a recommendation to go count that product " +
+    "properly (the bin audit's Set-to-N button is the sanctioned fix).",
+  "pairing-incomplete":
+    "Labels were printed for these products but not every label got " +
+    "its RFID tag scanned in. An unpaired label is an orphan sticker — " +
+    "pair it at the Scan Station or reprint before it ends up on a box.",
+  "unresolved-barcode":
+    "These barcodes were scanned during a batch but never matched a " +
+    "product. They were still counted. Link each code to its product " +
+    "at the Scan Station (or fix the barcode in Shopify).",
+  "could-not-scan":
+    "Someone physically couldn't scan these during tagging (damaged " +
+    "box, unreachable shelf, dead label). They were NOT counted — " +
+    "each one still needs identifying and tagging by hand.",
+  "bin-check":
+    "These bins received stock (receiving) or were manually marked for " +
+    "a check. Each one wants a quick RFID walk-scan of the shelf — the " +
+    "run audit button opens the Audits tab with the bin loaded.",
+  "bin-mismatch":
+    "The RFID tags for these products were physically placed on a " +
+    "different shelf than the bin Shopify has on file. These entries " +
+    "are LIVE — they clear themselves when either side is fixed: write " +
+    "the tags' shelf to Shopify (the boxes are where the tags say), or " +
+    "move the boxes and update the tags. Nothing to dismiss.",
+};
+
 function renderReview() {
   const list = document.getElementById("review-list");
-  const tasks = reviewFilter
-    ? reviewTasks.filter((t) => t.category === reviewFilter)
-    : reviewTasks;
+  const note = document.getElementById("review-filter-note");
+  note.hidden = !(reviewFilter && REVIEW_NOTES[reviewFilter]);
+  note.textContent = REVIEW_NOTES[reviewFilter] || "";
+  const q = document
+    .getElementById("review-search")
+    .value.trim()
+    .toLowerCase();
+  const tasks = reviewTasks.filter(
+    (t) =>
+      (!reviewFilter || t.category === reviewFilter) &&
+      (!q ||
+        (t.sku || "").toLowerCase().includes(q) ||
+        (t.barcode || "").toLowerCase().includes(q) ||
+        (t.product_title || "").toLowerCase().includes(q) ||
+        (t.detail || "").toLowerCase().includes(q))
+  );
   list.innerHTML = "";
   if (!tasks.length) {
     list.innerHTML = `<li class="recent__empty">${
-      reviewFilter
-        ? "No open tasks of that type."
-        : "Inbox zero — nothing needs review."
+      q
+        ? "Nothing matches that search."
+        : reviewFilter
+          ? "No open tasks of that type."
+          : "Inbox zero — nothing needs review."
     }</li>`;
     return;
   }
@@ -5928,8 +5976,13 @@ function renderReview() {
                  title="Open the Audits tab with ${escapeHtml(checkBin[1])} loaded — runs right away if a fresh C72 sweep is waiting">run audit</button>`
             : ""
         }
-        <button class="rv-btn rv-btn--resolve" data-act="resolve" type="button">resolve</button>
-        <button class="rv-btn rv-btn--dismiss" data-act="dismiss" type="button">dismiss</button>
+        ${
+          t.synthetic
+            ? `<button class="binfix rv-setbin" data-act="setbin" type="button"
+                 title="Shopify says ${escapeHtml(t.shopify_bin || "?")}, the tags say ${escapeHtml(t.tag_bin || "?")}. Write ${escapeHtml(t.tag_bin || "?")} to Shopify — the normal audited bin update, undoable from History. (Moved the boxes instead? This entry clears on the next refresh once the bins agree.)">bin ⇢ ${escapeHtml(t.tag_bin || "?")}</button>`
+            : `<button class="rv-btn rv-btn--resolve" data-act="resolve" type="button">resolve</button>
+        <button class="rv-btn rv-btn--dismiss" data-act="dismiss" type="button">dismiss</button>`
+        }
         <span class="auditrow__chev">${open ? "▾" : "▸"}</span>
       </div>` +
       (open
@@ -5989,11 +6042,46 @@ function renderReview() {
         alert(err.message);
       }
     };
-    li.querySelector('[data-act="resolve"]').addEventListener("click", () => act(false));
-    li.querySelector('[data-act="dismiss"]').addEventListener("click", () => act(true));
+    const resolveBtn = li.querySelector('[data-act="resolve"]');
+    if (resolveBtn) resolveBtn.addEventListener("click", () => act(false));
+    const dismissBtn = li.querySelector('[data-act="dismiss"]');
+    if (dismissBtn) dismissBtn.addEventListener("click", () => act(true));
     const auditBtn = li.querySelector('[data-act="audit"]');
     if (auditBtn)
       auditBtn.addEventListener("click", () => jumpToBinAudit(checkBin[1]));
+    // Live bin-mismatch entries: the one-tap fix is the normal audited
+    // bin write; a fixed entry vanishes rather than being "resolved".
+    const setbinBtn = li.querySelector('[data-act="setbin"]');
+    if (setbinBtn)
+      setbinBtn.addEventListener("click", async () => {
+        const operator = operatorEl.value;
+        if (!operator) {
+          alert("Pick who's scanning (top right) first.");
+          return;
+        }
+        if (
+          !confirm(
+            `Set the Shopify bin for ${t.sku} to ${t.tag_bin}?\n\n` +
+              `Shopify currently says: ${t.shopify_bin}. This is the ` +
+              `normal audited bin write — Shopify, the bin map and this ` +
+              `product's tags all follow, with a History entry.`
+          )
+        )
+          return;
+        setbinBtn.disabled = true;
+        try {
+          await postJson("/api/bin-updates", {
+            target: t.sku,
+            bin: t.tag_bin,
+            changed_by: operator,
+          });
+          reviewTasks = reviewTasks.filter((x) => x.id !== t.id);
+          renderReview();
+        } catch (err) {
+          setbinBtn.disabled = false;
+          alert(err.message);
+        }
+      });
     list.append(li);
   });
 }
@@ -6002,6 +6090,8 @@ document.getElementById("review-filter").addEventListener("change", (e) => {
   reviewFilter = e.target.value;
   renderReview();
 });
+
+document.getElementById("review-search").addEventListener("input", renderReview);
 
 // Looping ". .. ..." on a button while a slow refresh runs — proof of
 // life, not progress. Returns a stop function that restores the label.

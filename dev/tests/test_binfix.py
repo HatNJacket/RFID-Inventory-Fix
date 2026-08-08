@@ -119,6 +119,19 @@ with patch("app.shopify.lookup_barcode", return_value=None), \
           "agreement", prods["INV-3"]["bin_differs"] is False,
           prods.get("INV-3"))
 
+    # Review inbox: live "Mismatched Bins" entries ride along — the
+    # disagreeing product only, synthetic, with both bins named.
+    rv = cl.get("/api/review-tasks?status=open").json()["tasks"]
+    mms = {t["sku"]: t for t in rv if t["category"] == "bin-mismatch"}
+    check("Review lists the live bin disagreement",
+          "INV-1" in mms and mms["INV-1"]["synthetic"] is True, mms)
+    check("the entry names both shelves",
+          mms.get("INV-1", {}).get("tag_bin") == "K4-1"
+          and mms.get("INV-1", {}).get("shopify_bin") == "J2-2",
+          mms.get("INV-1"))
+    check("agreement and split-shelf agreement stay OUT of Review",
+          "INV-2" not in mms and "INV-3" not in mms, sorted(mms))
+
     # A bin write for a product with NO map row must CREATE one — without
     # it the Inventory tab keeps offering "⇢ Shopify" until the next full
     # map refresh, and the write looks like a no-op (bin-backfill lesson).

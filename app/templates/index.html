@@ -789,7 +789,11 @@
         <select id="review-filter" class="operator" title="Show only one kind of task">
           <option value="">All types</option>
         </select>
+        <input id="review-search" class="recent__search" type="search"
+               placeholder="Search SKU or barcode…" autocomplete="off" />
       </div>
+      <!-- What the selected task type means — shown while a filter is on -->
+      <p class="review-note" id="review-filter-note" hidden></p>
       <ul class="recent__list" id="review-list"></ul>
     </section>
 
