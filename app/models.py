@@ -653,6 +653,28 @@ class FlaggedBin(Base):
     )
 
 
+class BundleContent(Base):
+    """What ONE unit of a bundle SKU physically contains — e.g. the
+    W9184B bundle-of-10 is 10 × W9184B, nothing else on the shelf. Set
+    once per bundle, used everywhere: batch collect stops listing the
+    bundle as its own countable product (the component count covers it),
+    and the could-not-scan desk flow can offer the components to tag."""
+
+    __tablename__ = "rfid_bundle_contents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bundle_sku: Mapped[str] = mapped_column(String(100), index=True,
+                                            nullable=False)
+    component_sku: Mapped[str] = mapped_column(String(100), nullable=False)
+    qty: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    def as_dict(self) -> dict:
+        return {
+            "component_sku": self.component_sku,
+            "qty": self.qty,
+        }
+
+
 class ReviewNote(Base):
     """Operator notes pinned to a Review entry. Keyed by STRING so notes
     stick to both stored tasks (their integer id as text) and the live

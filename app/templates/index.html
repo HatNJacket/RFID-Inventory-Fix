@@ -878,6 +878,13 @@
           <span class="kindrow__what" id="phist-kind-what"></span>
           <button class="reset" id="phist-kind-restore" type="button" title="Hand this product back to automatic detection">Put it back / detect automatically</button>
         </div>
+        <!-- Bundle contents: what ONE unit of this SKU physically contains.
+             Defined bundles stop being separately countable in batch collect
+             (the component count covers them). -->
+        <div class="kindrow" id="phist-bundle" style="margin-bottom:10px">
+          <span class="kindrow__what" id="phist-bundle-what"></span>
+          <button class="reset" id="phist-bundle-btn" type="button"></button>
+        </div>
         <div id="phist-serial" hidden>
           <p class="linkbox__extra-label" id="phist-label-hint">Edit the two label lines — saved store-wide, every future print uses them:</p>
           <div class="labeledit">

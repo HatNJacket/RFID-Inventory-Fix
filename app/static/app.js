@@ -257,6 +257,7 @@ const EVENT_META = {
   "could-not-scan": ["Could Not Scan", "#8a6116"],
   "bin-mismatch": ["Mismatched Bins", "#0e7a8a"],
   "tags-rebinned": ["Tags Re-binned", "#0e7a8a"],
+  "bundle-contents-set": ["Bundle Contents", "#6f42c1"],
   sweep: ["Sweep", "#0e7a8a"],
 };
 
@@ -3067,10 +3068,24 @@ async function startBatch() {
     batchItems = batch.items || [];
     bEl.bin.value = "";
     openBatchView("collect");
+    // Bundles with defined contents are held out of the count on purpose:
+    // their boxes ARE the component's boxes, so the note says which
+    // listings the component counts already cover.
+    const covered = (batch.covered_bundles || [])
+      .map(
+        (c) =>
+          `${c.sku} (= ${c.contents
+            .map((x) => `${x.qty}× ${x.component_sku}`)
+            .join(" + ")})`
+      )
+      .join(", ");
     setBatchResult(
-      batchItems.length
+      (batchItems.length
         ? `${batchItems.length} product(s) expected in bin ${batch.bin_name} — start scanning boxes.`
-        : `Nothing on file for bin ${batch.bin_name} — scan boxes and they'll be added.`,
+        : `Nothing on file for bin ${batch.bin_name} — scan boxes and they'll be added.`) +
+        (covered
+          ? ` 📦 ${batch.covered_bundles.length} bundle listing(s) covered by their components — no separate count needed: ${covered}.`
+          : ""),
       "ok"
     );
   } catch (err) {
@@ -6288,9 +6303,12 @@ function openResolveWindow(t) {
       </button>`;
   } else {
     // could-not-scan, legacy unresolved-barcode, anything else: the Scan
-    // Station is where identifying/tagging/linking happens.
+    // Station is where identifying/tagging/linking happens. Bundles get
+    // their component list (or the one-time contents setup) injected
+    // into the actions slot once the context answers.
     middle = `
       <div class="recent__meta" id="rvw-liveline" style="margin-bottom:8px"></div>
+      <div id="rvw-actions"></div>
       <button class="reset rvw-wide" id="rvw-station" type="button">Open at the Scan Station</button>`;
   }
 
@@ -6515,6 +6533,7 @@ async function loadResolveContext(t, counted) {
     } else if (t.category === "could-not-scan") {
       if (ctx.units_on_file != null)
         line.textContent = `The RFID system now holds ${ctx.units_on_file} unit(s) for this SKU${ctx.units_on_file > 0 ? " — if that covers this box, resolve below." : "."}`;
+      if (ctx.kind === "bundle") renderBundleActions(t, ctx);
     } else if (t.category === "bin-check") {
       line.textContent = ctx.latest_sweep_at
         ? `Newest C72 sweep: ${fmtAgo(ctx.latest_sweep_at)} from ${ctx.latest_sweep_device || "the gun"}.`
@@ -6523,6 +6542,95 @@ async function loadResolveContext(t, counted) {
   } catch (err) {
     if (line) line.textContent = "";
   }
+}
+
+// Bundles in the could-not-scan window: bundles are never tagged — their
+// COMPONENTS are. With contents defined (once, reused forever) the window
+// offers each component at the Scan Station; without, it offers the setup.
+function renderBundleActions(t, ctx) {
+  const slot = document.getElementById("rvw-actions");
+  if (!slot) return;
+  const contents = ctx.bundle_contents || [];
+  if (contents.length) {
+    slot.innerHTML =
+      `<div class="recent__meta" style="margin-bottom:6px">This is a
+       bundle — bundles aren't tagged, their components are. One bundle
+       contains:</div>` +
+      contents
+        .map(
+          (c, i) =>
+            `<button class="reset rvw-wide" data-comp="${i}" type="button">Tag ${c.qty}× ${escapeHtml(c.component_sku)} at the Scan Station</button>`
+        )
+        .join("") +
+      `<div class="recent__meta" style="margin:2px 0 8px"><a href="#" id="rvw-bundle-edit">Edit bundle contents…</a></div>`;
+    slot.querySelectorAll("[data-comp]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        const c = contents[Number(btn.dataset.comp)];
+        closeResolveWindow();
+        document.querySelector('.tabs__tab[data-tab="scan"]').click();
+        el.barcode.value = c.component_sku;
+        stationBarcodeScan(c.component_sku);
+      })
+    );
+    slot
+      .querySelector("#rvw-bundle-edit")
+      .addEventListener("click", (ev) => {
+        ev.preventDefault();
+        renderBundleSetup(t, slot, contents);
+      });
+  } else {
+    renderBundleSetup(t, slot, []);
+  }
+}
+
+function renderBundleSetup(t, slot, existing) {
+  const prefill = existing
+    .map((c) => `${c.component_sku} x ${c.qty}`)
+    .join(", ");
+  slot.innerHTML = `
+    <div class="recent__meta" style="margin-bottom:6px">${
+      existing.length
+        ? "Edit what one bundle contains"
+        : "This looks like a bundle. Define what ONE bundle contains — set once, used everywhere (batch collect stops counting it separately)."
+    }</div>
+    <div class="rv-notes__add" style="margin:0 0 8px">
+      <input class="rv-notein" id="rvw-bundle-in" type="text"
+             placeholder="e.g. W9184B x 10, 51701-1 x 3"
+             value="${escapeHtml(prefill)}" />
+      <button class="reset" id="rvw-bundle-save" type="button">Save contents</button>
+    </div>`;
+  document
+    .getElementById("rvw-bundle-save")
+    .addEventListener("click", async () => {
+      const raw = document.getElementById("rvw-bundle-in").value.trim();
+      const contents = [];
+      for (const part of raw.split(",")) {
+        if (!part.trim()) continue;
+        const m = /^(.+?)\s*[x×]\s*(\d+)$/i.exec(part.trim());
+        if (!m) {
+          alert(
+            `Couldn't read "${part.trim()}" — write each piece as ` +
+              `SKU x QTY, separated by commas.`
+          );
+          return;
+        }
+        contents.push({ component_sku: m[1].trim(), qty: Number(m[2]) });
+      }
+      if (!contents.length) {
+        alert("Nothing to save — write at least one SKU x QTY.");
+        return;
+      }
+      try {
+        const r = await postJson("/api/bundle-contents", {
+          bundle_sku: t.sku,
+          contents,
+          updated_by: operatorEl.value || null,
+        });
+        renderBundleActions(t, { bundle_contents: r.contents });
+      } catch (err) {
+        alert(err.message);
+      }
+    });
 }
 
 document.getElementById("review-filter").addEventListener("change", (e) => {
@@ -7232,6 +7340,7 @@ async function openProductHistory(term) {
       updateLabelPreview();
     }
     renderNoScan(!!data.rfid_incompatible);
+    renderBundleRow();
     // Multi-box/bundle standing. Only shown when an answer was actually
     // saved — an auto-detected product has nothing to undo.
     const kindBox = document.getElementById("phist-kind");
@@ -7392,6 +7501,86 @@ function renderNoScan(flagged) {
     ? "Remove flag"
     : "Flag: won't RFID scan";
 }
+
+// Bundle contents on the product panel — the standing record behind
+// "63 W9184B covers the bundle-of-10 and bundle-of-5 listings". Defined
+// bundles leave batch collect's countable list; the could-not-scan desk
+// flow offers their components.
+async function renderBundleRow() {
+  const row = document.getElementById("phist-bundle");
+  if (!phistData || !phistData.sku) {
+    row.hidden = true;
+    return;
+  }
+  row.hidden = false;
+  const what = document.getElementById("phist-bundle-what");
+  const btn = document.getElementById("phist-bundle-btn");
+  what.textContent = "…";
+  btn.textContent = "";
+  try {
+    const r = await apiJson(
+      `/api/bundle-contents?sku=${encodeURIComponent(phistData.sku)}`
+    );
+    const contents = r.contents || [];
+    phistData.bundle_contents = contents;
+    if (contents.length) {
+      what.innerHTML =
+        `📦 <b>Bundle:</b> one unit = ${contents
+          .map((c) => `${c.qty}× ${escapeHtml(c.component_sku)}`)
+          .join(" + ")} — batch collect counts the components instead.`;
+      btn.textContent = "Edit contents…";
+    } else {
+      what.textContent =
+        "Sold as a bundle of other products? Define its contents once " +
+        "and batch collect stops counting it separately.";
+      btn.textContent = "📦 Define bundle contents…";
+    }
+  } catch (err) {
+    row.hidden = true;
+  }
+}
+
+document
+  .getElementById("phist-bundle-btn")
+  .addEventListener("click", async () => {
+    if (!phistData || !phistData.sku) return;
+    const existing = (phistData.bundle_contents || [])
+      .map((c) => `${c.component_sku} x ${c.qty}`)
+      .join(", ");
+    const raw = prompt(
+      `What does ONE unit of ${phistData.sku} contain?\n\n` +
+        `Write each piece as SKU x QTY, separated by commas — e.g.\n` +
+        `W9184B x 10   or   51701-1 x 3, 51701-2 x 1\n\n` +
+        `(Leave empty and press OK to clear — the bundle becomes ` +
+        `countable again.)`,
+      existing
+    );
+    if (raw === null) return;
+    const contents = [];
+    for (const part of raw.split(",")) {
+      if (!part.trim()) continue;
+      const m = /^(.+?)\s*[x×]\s*(\d+)$/i.exec(part.trim());
+      if (!m) {
+        alert(
+          `Couldn't read "${part.trim()}" — write each piece as SKU x QTY.`
+        );
+        return;
+      }
+      contents.push({ component_sku: m[1].trim(), qty: Number(m[2]) });
+    }
+    const msg = document.getElementById("phist-msg");
+    try {
+      const r = await postJson("/api/bundle-contents", {
+        bundle_sku: phistData.sku,
+        contents,
+        updated_by: operatorEl.value || null,
+      });
+      msg.textContent = r.message;
+      renderBundleRow();
+    } catch (err) {
+      msg.textContent = err.message;
+    }
+  });
 
 document
   .getElementById("phist-norfid-btn")

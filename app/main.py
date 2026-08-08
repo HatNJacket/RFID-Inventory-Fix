@@ -40,6 +40,7 @@ from app.models import (
     Batch,
     BatchItem,
     BinMapEntry,
+    BundleContent,
     CaseCode,
     EpcCapture,
     FlaggedBin,
@@ -3377,8 +3378,27 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
         ):
             sp_by_sku.setdefault(sp.sku, sp)
 
+    # Bundles with DEFINED contents aren't countable products: their boxes
+    # ARE the component's boxes (63 W9184B on the shelf covers the
+    # bundle-of-10 and bundle-of-5 listings by arithmetic). They're held
+    # out of the seed and reported as covered instead of demanding scans.
+    bundle_map: dict[str, list[dict]] = {}
+    seed_skus = [p["sku"] for p in expected if p.get("sku")]
+    if seed_skus:
+        for bc in session.scalars(
+            select(BundleContent).where(
+                func.upper(BundleContent.bundle_sku).in_(
+                    [s.upper() for s in seed_skus]
+                )
+            ).order_by(BundleContent.id)
+        ):
+            bundle_map.setdefault(
+                bc.bundle_sku.upper(), []
+            ).append(bc.as_dict())
+
     items = []
     dropped: list[str] = []
+    covered: list[dict] = []
     for p in expected:
         sp = sp_by_sku.get(p.get("sku") or "")
         # The whole bin metafield, not just this shelf: counting box slots
@@ -3393,6 +3413,14 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
         # box to tag — seeding them would just re-raise a settled question.
         if excluded:
             dropped.append(p.get("sku") or "")
+            continue
+        contents = bundle_map.get((p.get("sku") or "").upper())
+        if contents:
+            covered.append({
+                "sku": p.get("sku"),
+                "product_title": p.get("product_title"),
+                "contents": contents,
+            })
             continue
         items.append(BatchItem(
             batch_id=batch.id,
@@ -3425,6 +3453,7 @@ def create_batch(payload: BatchIn, session: Session = Depends(get_session)):
         session.refresh(item)
     result = batch.as_dict()
     result["items"] = [i.as_dict() for i in items]
+    result["covered_bundles"] = covered
     return result
 
 
@@ -4212,6 +4241,102 @@ def set_product_kind(
     return {
         "sku": sku, "kind": row.kind, "excluded": row.excluded,
         "message": message,
+    }
+
+
+def _bundle_contents(session: Session, sku: str | None) -> list[dict]:
+    if not sku or not sku.strip():
+        return []
+    return [
+        r.as_dict() for r in session.scalars(
+            select(BundleContent).where(
+                func.upper(BundleContent.bundle_sku) == sku.strip().upper()
+            ).order_by(BundleContent.id)
+        )
+    ]
+
+
+class BundleContentsIn(BaseModel):
+    """Replace a bundle's contents wholesale. The SKU travels in the body
+    (bundle SKUs contain '+', which path segments mangle). An empty
+    contents list clears the record — the bundle becomes countable
+    again."""
+
+    bundle_sku: str = Field(min_length=1, max_length=100)
+    contents: list[dict] = Field(default_factory=list, max_length=20)
+    updated_by: str | None = Field(default=None, max_length=100)
+
+
+@app.get("/api/bundle-contents", dependencies=[Depends(require_user)])
+def get_bundle_contents(
+    sku: str, session: Session = Depends(get_session)
+):
+    return {"bundle_sku": sku, "contents": _bundle_contents(session, sku)}
+
+
+@app.post(
+    "/api/bundle-contents",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def set_bundle_contents(
+    payload: BundleContentsIn, session: Session = Depends(get_session)
+):
+    sku = payload.bundle_sku.strip()
+    rows = []
+    for c in payload.contents:
+        comp = str(c.get("component_sku") or "").strip()
+        try:
+            qty = int(c.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if not comp or qty < 1:
+            raise HTTPException(
+                422, "Each content line needs a component SKU and a "
+                     "quantity of at least 1."
+            )
+        rows.append((comp, qty))
+    before = _bundle_contents(session, sku)
+    for old in session.scalars(
+        select(BundleContent).where(
+            func.upper(BundleContent.bundle_sku) == sku.upper()
+        )
+    ):
+        session.delete(old)
+    for comp, qty in rows:
+        session.add(BundleContent(
+            bundle_sku=sku, component_sku=comp, qty=qty
+        ))
+    # A defined bundle IS a bundle — settle the kind question too, so the
+    # Check step stops asking (the operator can still override later).
+    if rows:
+        pk = session.get(ProductKind, sku)
+        if pk is None:
+            session.add(ProductKind(sku=sku, kind="bundle",
+                                    updated_by=payload.updated_by))
+        elif pk.kind != "bundle":
+            pk.kind = "bundle"
+            pk.updated_by = payload.updated_by
+            pk.updated_at = datetime.now(timezone.utc)
+    fmt = lambda items: ", ".join(  # noqa: E731
+        f"{i['qty']}× {i['component_sku']}" for i in items) or "(none)"
+    session.add(BarcodeChange(
+        sku=sku,
+        changed_field="bundle-contents",
+        old_barcode=fmt(before)[:64] or None,
+        new_barcode=fmt([{"component_sku": c, "qty": q}
+                         for c, q in rows])[:64],
+        changed_by=payload.updated_by,
+    ))
+    session.commit()
+    return {
+        "bundle_sku": sku,
+        "contents": _bundle_contents(session, sku),
+        "message": (
+            f"{sku} = {fmt([{'component_sku': c, 'qty': q} for c, q in rows])}"
+            + " — batch collect now counts the components instead."
+            if rows else f"{sku} contents cleared — countable again."
+        ),
     }
 
 
@@ -6347,6 +6472,14 @@ def review_task_context(
             ctx["labels_total"] = item.qty_scanned + item.case_count
     elif task.category == "could-not-scan" and sku:
         ctx["units_on_file"] = _tag_units_for_sku(session, sku)
+        # The desk-sort flow: bundles offer their components to tag
+        # (defined once, reused); an undefined bundle offers the setup.
+        kind, _ = resolve_product_kind(
+            session, task.product_title, sku, None
+        )
+        contents = _bundle_contents(session, sku)
+        ctx["kind"] = "bundle" if contents else kind
+        ctx["bundle_contents"] = contents
     elif task.category == "bin-check":
         cap = session.scalar(
             select(EpcCapture).order_by(EpcCapture.id.desc()).limit(1)
@@ -6674,6 +6807,7 @@ def product_history(term: str, session: Session = Depends(get_session)):
     change_types = {
         "barcode": "barcode-replaced", "sku": "sku-updated",
         "bin": "bin-updated", "bin-local": "tags-rebinned",
+        "bundle-contents": "bundle-contents-set",
         "rfid-scan": "rfid-flag-changed",
         "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
         "tagged-before": "already-tagged-set",
@@ -6909,6 +7043,7 @@ def history(
     change_types = {
         "barcode": "barcode-replaced", "sku": "sku-updated",
         "bin": "bin-updated", "bin-local": "tags-rebinned",
+        "bundle-contents": "bundle-contents-set",
         "rfid-scan": "rfid-flag-changed",
         "on-hand": "on-hand-updated", "on-hand-undo": "on-hand-undone",
         "tagged-before": "already-tagged-set",

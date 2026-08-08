@@ -3,6 +3,32 @@
 Source of truth for project status. Updated by Claude each working session.
 Last updated: 2026-08-08.
 
+## 📦 Bundle contents — ✅ DEPLOYED 2026-08-08 (the W9184B case)
+
+One record answers two problems: rfid_bundle_contents stores what ONE
+unit of a bundle SKU physically contains (e.g. bundle-of-10 = 10 ×
+W9184B). Set once, used everywhere:
+- **Batch collect** holds defined bundles OUT of the countable list —
+  their boxes ARE the component's boxes, so 63 W9184B covers the
+  bundle-of-10/-of-5 listings by arithmetic. The start-batch note names
+  what was held out ("📦 N bundle listing(s) covered by their
+  components: …"). Undefined bundles still seed and still get the
+  Check-step bundle flag; excluded bundles unchanged.
+- **Could-not-scan resolve window** (the 51701 rings): recognizes
+  bundles, lists their components with "Tag N× SKU at the Scan Station"
+  buttons (prefilled — print labels, BULK-sweep, back in the bin), and
+  offers the one-time contents setup inline when undefined ("SKU x QTY,
+  SKU x QTY" format).
+- **Product panel** gains a bundle-contents row on every product:
+  define/edit/clear via a prompt; defining also settles the product
+  kind to bundle; clearing makes it countable again. Every change
+  writes a History receipt ("Bundle Contents").
+- Endpoints: GET/POST /api/bundle-contents (SKU in body — bundle SKUs
+  carry "+"). New table auto-creates. test_bundles (10 checks), 18/18.
+- What one bundle listing's own Shopify on-hand should BE given the
+  component count (6 = 63 div 10) is display math for the audit
+  revisit, not written anywhere today.
+
 ## 📥 Review resolve windows + notes — ✅ DEPLOYED 2026-08-08
 
 Plan approved by Nick (category by category), then built same day:
