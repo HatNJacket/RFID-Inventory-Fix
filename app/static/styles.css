@@ -1508,6 +1508,10 @@ a { color: var(--accent); }
 .rv-btn--dismiss { background: var(--bad-bg); color: var(--bad-ink); }
 .rv-btn--audit { background: var(--accent-bg, #dbe9ff); color: var(--accent-ink, #1c4d8f); }
 
+/* Review head: the type filter and search box hug the right edge
+   together instead of the filter floating in the middle. */
+#review-filter { margin-left: auto; }
+
 /* What-does-this-tag-mean note, shown while a Review filter is active */
 .review-note {
   margin: 8px 0 10px;
