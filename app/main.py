@@ -4296,6 +4296,18 @@ def set_bundle_contents(
                      "quantity of at least 1."
             )
         rows.append((comp, qty))
+    return _write_bundle_contents(session, sku, rows, payload.updated_by)
+
+
+def _write_bundle_contents(
+    session: Session,
+    sku: str,
+    rows: list[tuple[str, int]],
+    updated_by: str | None,
+) -> dict:
+    """Replace a bundle's contents (shared by manual entry and the
+    Shopify import): rewrites the rows, settles the product kind, and
+    leaves the History receipt."""
     before = _bundle_contents(session, sku)
     for old in session.scalars(
         select(BundleContent).where(
@@ -4313,10 +4325,10 @@ def set_bundle_contents(
         pk = session.get(ProductKind, sku)
         if pk is None:
             session.add(ProductKind(sku=sku, kind="bundle",
-                                    updated_by=payload.updated_by))
+                                    updated_by=updated_by))
         elif pk.kind != "bundle":
             pk.kind = "bundle"
-            pk.updated_by = payload.updated_by
+            pk.updated_by = updated_by
             pk.updated_at = datetime.now(timezone.utc)
     fmt = lambda items: ", ".join(  # noqa: E731
         f"{i['qty']}× {i['component_sku']}" for i in items) or "(none)"
@@ -4326,7 +4338,7 @@ def set_bundle_contents(
         old_barcode=fmt(before)[:64] or None,
         new_barcode=fmt([{"component_sku": c, "qty": q}
                          for c, q in rows])[:64],
-        changed_by=payload.updated_by,
+        changed_by=updated_by,
     ))
     session.commit()
     return {
@@ -4338,6 +4350,52 @@ def set_bundle_contents(
             if rows else f"{sku} contents cleared — countable again."
         ),
     }
+
+
+class BundleImportIn(BaseModel):
+    """Pull a bundle's components straight from Shopify (the Shopify
+    Bundles / Bundles.app relationship) instead of typing them."""
+
+    sku: str = Field(min_length=1, max_length=100)
+    updated_by: str | None = Field(default=None, max_length=100)
+
+
+@app.post(
+    "/api/bundle-contents/import",
+    status_code=201,
+    dependencies=[Depends(require_user)],
+)
+def import_bundle_contents(
+    payload: BundleImportIn, session: Session = Depends(get_session)
+):
+    if config.check_shopify_env():
+        raise HTTPException(500, "Shopify credentials are not configured.")
+    sku = payload.sku.strip()
+    try:
+        product = _lookup_api(sku)
+    except RuntimeError as error:
+        raise HTTPException(502, f"Shopify lookup failed: {error}")
+    if product is None or not product.get("shopify_variant_id"):
+        raise HTTPException(404, f"No Shopify product found for {sku}.")
+    try:
+        components = shopify.get_bundle_components(
+            product["shopify_variant_id"]
+        )
+    except RuntimeError as error:
+        raise HTTPException(502, f"Bundle component fetch failed: {error}")
+    if not components:
+        raise HTTPException(
+            404,
+            f"Shopify holds no bundle components for {sku} — it isn't a "
+            f"native bundle (or wasn't built with the Bundles app). "
+            f"Define the contents by hand instead.",
+        )
+    return _write_bundle_contents(
+        session,
+        sku,
+        [(c["component_sku"], c["qty"]) for c in components],
+        payload.updated_by,
+    )
 
 
 class ItemKindIn(BaseModel):

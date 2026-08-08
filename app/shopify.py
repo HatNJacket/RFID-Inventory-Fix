@@ -5,6 +5,7 @@ that nothing prints. Functions return Python objects; the web layer decides
 how to present them. The barcode query and the stock.bin -> my_fields
 fallback are copied verbatim from your working script.
 """
+import json
 import time
 
 import requests
@@ -519,6 +520,73 @@ def get_stock_info_by_skus(skus: list[str]) -> dict[str, dict]:
                 "bin": (bin_value or "").strip(),
             }
     return result
+
+
+_BUNDLE_COMPONENTS_QUERY = """
+query bundleComponents($id: ID!) {
+  productVariant(id: $id) {
+    productVariantComponents(first: 25) {
+      nodes {
+        quantity
+        productVariant { sku }
+      }
+    }
+    bundlesApp: metafield(namespace: "bundles_app", key: "content") {
+      value
+    }
+    product {
+      bundleComponents(first: 25) {
+        nodes {
+          quantity
+          componentVariants(first: 1) { nodes { sku } }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def get_bundle_components(variant_gid: str) -> list[dict]:
+    """Component SKUs + quantities for a bundle listing, from whichever
+    record the store actually has (checked in this order):
+    1. variant-level productVariantComponents — Shopify's fixed bundles;
+    2. the Bundles.app variant metafield bundles_app.content, a public
+       JSON list of {sku, quantity, ...} (what THIS store uses);
+    3. product-level bundleComponents.
+    Answers [{"component_sku": ..., "qty": ...}]; empty = no readable
+    bundle relationship anywhere."""
+    data = query_shopify(_BUNDLE_COMPONENTS_QUERY, {"id": variant_gid})
+    variant = data.get("productVariant") or {}
+    out = []
+    for n in ((variant.get("productVariantComponents") or {})
+              .get("nodes") or []):
+        sku = ((n.get("productVariant") or {}).get("sku") or "").strip()
+        qty = int(n.get("quantity") or 0)
+        if sku and qty > 0:
+            out.append({"component_sku": sku, "qty": qty})
+    if out:
+        return out
+    raw = ((variant.get("bundlesApp") or {}).get("value") or "").strip()
+    if raw:
+        try:
+            for entry in json.loads(raw):
+                sku = str(entry.get("sku") or "").strip()
+                qty = int(entry.get("quantity") or 0)
+                if sku and qty > 0:
+                    out.append({"component_sku": sku, "qty": qty})
+        except (ValueError, TypeError, AttributeError):
+            pass  # malformed app data — fall through to the last shape
+    if out:
+        return out
+    product = variant.get("product") or {}
+    for n in ((product.get("bundleComponents") or {}).get("nodes") or []):
+        nodes = ((n.get("componentVariants") or {}).get("nodes") or [])
+        sku = (nodes[0].get("sku") or "").strip() if nodes else ""
+        qty = int(n.get("quantity") or 0)
+        if sku and qty > 0:
+            out.append({"component_sku": sku, "qty": qty})
+    return out
 
 
 def get_on_hand_by_skus(skus: list[str]) -> dict[str, int]:

@@ -236,6 +236,10 @@ _sh.set_product_bin = (
 _sh.fetch_all_variant_bins = lambda: []
 _sh.get_stock_info_by_skus = lambda skus: {}
 _sh.get_quantities_by_skus = lambda skus: {}
+# Native-bundle components (the Shopify Bundles / Bundles.app import):
+# the MISMATCH-1 demo product answers as a bundle of 4 × NORMAL-1.
+_sh.get_bundle_components = lambda gid: (
+    [{"component_sku": "NORMAL-1", "qty": 4}] if gid == "t:MM" else [])
 
 # Fake TC-Planner bridge: NORMAL-1 sits on an open PO so the on-order
 # hint shows on both the Scan Station card and receiving collect.

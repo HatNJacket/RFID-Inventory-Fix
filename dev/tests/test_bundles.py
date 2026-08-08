@@ -117,6 +117,52 @@ with patch("app.shopify.lookup_barcode", return_value=None), \
     check("completing skips count-mismatch for a defined 0-count bundle",
           ("inventory-check", "W9184B-B5") not in cats, cats)
 
+    # ---- import straight from Shopify (the Bundles.app relationship) ---
+    BUNDLE_PROD = {"shopify_variant_id": "gid://v/b3",
+                   "shopify_product_id": "gid://p/b3",
+                   "product_title": "BUNDLE: Antlia 3nm x3",
+                   "variant_title": None, "sku": "W9184B-B3",
+                   "barcode": None, "bin_location": None}
+    with patch("app.shopify.lookup_barcode",
+               return_value=dict(BUNDLE_PROD)), \
+         patch("app.shopify.get_bundle_components",
+               return_value=[{"component_sku": "W9184B", "qty": 3}]):
+        r = cl.post("/api/bundle-contents/import",
+                    json={"sku": "W9184B-B3", "updated_by": "Nick"})
+    check("import writes the components Shopify holds",
+          r.status_code == 201
+          and r.json()["contents"] == [{"component_sku": "W9184B",
+                                        "qty": 3}], r.text)
+    with patch("app.shopify.lookup_barcode",
+               return_value=dict(BUNDLE_PROD)), \
+         patch("app.shopify.get_bundle_components", return_value=[]):
+        r = cl.post("/api/bundle-contents/import",
+                    json={"sku": "W9184B-B3"})
+    check("a non-bundle import answers 404 with hand-entry advice",
+          r.status_code == 404 and "by hand" in r.json()["detail"], r.text)
+
+    # ---- the parser reads all three Shopify shapes ---------------------
+    import app.shopify as sh
+    def shapes(payload):
+        with patch("app.shopify.query_shopify",
+                   return_value={"productVariant": payload}):
+            return sh.get_bundle_components("gid://v/x")
+    check("shape 1: native variant components",
+          shapes({"productVariantComponents": {"nodes": [
+              {"quantity": 2, "productVariant": {"sku": "A"}}]}})
+          == [{"component_sku": "A", "qty": 2}], None)
+    check("shape 2: the Bundles.app metafield (this store's case)",
+          shapes({"bundlesApp": {"value":
+              '[{"sku": "W9184B", "quantity": 10, "variant_id": 1}]'}})
+          == [{"component_sku": "W9184B", "qty": 10}], None)
+    check("shape 3: product-level bundle components",
+          shapes({"product": {"bundleComponents": {"nodes": [
+              {"quantity": 3,
+               "componentVariants": {"nodes": [{"sku": "B"}]}}]}}})
+          == [{"component_sku": "B", "qty": 3}], None)
+    check("malformed app JSON falls through to empty, never raises",
+          shapes({"bundlesApp": {"value": "not json"}}) == [], None)
+
     # ---- clearing restores countability --------------------------------
     r = cl.post("/api/bundle-contents",
                 json={"bundle_sku": "W9184B-B10", "contents": [],

@@ -6598,7 +6598,27 @@ function renderBundleSetup(t, slot, existing) {
              placeholder="e.g. W9184B x 10, 51701-1 x 3"
              value="${escapeHtml(prefill)}" />
       <button class="reset" id="rvw-bundle-save" type="button">Save contents</button>
-    </div>`;
+    </div>
+    <button class="reset rvw-wide" id="rvw-bundle-import" type="button"
+            title="Reads the component list straight from Shopify (the Bundles app relationship) — no typing">⇣ Import contents from Shopify</button>`;
+  document
+    .getElementById("rvw-bundle-import")
+    .addEventListener("click", async () => {
+      const btn = document.getElementById("rvw-bundle-import");
+      btn.disabled = true;
+      btn.textContent = "Asking Shopify…";
+      try {
+        const r = await postJson("/api/bundle-contents/import", {
+          sku: t.sku,
+          updated_by: operatorEl.value || null,
+        });
+        renderBundleActions(t, { bundle_contents: r.contents });
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "⇣ Import contents from Shopify";
+        alert(err.message);
+      }
+    });
   document
     .getElementById("rvw-bundle-save")
     .addEventListener("click", async () => {
@@ -7523,22 +7543,47 @@ async function renderBundleRow() {
     );
     const contents = r.contents || [];
     phistData.bundle_contents = contents;
+    const importBtn = document.getElementById("phist-bundle-import");
     if (contents.length) {
       what.innerHTML =
         `📦 <b>Bundle:</b> one unit = ${contents
           .map((c) => `${c.qty}× ${escapeHtml(c.component_sku)}`)
           .join(" + ")} — batch collect counts the components instead.`;
       btn.textContent = "Edit contents…";
+      importBtn.hidden = true;
     } else {
       what.textContent =
         "Sold as a bundle of other products? Define its contents once " +
         "and batch collect stops counting it separately.";
-      btn.textContent = "📦 Define bundle contents…";
+      btn.textContent = "📦 Define by hand…";
+      importBtn.hidden = false;
     }
   } catch (err) {
     row.hidden = true;
   }
 }
+
+document
+  .getElementById("phist-bundle-import")
+  .addEventListener("click", async () => {
+    if (!phistData || !phistData.sku) return;
+    const msg = document.getElementById("phist-msg");
+    const btn = document.getElementById("phist-bundle-import");
+    btn.disabled = true;
+    msg.textContent = "Asking Shopify for the bundle's components…";
+    try {
+      const r = await postJson("/api/bundle-contents/import", {
+        sku: phistData.sku,
+        updated_by: operatorEl.value || null,
+      });
+      msg.textContent = r.message + " (imported from Shopify)";
+      renderBundleRow();
+    } catch (err) {
+      msg.textContent = err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
 document
   .getElementById("phist-bundle-btn")

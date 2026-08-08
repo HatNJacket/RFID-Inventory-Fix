@@ -5,6 +5,20 @@ Last updated: 2026-08-08.
 
 ## 📦 Bundle contents — ✅ DEPLOYED 2026-08-08 (the W9184B case)
 
+**Import from Shopify (same day):** POST /api/bundle-contents/import
+reads a bundle's components straight from the store — no typing.
+shopify.get_bundle_components tries three shapes in order: native
+variant components, **the Bundles.app variant metafield
+`bundles_app.content`** (public JSON — what THIS store uses; found by
+probing W9184Bx10's metafields), and product-level bundleComponents.
+Buttons: product panel "⇣ Import from Shopify" (shown when undefined)
+and the could-not-scan setup. Live-verified on prod: W9184Bx10 import
+answered 10× W9184B from the app's own record. Non-bundles get a clear
+404 pointing at hand entry. The W9184B story end-to-end: the "backwards"
+collect list was a Shopify BIN gap (bins sat on the bundle listings,
+not the single) — the three ratios are defined, the single gets its bin
+via scan-and-move in batch #142.
+
 One record answers two problems: rfid_bundle_contents stores what ONE
 unit of a bundle SKU physically contains (e.g. bundle-of-10 = 10 ×
 W9184B). Set once, used everywhere:
