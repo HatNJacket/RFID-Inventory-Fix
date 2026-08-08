@@ -21,7 +21,7 @@
         {% if not shopify_ready %}
         <span class="pill pill--bad">Shopify not configured: {{ missing_env|join(', ') }}</span>
         {% else %}
-        <span class="pill pill--ok">Shopify connected</span>
+        <span class="pill pill--ok" title="Product lookups and bin writes are talking to the live Shopify store">Shopify connected</span>
         {% endif %}
         {% if not db_ready %}
         <span class="pill pill--warn">No database — assignments won't save</span>
@@ -278,7 +278,7 @@
              when ALLOW_REMOTE_PRINT is on) -->
         <div class="print" id="print-panel" hidden>
           <label class="print__label" for="print-qty">Labels</label>
-          <input id="print-qty" class="print__qty" type="number" min="1" max="100" value="1" />
+          <input id="print-qty" class="print__qty" type="number" min="1" max="100" value="1" inputmode="numeric" />
           <button class="print__btn" id="print-btn" type="button">
             Print &amp; encode RFID labels
           </button>
@@ -301,8 +301,8 @@
         <p class="step__hint">Printed at the top of this product's labels in place of "Telescopes Canada". Match it to what the physical product says.</p>
       </section>
 
-      <!-- STEP 2: rfid -->
-      <section class="step" id="step-rfid" data-step="rfid">
+      <!-- STEP 2: rfid — hidden until a barcode scan loads a product -->
+      <section class="step" id="step-rfid" data-step="rfid" hidden>
         <div class="step__index">2</div>
         <div class="step__body">
           <label class="step__label" for="rfid">Scan RFID tag</label>

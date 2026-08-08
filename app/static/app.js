@@ -446,6 +446,9 @@ function activate(step) {
   const onBarcode = step === "barcode";
   el.stepBarcode.classList.toggle("step--active", onBarcode);
   el.stepRfid.classList.toggle("step--active", !onBarcode);
+  // Step 2 doesn't exist until a barcode scan loads a product — an empty
+  // "Scan RFID tag" box with nothing to pair it to only invites mistakes.
+  el.stepRfid.hidden = onBarcode;
   el.rfid.disabled = onBarcode;
   el.barcode.disabled = !onBarcode;
   (onBarcode ? el.barcode : el.rfid).focus();
@@ -1436,6 +1439,15 @@ function showProduct(p) {
         ? "Shopify"
         : "—") +
     (p.serial_brand ? ` · ${p.serial_brand} serial` : "");
+  el.pSource.title =
+    p.source === "binmap"
+      ? "Live information taken from Shopify"
+      : p.source === "shopify"
+        ? "Looked up directly from the Shopify API just now"
+        : "";
+  // Every fresh barcode starts back at one label — yesterday's big print
+  // run must never silently ride into the next product.
+  el.printQty.value = 1;
   el.productCard.hidden = false;
   el.printPanel.hidden = !printingEnabled;
   updateNoBinWarn(p);
@@ -1542,6 +1554,18 @@ async function loadTags(p) {
 }
 
 // --- Print & encode labels -------------------------------------------------
+// The Labels count: digits only (no e/+/-/., no spinner arrows — CSS kills
+// those), and clicking it selects the whole number so typing replaces it.
+el.printQty.addEventListener("focus", () => el.printQty.select());
+el.printQty.addEventListener("click", () => el.printQty.select());
+el.printQty.addEventListener("keydown", (ev) => {
+  if (["e", "E", "+", "-", "."].includes(ev.key)) ev.preventDefault();
+});
+el.printQty.addEventListener("input", () => {
+  const digits = el.printQty.value.replace(/\D/g, "");
+  if (el.printQty.value !== digits) el.printQty.value = digits;
+});
+
 async function queueLabels(quantity) {
   if (!pendingProduct) return;
   const operator = requireOperator();

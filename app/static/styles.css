@@ -105,17 +105,33 @@ body {
 }
 .brand__name { font-weight: 650; font-size: 16px; letter-spacing: -0.01em; }
 .status { display: flex; gap: 8px; flex-wrap: wrap; }
+/* Header status pills, Shopify-admin style: a quiet hairline badge with
+   a status dot. Healthy state whispers; warnings/alarms keep their tint. */
 .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   font-weight: 550;
-  padding: 4px 10px;
+  padding: 4px 10px 4px 9px;
   border-radius: 999px;
-  background: var(--card-2);
+  background: var(--card);
+  border: 1px solid var(--line);
   color: var(--ink-dim);
 }
-.pill--ok { background: var(--ok-bg); color: var(--ok-ink); }
-.pill--warn { background: var(--warn-bg); color: var(--warn-ink); }
-.pill--bad { background: var(--bad-bg); color: var(--bad-ink); }
+.pill::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-dim);
+  flex: none;
+}
+.pill--ok::before { background: #2f9e6e; }
+.pill--warn { background: var(--warn-bg); color: var(--warn-ink); border-color: transparent; }
+.pill--warn::before { background: var(--warn-ink); }
+.pill--bad { background: var(--bad-bg); color: var(--bad-ink); border-color: transparent; }
+.pill--bad::before { background: var(--bad-ink); }
 
 /* settings dropdown (header) */
 .settings { position: relative; }
@@ -581,6 +597,10 @@ body {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
+/* Digits only, typed: the spinner arrows are gone on purpose. */
+.print__qty { appearance: textfield; -moz-appearance: textfield; }
+.print__qty::-webkit-inner-spin-button,
+.print__qty::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .print__btn {
   font-size: 13px;
   font-weight: 600;
