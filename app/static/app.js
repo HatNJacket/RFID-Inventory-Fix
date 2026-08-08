@@ -65,6 +65,8 @@ const el = {
   autoPrint: document.getElementById("auto-print"),
   autoReset: document.getElementById("auto-reset"),
   requireBin: document.getElementById("require-bin"),
+  warnNobin: document.getElementById("warn-nobin"),
+  printNobin: document.getElementById("print-nobin"),
   prefixSection: document.getElementById("prefix-section"),
   prefixInput: document.getElementById("prefix-input"),
   prefixSave: document.getElementById("prefix-save"),
@@ -125,6 +127,7 @@ el.binInput.addEventListener("keydown", async (event) => {
     }
     pendingProduct.bin_location = bin;
     el.pBin.textContent = bin;
+    updateNoBinWarn(pendingProduct);
     setResult(`Bin set to ${bin} (saved to Shopify).`, "ok");
     closeBinEditor();
     el.rfid.focus();
@@ -142,8 +145,9 @@ el.binInput.addEventListener("blur", () => {
 });
 
 // Station settings (the ⚙ menu): all persisted per device.
-function bindSetting(input, key) {
-  input.checked = localStorage.getItem(key) === "1";
+function bindSetting(input, key, defaultOn = false) {
+  const raw = localStorage.getItem(key);
+  input.checked = raw === null ? defaultOn : raw === "1";
   input.addEventListener("change", () => {
     localStorage.setItem(key, input.checked ? "1" : "0");
   });
@@ -151,6 +155,12 @@ function bindSetting(input, key) {
 bindSetting(el.autoPrint, "autoPrint");
 bindSetting(el.autoReset, "autoReset");
 bindSetting(el.requireBin, "requireBinForAutoPrint");
+// The no-bin print warning starts ON — a silent bin-less label is the
+// kind of surprise you only notice at the shelf.
+bindSetting(el.warnNobin, "warnNoBinOnPrint", true);
+el.warnNobin.addEventListener("change", () => {
+  if (lastShownProduct) updateNoBinWarn(lastShownProduct);
+});
 // (Print-related items are hidden after printingEnabled is computed below.)
 
 // Printing UI shows on printer stations, or everywhere when the server flag
@@ -167,6 +177,7 @@ const printingEnabled =
   localStorage.getItem("printerStation") === "1";
 document.getElementById("auto-print-item").hidden = !printingEnabled;
 document.getElementById("require-bin-item").hidden = !printingEnabled;
+document.getElementById("warn-nobin-item").hidden = !printingEnabled;
 
 // --- Access + identity ------------------------------------------------------
 // Station key: captured once from a ?key=... link, remembered, then sent as
@@ -1427,8 +1438,21 @@ function showProduct(p) {
     (p.serial_brand ? ` · ${p.serial_brand} serial` : "");
   el.productCard.hidden = false;
   el.printPanel.hidden = !printingEnabled;
+  updateNoBinWarn(p);
   loadTags(p);
   loadPlannerHint(p);
+}
+
+// Red "No bin set" beside the Print button: this product's labels would
+// print without a shelf on them. Toggleable in ⚙ (on by default).
+// lastShownProduct tracks the card so flipping the setting re-evaluates
+// live (pendingProduct clears on reset before the card does).
+let lastShownProduct = null;
+function updateNoBinWarn(p) {
+  lastShownProduct = p;
+  const binless =
+    !p || !p.bin_location || p.bin_location === "No bin assigned";
+  el.printNobin.hidden = !(el.warnNobin.checked && binless);
 }
 
 // --- TC-Planner on-order hint ----------------------------------------------

@@ -42,6 +42,12 @@
                 <span class="settings__hint">Hold the label when the product has no bin assigned — set the bin (click its chip) and the label prints.</span>
               </span>
             </label>
+            <label class="settings__item" id="warn-nobin-item">
+              <input type="checkbox" id="warn-nobin" />
+              <span>Red "No bin set" print warning
+                <span class="settings__hint">Shows a red warning beside the Print button when the looked-up product has no bin — its labels would print without a shelf on them.</span>
+              </span>
+            </label>
             <button class="reset" id="evcolor-open" type="button" style="margin-top:8px">🎨 Event colours…</button>
           </div>
         </details>
@@ -276,6 +282,8 @@
           <button class="print__btn" id="print-btn" type="button">
             Print &amp; encode RFID labels
           </button>
+          <span class="print__nobin" id="print-nobin" hidden
+                title="This product has no bin assigned — its labels print without a shelf. Click the bin chip above to set one.">⚠ No bin set</span>
           <span class="print__status" id="print-status"></span>
         </div>
       </section>
