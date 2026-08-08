@@ -93,6 +93,30 @@ with patch("app.shopify.lookup_barcode", return_value=None), \
           and ctx["bundle_contents"] == [{"component_sku": "W9184B",
                                           "qty": 10}], ctx)
 
+    # ---- a batch seeded BEFORE the definition completes clean ----------
+    # (Nick's live case: the open batch already carries the bundle as a
+    # 0-count row — completing must not file a mismatch for it.)
+    r = cl.post("/api/bundle-contents",
+                json={"bundle_sku": "W9184B-B5",
+                      "contents": [{"component_sku": "W9184B", "qty": 5}],
+                      "updated_by": "Nick"})
+    b2 = cl.post("/api/batches",
+                 json={"bin": "D4-2", "created_by": "Nick"}).json()
+    # Sneak the B5 bundle back into this batch as a pre-definition row.
+    from app.models import BatchItem as BI
+    with S(get_engine()) as s:
+        s.add(BI(batch_id=b2["id"], scanned_code="3", resolved=True,
+                 sku="W9184B-B5", barcode="3",
+                 product_title="BUNDLE: Antlia 3nm x5",
+                 qty_scanned=0, paired_count=0, expected_qty=12,
+                 bin_location="D4-2", kind="bundle"))
+        s.commit()
+    done = cl.post(f"/api/batches/{b2['id']}/complete",
+                   json={"created_by": "Nick", "finalize": True}).json()
+    cats = [(t["category"], t["sku"]) for t in done["review_tasks"]]
+    check("completing skips count-mismatch for a defined 0-count bundle",
+          ("inventory-check", "W9184B-B5") not in cats, cats)
+
     # ---- clearing restores countability --------------------------------
     r = cl.post("/api/bundle-contents",
                 json={"bundle_sku": "W9184B-B10", "contents": [],

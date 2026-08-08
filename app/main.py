@@ -5787,6 +5787,12 @@ def batch_complete(
             # already flagged it as a non-blocking note, and completing
             # drops the code exactly as removing it would have.
             continue
+        # Bundles with defined contents never file count mismatches: their
+        # count is ARITHMETIC on the component's count, not a shelf fact
+        # of their own. Matters for batches seeded before the contents
+        # were defined — those still carry the bundle as a 0-count row.
+        if item.sku and _bundle_contents(session, item.sku):
+            continue
         if (
             item.expected_qty is not None
             and _units_on_shelf(item) != item.expected_qty
